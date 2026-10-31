@@ -65,7 +65,9 @@ def _clean_hint(value: str) -> str | None:
         if word.casefold() not in GENERIC_WORDS
         and (len(word) > 1 or word.casefold() in {"a", "i"})
     ]
-    if not words or not any(any(ch.isalpha() for ch in word) for word in words):
+    has_letters = any(any(ch.isalpha() for ch in word) for word in words)
+    has_short_numeric_title = any(re.fullmatch(r"\d{2,4}", word) for word in words)
+    if not words or not (has_letters or has_short_numeric_title):
         return None
 
     hint = " ".join(words).strip()
