@@ -376,18 +376,22 @@ class MetadataEngine:
 
         print("[KafiaNet] Scanning poster repository...", flush=True)
         folders = self.github.list_film_folders()
-        print(f"[KafiaNet] Found {len(folders)} source folders.", flush=True)
+        print(f"[KafiaNet] Found {len(folders)} source/review folders.", flush=True)
         index = self.github.get_json_file("metadata/index.json") or {"schema_version": 1, "items": []}
         old_items = list(index.get("items") or [])
         old_by_folder = {str(row.get("source_folder")): row for row in old_items}
 
+        # Root folders still need their first move even when the older index says
+        # READY. REVIEW folders are retried on later batches until resolved.
         pending = [
             item for item in folders
             if item["folder"] not in old_by_folder
             or old_by_folder[item["folder"]].get("status") == "review"
+            or item.get("source_prefix") == item["folder"]
         ][: max(1, limit)]
 
         records: list[dict[str, Any]] = []
+        item_by_folder = {item["folder"]: item for item in pending}
         total = len(pending)
         print(f"[KafiaNet] Selected {total} pending film(s). Mode={'APPLY' if apply else 'DRY_RUN'}.", flush=True)
         for position, item in enumerate(pending, start=1):
@@ -403,18 +407,17 @@ class MetadataEngine:
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'}",
                 flush=True,
             )
-        projected = list(old_items)
 
-        previous_by_folder = {
-            str(row.get("source_folder")): row
-            for row in projected
-        }
-        stale_output_paths: list[str] = []
+        projected = list(old_items)
+        previous_by_folder = {str(row.get("source_folder")): row for row in projected}
 
         for record in records:
             previous = previous_by_folder.get(record["source"]["folder"])
-            if previous and previous.get("output_path"):
-                stale_output_paths.append(str(previous["output_path"]))
+            original_image_path = (
+                (previous or {}).get("original_image_path")
+                or (previous or {}).get("image_path")
+                or record["source"]["image_path"]
+            )
             projected = [
                 row for row in projected
                 if row.get("source_folder") != record["source"]["folder"]
@@ -423,6 +426,7 @@ class MetadataEngine:
                 {
                     "source_folder": record["source"]["folder"],
                     "image_path": record["source"]["image_path"],
+                    "original_image_path": original_image_path,
                     "tmdb_id": (record.get("tmdb") or {}).get("tmdb_id"),
                     "canonical_folder_name": (record.get("correction") or {}).get("canonical_folder_name"),
                     "status": record["status"],
@@ -437,9 +441,26 @@ class MetadataEngine:
                 by_id.setdefault(str(tmdb_id), []).append(row)
 
         files: dict[str, str] = {}
+        moves: dict[str, dict[str, str]] = {}
         deletes: list[str] = []
+        image_deletes: list[str] = []
         ready_count = review_count = duplicate_count = 0
 
+        def json_filename(record: dict[str, Any], folder: str) -> str:
+            status = record.get("status")
+            correction = record.get("correction") or {}
+            tmdb = record.get("tmdb") or {}
+            if status in {"ready", "duplicate"}:
+                title = correction.get("canonical_folder_name")
+                if not title and tmdb.get("title"):
+                    year = tmdb.get("year")
+                    title = f"{tmdb['title']} ({year})" if year else tmdb["title"]
+            else:
+                title = folder
+            return safe_segment(str(title or folder)) + ".json"
+
+        # When a new record reveals a duplicate, update both its metadata and
+        # its image folder without downloading/re-uploading the image bytes.
         for record in records:
             folder = record["source"]["folder"]
             tmdb_id = (record.get("tmdb") or {}).get("tmdb_id")
@@ -450,53 +471,132 @@ class MetadataEngine:
                     "tmdb_id": int(tmdb_id),
                     "source_folders": sorted(row["source_folder"] for row in group),
                 }
-                out_path = f"مكرر/{tmdb_id}/{safe_segment(folder)}/movie.json"
+                target_prefix = f"مكرر/{tmdb_id}/{folder}"
                 duplicate_count += 1
             elif record["status"] == "ready":
-                out_path = f"جاهز/{safe_segment(folder)}/movie.json"
+                target_prefix = f"جاهز/{folder}"
                 ready_count += 1
             else:
-                out_path = f"مراجعة/{safe_segment(folder)}/movie.json"
+                target_prefix = f"مراجعة/{folder}"
                 review_count += 1
 
+            item = item_by_folder[folder]
+            poster_files = list(item.get("poster_files") or [])
+            if not poster_files:
+                raise RuntimeError(
+                    f"Cannot move poster folder without image blobs: {item.get('source_prefix')}/{folder}"
+                )
+
+            target_images: list[str] = []
+            target_image_paths: list[str] = []
+            source_prefix = str(item.get("source_prefix") or folder).rstrip("/")
+            for poster in poster_files:
+                source_path = str(poster["path"])
+                relative_path = str(poster.get("relative_path") or source_path[len(source_prefix) + 1:])
+                target_path = f"{target_prefix}/{relative_path}"
+                target_images.append(target_path)
+                suffix = "." + source_path.rsplit(".", 1)[-1].lower() if "." in source_path else ""
+                if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}:
+                    target_image_paths.append(target_path)
+                if source_path != target_path:
+                    if not poster.get("sha"):
+                        raise RuntimeError(f"Missing Git blob SHA; refusing image move: {source_path}")
+                    moves[target_path] = {
+                        "sha": str(poster["sha"]),
+                        "mode": str(poster.get("mode") or "100644"),
+                    }
+                    image_deletes.append(source_path)
+
+            # Keep the source folder label intact for traceability. The JSON
+            # filename itself uses the verified TMDB title when one exists.
+            old_source = record["source"].get("image_path")
+            previous = previous_by_folder.get(folder) or {}
+            record["source"]["original_image_path"] = (
+                previous.get("original_image_path")
+                or previous.get("image_path")
+                or old_source
+            )
+            if not target_image_paths:
+                raise RuntimeError(f"No supported poster image found for folder: {folder}")
+            record["source"]["image_path"] = target_image_paths[0]
+            record["source"]["image_url"] = self.github.raw_url(target_image_paths[0])
+
+            out_path = f"{target_prefix}/{json_filename(record, folder)}"
             record["output_path"] = out_path
             files[out_path] = json.dumps(record, ensure_ascii=False, indent=2) + "\n"
 
-        # Remove a previous output only when this batch changes its destination.
+            row = next(row for row in projected if row["source_folder"] == folder)
+            row["status"] = record["status"]
+            row["image_path"] = target_image_paths[0]
+            row["original_image_path"] = record["source"]["original_image_path"]
+            row["output_path"] = out_path
+            row["tmdb_id"] = tmdb_id
+            row["canonical_folder_name"] = (record.get("correction") or {}).get("canonical_folder_name")
+
+        # Remove old JSON paths when a record is moved or its JSON filename changes.
         for record in records:
             previous = previous_by_folder.get(record["source"]["folder"])
             previous_path = previous.get("output_path") if previous else None
             if previous_path and previous_path != record["output_path"]:
                 deletes.append(str(previous_path))
 
-        # When a newly found ID makes an earlier READY entry a duplicate, copy its
-        # existing metadata JSON into the duplicate group and delete its old READY path.
+        # If a previously READY film becomes a duplicate after this batch, move
+        # its current image files and rename its JSON in the same atomic commit.
         if apply:
             for tmdb_id, group in by_id.items():
                 if len(group) < 2:
                     continue
                 for row in group:
                     previous_path = row.get("output_path")
-                    if previous_path and previous_path.startswith("جاهز/"):
-                        old_record = self.github.get_json_file(previous_path)
-                        if not old_record:
-                            raise RuntimeError(
-                                f"Cannot safely move duplicate metadata; existing file is missing: {previous_path}"
-                            )
-                        source_folder = str(row["source_folder"])
-                        new_path = f"مكرر/{tmdb_id}/{safe_segment(source_folder)}/movie.json"
-                        old_record["status"] = "duplicate"
-                        old_record["duplicate_group"] = {
-                            "tmdb_id": int(tmdb_id),
-                            "source_folders": sorted(x["source_folder"] for x in group),
-                        }
-                        old_record["output_path"] = new_path
-                        files[new_path] = json.dumps(old_record, ensure_ascii=False, indent=2) + "\n"
-                        deletes.append(previous_path)
-                        row["status"] = "duplicate"
-                        row["output_path"] = new_path
+                    if not previous_path or not previous_path.startswith("جاهز/"):
+                        continue
+                    old_record = self.github.get_json_file(previous_path)
+                    if not old_record:
+                        raise RuntimeError(
+                            f"Cannot safely move duplicate metadata; existing file is missing: {previous_path}"
+                        )
+                    source_folder = str(row["source_folder"])
+                    old_prefix = f"جاهز/{source_folder}"
+                    new_prefix = f"مكرر/{tmdb_id}/{source_folder}"
+                    original_image_path = (
+                        row.get("original_image_path") or row.get("image_path")
+                    )
+                    moved_images = self.github.list_folder_blobs(old_prefix)
+                    image_source_prefix = old_prefix
+                    # During the first migration, older READY JSON files may
+                    # exist while their images are still in the original root.
+                    if not moved_images:
+                        moved_images = self.github.list_folder_blobs(source_folder)
+                        image_source_prefix = source_folder
+                    for poster in moved_images:
+                        source_path = poster["path"]
+                        relative_path = source_path[len(image_source_prefix) + 1:]
+                        target_path = f"{new_prefix}/{relative_path}"
+                        moves[target_path] = {"sha": poster["sha"], "mode": poster["mode"]}
+                        image_deletes.append(source_path)
+                        if row.get("image_path") == source_path:
+                            row["image_path"] = target_path
+                            old_record["source"]["image_path"] = target_path
+                            old_record["source"]["image_url"] = self.github.raw_url(target_path)
+                    old_record["source"].setdefault("original_image_path", original_image_path)
+                    row["original_image_path"] = original_image_path
 
-        # Set output paths/status for newly processed rows after duplicate grouping.
+                    old_record["status"] = "duplicate"
+                    old_record["duplicate_group"] = {
+                        "tmdb_id": int(tmdb_id),
+                        "source_folders": sorted(x["source_folder"] for x in group),
+                    }
+                    old_record["output_path"] = (
+                        f"{new_prefix}/{json_filename(old_record, source_folder)}"
+                    )
+                    files[old_record["output_path"]] = json.dumps(
+                        old_record, ensure_ascii=False, indent=2
+                    ) + "\n"
+                    deletes.append(previous_path)
+                    row["status"] = "duplicate"
+                    row["output_path"] = old_record["output_path"]
+
+        # Reconcile all output paths and deduplicate delete operations.
         for record in records:
             row = next(
                 row for row in projected
@@ -504,6 +604,22 @@ class MetadataEngine:
             )
             row["status"] = record["status"]
             row["output_path"] = record["output_path"]
+
+        deletes = sorted(set(deletes + image_deletes))
+        image_deletes = sorted(set(image_deletes))
+
+        projected_by_folder = {
+            str(row.get("source_folder")): row for row in projected
+        }
+        next_pending_estimate = 0
+        for item in folders:
+            row = projected_by_folder.get(item["folder"])
+            if (
+                row is None
+                or row.get("status") == "review"
+                or not str(row.get("image_path") or "").startswith(("جاهز/", "مراجعة/", "مكرر/"))
+            ):
+                next_pending_estimate += 1
 
         summary = {
             "mode": "APPLY" if apply else "DRY_RUN",
@@ -517,20 +633,16 @@ class MetadataEngine:
             "review": review_count,
             "duplicates_in_this_batch": duplicate_count,
             "planned_output_files": sorted(files),
+            "planned_image_moves": sorted(moves),
+            "planned_source_image_deletes": image_deletes,
             "records": records,
-            "next_pending_estimate": sum(
-                1 for item in folders
-                if item["folder"] not in {
-                    str(row.get("source_folder"))
-                    for row in projected
-                    if row.get("status") in {"ready", "duplicate"}
-                }
-            ),
+            "next_pending_estimate": next_pending_estimate,
         }
 
-        if apply and files:
+        if apply and (files or moves):
             print(
-                f"[KafiaNet] Preparing GitHub commit with {len(files) + 1} JSON file(s)...",
+                f"[KafiaNet] Preparing GitHub commit with {len(files) + 1} JSON file(s) "
+                f"and {len(moves)} image move(s)...",
                 flush=True,
             )
             index_doc = {
@@ -543,11 +655,13 @@ class MetadataEngine:
             commit_sha = self.github.commit_files(
                 files,
                 deletes=deletes,
-                message=f"KafiaNet metadata batch: {len(records)} films",
+                moves=moves,
+                message=f"KafiaNet metadata and poster organization: {len(records)} films",
             )
             summary["commit_sha"] = commit_sha
             summary["written_files"] = len(files)
-            summary["deleted_old_ready_files"] = len(deletes)
+            summary["moved_image_files"] = len(moves)
+            summary["deleted_old_files"] = len(deletes)
             print(f"[KafiaNet] GitHub commit completed: {commit_sha}", flush=True)
 
         return summary

@@ -63,27 +63,91 @@ class GitHubAPI:
             )
         return list(data.get("tree") or [])
 
-    def list_film_folders(self) -> list[dict[str, str]]:
+    def list_film_folders(self) -> list[dict[str, Any]]:
         tree = self.recursive_tree()
-        grouped: dict[str, list[str]] = {}
+        candidates: dict[str, dict[str, Any]] = {}
+
         for item in tree:
             if item.get("type") != "blob":
                 continue
             path = str(item.get("path") or "")
             parts = path.split("/")
-            if len(parts) != 2 or parts[0] in OUTPUT_ROOTS:
+            if len(parts) < 2:
                 continue
-            filename = parts[1]
-            suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-            if suffix not in IMAGE_EXTENSIONS:
-                continue
-            grouped.setdefault(parts[0], []).append(path)
 
-        folders = []
-        for folder, paths in grouped.items():
-            first_image = sorted(paths, key=lambda path: path.rsplit("/", 1)[-1].casefold())[0]
-            folders.append({"folder": folder, "image_path": first_image})
+            if parts[0] == "مراجعة":
+                if len(parts) < 3:
+                    continue
+                folder = parts[1]
+                source_prefix = f"مراجعة/{folder}"
+                relative_path = "/".join(parts[2:])
+            elif parts[0] in OUTPUT_ROOTS:
+                # READY and duplicate folders are final destinations, not new inputs.
+                continue
+            else:
+                folder = parts[0]
+                source_prefix = folder
+                relative_path = "/".join(parts[1:])
+
+            filename = parts[-1]
+            suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            # The folder must contain at least one supported image, but once
+            # selected, move every non-JSON file in that folder with it.
+            if suffix == ".json":
+                continue
+
+            candidate = candidates.get(folder)
+            if candidate is None or (
+                source_prefix == folder and candidate["source_prefix"] != folder
+            ):
+                candidates[folder] = {
+                    "folder": folder,
+                    "source_prefix": source_prefix,
+                    "poster_files": [],
+                }
+                candidate = candidates[folder]
+
+            if candidate["source_prefix"] == source_prefix:
+                candidate["poster_files"].append(
+                    {
+                        "path": path,
+                        "relative_path": relative_path,
+                        "sha": str(item.get("sha") or ""),
+                        "mode": str(item.get("mode") or "100644"),
+                    }
+                )
+
+        folders: list[dict[str, Any]] = []
+        for candidate in candidates.values():
+            poster_files = sorted(
+                candidate["poster_files"],
+                key=lambda row: row["path"].casefold(),
+            )
+            image_files = [
+                row for row in poster_files
+                if "." + row["path"].rsplit(".", 1)[-1].lower() in IMAGE_EXTENSIONS
+            ]
+            if not image_files:
+                continue
+            candidate["poster_files"] = poster_files
+            candidate["image_path"] = image_files[0]["path"]
+            folders.append(candidate)
+
         return sorted(folders, key=lambda item: item["folder"].casefold())
+
+    def list_folder_blobs(self, prefix: str) -> list[dict[str, str]]:
+        normalized = prefix.rstrip("/") + "/"
+        return [
+            {
+                "path": str(item["path"]),
+                "sha": str(item["sha"]),
+                "mode": str(item.get("mode") or "100644"),
+            }
+            for item in self.recursive_tree()
+            if item.get("type") == "blob"
+            and str(item.get("path") or "").startswith(normalized)
+            and not str(item.get("path") or "").lower().endswith(".json")
+        ]
 
     def raw_url(self, path: str) -> str:
         encoded = "/".join(quote(part, safe="") for part in path.split("/"))
@@ -112,9 +176,27 @@ class GitHubAPI:
         files: dict[str, str],
         deletes: list[str] | None = None,
         message: str = "Add KafiaNet movie metadata batch",
+        moves: dict[str, dict[str, str]] | None = None,
     ) -> str:
-        if not files and not deletes:
-            raise ValueError("No files or deletions to commit")
+        deleted_paths = set(deletes or [])
+        move_items: list[dict[str, Any]] = []
+        for path, source in sorted((moves or {}).items()):
+            if path in files or path in deleted_paths:
+                raise ValueError(f"Conflicting Git tree operation for path: {path}")
+            sha = str(source.get("sha") or "")
+            if not sha:
+                raise ValueError(f"Missing source blob SHA for image move: {path}")
+            move_items.append(
+                {
+                    "path": path,
+                    "mode": str(source.get("mode") or "100644"),
+                    "type": "blob",
+                    "sha": sha,
+                }
+            )
+
+        if not files and not deleted_paths and not move_items:
+            raise ValueError("No files, moves, or deletions to commit")
 
         expected_head, base_tree = self._branch_commit()
         tree_items: list[dict[str, Any]] = []
@@ -128,7 +210,8 @@ class GitHubAPI:
                 {"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]}
             )
 
-        for path in sorted(set(deletes or [])):
+        tree_items.extend(move_items)
+        for path in sorted(deleted_paths):
             tree_items.append(
                 {"path": path, "mode": "100644", "type": "blob", "sha": None}
             )
