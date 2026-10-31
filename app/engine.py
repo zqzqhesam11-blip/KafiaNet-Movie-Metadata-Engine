@@ -61,6 +61,41 @@ class MetadataEngine:
             # A reverse-image provider failure must never invent or block TMDB identity.
             return [{"error": type(exc).__name__, "message": str(exc)[:300]}]
 
+    def _tmdb_identity_profile(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        """Read production country/director fields when title/year collide."""
+        tmdb_id = int(candidate["id"])
+        details = self._details_cache.get(tmdb_id)
+        error = None
+        if details is None:
+            try:
+                details = self.tmdb.movie_details(tmdb_id)
+                self._details_cache[tmdb_id] = details
+            except Exception as exc:
+                details = {}
+                error = type(exc).__name__
+
+        normalized = TMDBClient.normalize_details(details) if details else {}
+        countries = sorted({
+            str(item.get("name") or item.get("iso_3166_1") or "").strip()
+            for item in (normalized.get("production_countries") or [])
+            if isinstance(item, dict) and (item.get("name") or item.get("iso_3166_1"))
+        })
+        directors = sorted({
+            str(item.get("name") or "").strip()
+            for item in (normalized.get("directors") or [])
+            if isinstance(item, dict) and item.get("name")
+        })
+        return {
+            "tmdb_id": tmdb_id,
+            "title": normalized.get("title") or candidate.get("title"),
+            "original_title": normalized.get("original_title") or candidate.get("original_title"),
+            "year": normalized.get("year"),
+            "production_countries": countries,
+            "directors": directors,
+            "runtime": normalized.get("runtime"),
+            "metadata_lookup_error": error,
+        }
+
     def _find_movie(
         self,
         title: str,
@@ -325,24 +360,80 @@ class MetadataEngine:
             direct_candidate = candidates[direct_id]
             direct_detail = candidate_score(direct_candidate)
 
-            # If the folder name independently identifies another high-confidence
-            # film, the disagreement requires human review.
+            # A folder search may return multiple films with the exact same
+            # title and year. Treat that as a title collision, not a conflict
+            # with a trusted IMDb/TMDB backlink. Compare TMDB identity metadata
+            # and retain the competing records in the output JSON.
             folder_scored = [
-                (best_folder_match(candidate)[0]["confidence"], candidate_id)
+                (best_folder_match(candidate)[0]["confidence"], candidate_id, candidate)
                 for candidate_id, candidate in folder_candidates.items()
+                if candidate_id != direct_id
             ]
-            folder_scored.sort(reverse=True)
-            if (
-                folder_scored
-                and folder_scored[0][1] != direct_id
-                and folder_scored[0][0] >= self.settings.match_accept_score
-            ):
+            folder_scored.sort(key=lambda row: row[0], reverse=True)
+            same_title_year_candidates: list[dict[str, Any]] = []
+            unresolved_folder_conflicts: list[dict[str, Any]] = []
+            direct_profile = None
+            for folder_score, folder_id, folder_candidate in folder_scored:
+                if folder_score < self.settings.match_accept_score:
+                    continue
+                folder_detail, _ = best_folder_match(folder_candidate)
+                direct_names = [
+                    str(direct_candidate.get("title") or ""),
+                    str(direct_candidate.get("original_title") or ""),
+                ]
+                folder_names = [
+                    str(folder_candidate.get("title") or ""),
+                    str(folder_candidate.get("original_title") or ""),
+                ]
+                same_title = max(
+                    (title_similarity(left, right) for left in direct_names for right in folder_names),
+                    default=0.0,
+                ) >= 0.96
+                same_year = (
+                    direct_detail["tmdb_year"] is not None
+                    and direct_detail["tmdb_year"] == folder_detail["tmdb_year"]
+                )
+                if same_title and same_year:
+                    if direct_profile is None:
+                        direct_profile = self._tmdb_identity_profile(direct_candidate)
+                    other_profile = self._tmdb_identity_profile(folder_candidate)
+                    same_title_year_candidates.append({
+                        "candidate_id": folder_id,
+                        "title": folder_candidate.get("title"),
+                        "year": folder_detail["tmdb_year"],
+                        "production_countries": other_profile["production_countries"],
+                        "directors": other_profile["directors"],
+                        "runtime": other_profile["runtime"],
+                        "identity_differs_from_selected": (
+                            other_profile["production_countries"] != direct_profile["production_countries"]
+                            or other_profile["directors"] != direct_profile["directors"]
+                        ),
+                    })
+                else:
+                    unresolved_folder_conflicts.append({
+                        "candidate_id": folder_id,
+                        "title": folder_candidate.get("title"),
+                        "year": folder_detail["tmdb_year"],
+                        "confidence": folder_score,
+                    })
+
+            if unresolved_folder_conflicts:
                 return None, {
                     "status": "review",
                     **direct_detail,
-                    "reason": "TinEye external ID conflicts with a high-confidence folder-title match",
-                    "candidate_ids": [direct_id, folder_scored[0][1]],
+                    "reason": "TinEye external ID conflicts with a different high-confidence folder-title candidate",
+                    "candidate_ids": [
+                        direct_id,
+                        *[item["candidate_id"] for item in unresolved_folder_conflicts[:3]],
+                    ],
+                    "folder_conflicts": unresolved_folder_conflicts[:5],
                 }, evidence
+
+            if same_title_year_candidates:
+                if direct_profile is None:
+                    direct_profile = self._tmdb_identity_profile(direct_candidate)
+                evidence["same_title_year_candidates"] = same_title_year_candidates
+                evidence["selected_identity_profile"] = direct_profile
 
             source_year_corrected = bool(
                 direct_detail["year_delta"] is not None
@@ -364,11 +455,16 @@ class MetadataEngine:
                 **direct_detail,
                 "confidence": 1.0,
                 "source_year_corrected": source_year_corrected,
+                "same_title_year_collision_resolved": bool(same_title_year_candidates),
                 "reason": (
-                    "TinEye ID and independent exact folder-title search agree; "
-                    "TMDB release year will be used for the JSON filename"
-                    if source_year_corrected
-                    else "TinEye backlink resolved to a single title/year-validated IMDb/TMDB movie ID"
+                    "TinEye IMDb/TMDB backlink resolved a same-title/year collision using the linked movie ID and TMDB identity metadata"
+                    if same_title_year_candidates
+                    else (
+                        "TinEye ID and independent exact folder-title search agree; "
+                        "TMDB release year will be used for the JSON filename"
+                        if source_year_corrected
+                        else "TinEye backlink resolved to a single title/year-validated IMDb/TMDB movie ID"
+                    )
                 ),
             }, evidence
 
