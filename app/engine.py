@@ -374,7 +374,9 @@ class MetadataEngine:
     def run_batch(self, limit: int, apply: bool) -> dict[str, Any]:
         self.settings.validate_for_processing(apply=apply)
 
+        print("[KafiaNet] Scanning poster repository...", flush=True)
         folders = self.github.list_film_folders()
+        print(f"[KafiaNet] Found {len(folders)} source folders.", flush=True)
         index = self.github.get_json_file("metadata/index.json") or {"schema_version": 1, "items": []}
         old_items = list(index.get("items") or [])
         old_by_folder = {str(row.get("source_folder")): row for row in old_items}
@@ -385,7 +387,22 @@ class MetadataEngine:
             or old_by_folder[item["folder"]].get("status") == "review"
         ][: max(1, limit)]
 
-        records = [self._record_for_folder(item) for item in pending]
+        records: list[dict[str, Any]] = []
+        total = len(pending)
+        print(f"[KafiaNet] Selected {total} pending film(s). Mode={'APPLY' if apply else 'DRY_RUN'}.", flush=True)
+        for position, item in enumerate(pending, start=1):
+            print(
+                f"[KafiaNet] [{position}/{total}] START {item['folder']}",
+                flush=True,
+            )
+            record = self._record_for_folder(item)
+            records.append(record)
+            tmdb_id = (record.get("tmdb") or {}).get("tmdb_id")
+            print(
+                f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
+                f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'}",
+                flush=True,
+            )
         projected = list(old_items)
 
         previous_by_folder = {
@@ -512,6 +529,10 @@ class MetadataEngine:
         }
 
         if apply and files:
+            print(
+                f"[KafiaNet] Preparing GitHub commit with {len(files) + 1} JSON file(s)...",
+                flush=True,
+            )
             index_doc = {
                 "schema_version": 1,
                 "updated_utc": datetime.now(timezone.utc).isoformat(),
@@ -527,5 +548,6 @@ class MetadataEngine:
             summary["commit_sha"] = commit_sha
             summary["written_files"] = len(files)
             summary["deleted_old_ready_files"] = len(deletes)
+            print(f"[KafiaNet] GitHub commit completed: {commit_sha}", flush=True)
 
         return summary
