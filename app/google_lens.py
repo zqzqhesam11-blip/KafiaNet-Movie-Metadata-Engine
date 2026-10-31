@@ -123,7 +123,7 @@ class BrightDataGoogleLensClient:
         for item in rows[:MAX_NORMALIZED_RESULTS]:
             title = str(item.get("title") or item.get("name") or "").strip()[:300]
             page_url = cls._first_url(item, ("link", "url", "page_url", "website", "source_url"))
-            image_url = cls._first_url(item, ("image_url", "original", "image", "thumbnail", "thumbnail_url"))
+            image_url = cls._first_url(item, ("image_url", "original", "image", "source", "thumbnail", "thumbnail_url"))
             source_value = item.get("source")
             if not image_url and isinstance(source_value, str):
                 parsed_source = urlparse(source_value.strip())

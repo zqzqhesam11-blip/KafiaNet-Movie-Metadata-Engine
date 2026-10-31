@@ -382,7 +382,7 @@ class GoogleLensTMDBMatchingTests(unittest.TestCase):
         )
         self.assertIsNone(candidate)
         self.assertEqual(match["status"], "review")
-        self.assertIn("GoogleLens reverse-image request failed", match["reason"])
+        self.assertIn("Google Lens reverse-image request failed", match["reason"])
 
     def test_no_reverse_image_matches_keeps_title_only_candidate_in_review(self):
         tmdb = FakeTMDB(folder_results={"The Matrix": [dict(MATRIX)]})
