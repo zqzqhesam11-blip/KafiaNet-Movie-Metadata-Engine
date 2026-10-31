@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from app.engine import MetadataEngine
+from app.google_lens import BrightDataQuotaError
 
 
 class PreviousGoogleLensEvidenceTests(unittest.TestCase):
@@ -86,6 +87,25 @@ class PreviousGoogleLensEvidenceTests(unittest.TestCase):
         self.assertEqual(record["reverse_image"]["results"], latest_error)
         self.assertEqual(record["reverse_image"]["results_source"], "live")
         self.assertEqual(record["reverse_image"]["latest_query"]["status"], "error")
+
+
+    def test_provider_quota_stop_flag_prevents_batch_continuation(self):
+        for status_code in (402, 429):
+            with self.subTest(status_code=status_code):
+                engine = MetadataEngine.__new__(MetadataEngine)
+                engine.reverse_image = Mock()
+                engine.reverse_image.search_by_image_url.side_effect = BrightDataQuotaError(
+                    status_code, f"Bright Data HTTP {status_code}"
+                )
+                engine._stop_batch = False
+                engine._provider_stop_status = None
+
+                result = engine._reverse_image_results("https://example.com/poster.jpg")
+
+                self.assertTrue(engine._stop_batch)
+                self.assertEqual(engine._provider_stop_status, status_code)
+                self.assertTrue(result[0]["stop_batch"])
+                self.assertEqual(engine.reverse_image.search_by_image_url.call_count, 1)
 
 
 if __name__ == "__main__":

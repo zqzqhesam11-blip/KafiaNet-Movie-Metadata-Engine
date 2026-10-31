@@ -15,6 +15,14 @@ class BrightDataAPIError(RuntimeError):
     """Safe, actionable error from Bright Data or Google Lens."""
 
 
+class BrightDataQuotaError(BrightDataAPIError):
+    """Provider quota exhaustion or throttling; callers must stop the current batch."""
+
+    def __init__(self, status_code: int, message: str):
+        self.status_code = int(status_code)
+        super().__init__(message)
+
+
 class BrightDataGoogleLensClient:
     """Google Lens reverse-image search through Bright Data's SERP API."""
 
@@ -165,9 +173,10 @@ class BrightDataGoogleLensClient:
         except ValueError:
             payload = None
         if response.status_code < 200 or response.status_code >= 300:
-            raise BrightDataAPIError(
-                self._http_error(response.status_code, self._error_detail(payload, body))
-            )
+            message = self._http_error(response.status_code, self._error_detail(payload, body))
+            if response.status_code in {402, 429}:
+                raise BrightDataQuotaError(response.status_code, message)
+            raise BrightDataAPIError(message)
         if payload is None:
             raise BrightDataAPIError(
                 "Bright Data did not return parsed JSON for Google Lens (brd_json=1); "

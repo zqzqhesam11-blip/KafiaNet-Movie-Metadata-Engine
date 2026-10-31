@@ -9,7 +9,7 @@ from app.config import Settings
 from app.github_api import GitHubAPI
 from app.matching import classify_match, normalize_title, score_candidate, split_title_year, title_search_variants, title_similarity
 from app.image_evidence import extract_reverse_image_evidence
-from app.google_lens import BrightDataGoogleLensClient
+from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
 from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
 
 
@@ -26,6 +26,8 @@ def safe_segment(value: str) -> str:
 class MetadataEngine:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._stop_batch = False
+        self._provider_stop_status: int | None = None
         self._details_cache: dict[int, dict[str, Any]] = {}
         self.github = GitHubAPI(
             settings.posters_repo,
@@ -55,6 +57,15 @@ class MetadataEngine:
             return []
         try:
             return self.reverse_image.search_by_image_url(image_url)
+        except BrightDataQuotaError as exc:
+            # Free quota exhaustion and provider throttling stop the whole batch.
+            self._stop_batch = True
+            self._provider_stop_status = exc.status_code
+            return [{
+                "error": type(exc).__name__,
+                "message": str(exc)[:300],
+                "stop_batch": True,
+            }]
         except Exception as exc:
             # A reverse-image provider failure must never invent or block TMDB identity.
             return [{"error": type(exc).__name__, "message": str(exc)[:300]}]
@@ -687,6 +698,8 @@ class MetadataEngine:
         return record
 
     def run_batch(self, limit: int, apply: bool) -> dict[str, Any]:
+        self._stop_batch = False
+        self._provider_stop_status = None
         self.settings.validate_for_processing(apply=apply)
 
         print("[KafiaNet] Scanning poster repository...", flush=True)
@@ -816,6 +829,53 @@ class MetadataEngine:
                 f"rejected_external_ids={rejected_text}",
                 flush=True,
             )
+            if self._stop_batch:
+                print(
+                    f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status}; "
+                    "remaining posters were not queried and this batch will not write catalog changes.",
+                    flush=True,
+                )
+                break
+
+        if self._stop_batch:
+            return {
+                "mode": "STOPPED_PROVIDER_LIMIT",
+                "source_repo": self.settings.posters_repo,
+                "branch": self.settings.posters_branch,
+                "source_folders_found": len(folders),
+                "already_indexed_before_batch": len(old_items),
+                "batch_requested": limit,
+                "batch_selected": len(records),
+                "ready": sum(1 for item in records if item.get("status") == "ready"),
+                "review": sum(1 for item in records if item.get("status") == "review"),
+                "duplicates_in_this_batch": sum(1 for item in records if item.get("status") == "duplicate"),
+                "reverse_image_unresponsive": sum(
+                    1 for item in records
+                    if (item.get("reverse_image") or {}).get("latest_query", {}).get("status")
+                    in {"error", "processing_error"}
+                ),
+                "reverse_image_no_matches": sum(
+                    1 for item in records
+                    if (item.get("reverse_image") or {}).get("latest_query", {}).get("status") == "no_matches"
+                ),
+                "reverse_image_previous_evidence_reused": sum(
+                    1 for item in records
+                    if (item.get("reverse_image") or {}).get("results_source") == "previous_saved"
+                ),
+                "reverse_image_rejected_external_ids": sum(
+                    len(((item.get("reverse_image") or {}).get("evidence") or {}).get("rejected_external_ids", []))
+                    for item in records
+                ),
+                "planned_output_files": [],
+                "planned_image_moves": [],
+                "planned_source_image_deletes": [],
+                "written_files": 0,
+                "moved_image_files": 0,
+                "deleted_old_files": 0,
+                "provider_stop_status": self._provider_stop_status,
+                "records": records,
+                "next_pending_estimate": max(0, len(pending) - len(records)),
+            }
 
         projected = list(old_items)
         previous_by_folder = {str(row.get("source_folder")): row for row in projected}
