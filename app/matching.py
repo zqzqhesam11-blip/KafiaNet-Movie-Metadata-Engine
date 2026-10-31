@@ -18,7 +18,8 @@ def split_title_year(folder_name: str) -> tuple[str, int | None]:
 
 
 def normalize_title(value: str) -> str:
-    value = unicodedata.normalize("NFKC", value or "").casefold()
+    value = unicodedata.normalize("NFKD", value or "").casefold()
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
     value = value.replace("&", " and ")
     value = "".join(ch if ch.isalnum() else " " for ch in value)
     return " ".join(value.split())
