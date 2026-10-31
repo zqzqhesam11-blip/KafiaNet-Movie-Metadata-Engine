@@ -43,6 +43,10 @@ class Settings:
         missing = []
         if not self.tmdb_bearer_token:
             missing.append("TMDB_BEARER_TOKEN")
+        if not self.searxng_url:
+            missing.append("SEARXNG_URL")
+        if not self.searxng_token:
+            missing.append("SEARXNG_TOKEN")
         if apply and not self.github_token:
             missing.append("GITHUB_TOKEN")
         if missing:
