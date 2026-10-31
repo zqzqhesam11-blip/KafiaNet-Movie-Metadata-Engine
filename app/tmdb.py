@@ -8,6 +8,8 @@ from app.matching import normalize_title
 
 WORLDWIDE_TITLE_POLICY_VERSION = 1
 WORLDWIDE_TITLE_MIN_MARKETS = 3
+MAX_SEARCH_QUERY_CHARS = 160
+MAX_SEARCH_QUERY_WORDS = 22
 
 
 class TMDBClient:
@@ -31,8 +33,18 @@ class TMDBClient:
         return response.json()
 
     def search_movies(self, title: str, year: int | None = None) -> list[dict[str, Any]]:
+        # Defensive boundary: never send a full article/caption or malformed
+        # unbounded value to TMDB as a movie-title query.
+        query = " ".join(str(title or "").split())
+        if (
+            not query
+            or len(query) > MAX_SEARCH_QUERY_CHARS
+            or len(query.split()) > MAX_SEARCH_QUERY_WORDS
+        ):
+            return []
+
         params: dict[str, Any] = {
-            "query": title,
+            "query": query,
             "include_adult": "false",
             "language": self.language,
         }
