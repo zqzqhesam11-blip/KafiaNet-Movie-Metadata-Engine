@@ -5,24 +5,32 @@ import unittest
 from app.github_api import GitHubAPI
 
 
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def json(self):
+        return self.payload
+
+
 class FakeTreeClient:
     def __init__(self):
         self.calls = []
         self.patched = None
 
-    def post(self, path, body):
-        self.calls.append((path, body))
+    def post(self, path, json):
+        self.calls.append((path, json))
         if path == "/git/blobs":
-            return {"sha": "json-blob"}
+            return FakeResponse({"sha": "json-blob"})
         if path == "/git/trees":
-            return {"sha": "new-tree"}
+            return FakeResponse({"sha": "new-tree"})
         if path == "/git/commits":
-            return {"sha": "new-commit"}
+            return FakeResponse({"sha": "new-commit"})
         raise AssertionError(f"Unexpected POST path: {path}")
 
-    def patch(self, path, body):
-        self.patched = (path, body)
-        return {"object": {"sha": "new-commit"}}
+    def patch(self, path, json):
+        self.patched = (path, json)
+        return FakeResponse({"object": {"sha": "new-commit"}})
 
 
 class PosterOrganizationTests(unittest.TestCase):
@@ -43,6 +51,12 @@ class PosterOrganizationTests(unittest.TestCase):
                 "type": "blob",
                 "path": "Film A/alternate.png",
                 "sha": "root-png",
+                "mode": "100644",
+            },
+            {
+                "type": "blob",
+                "path": "Film A/notes.txt",
+                "sha": "root-notes",
                 "mode": "100644",
             },
             {
@@ -69,7 +83,11 @@ class PosterOrganizationTests(unittest.TestCase):
 
         self.assertEqual(set(by_name), {"Film A", "Film B"})
         self.assertEqual(by_name["Film A"]["source_prefix"], "Film A")
-        self.assertEqual(len(by_name["Film A"]["poster_files"]), 2)
+        self.assertEqual(len(by_name["Film A"]["poster_files"]), 3)
+        self.assertEqual(
+            by_name["Film A"]["image_path"],
+            "Film A/alternate.png",
+        )
         self.assertEqual(by_name["Film B"]["source_prefix"], "مراجعة/Film B")
         self.assertEqual(
             by_name["Film B"]["poster_files"][0]["sha"],
