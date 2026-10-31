@@ -3,6 +3,12 @@ from __future__ import annotations
 from typing import Any
 import httpx
 
+from app.matching import normalize_title
+
+
+WORLDWIDE_TITLE_POLICY_VERSION = 1
+WORLDWIDE_TITLE_MIN_MARKETS = 3
+
 
 class TMDBClient:
     BASE_URL = "https://api.themoviedb.org/3"
@@ -59,6 +65,83 @@ class TMDBClient:
                 ),
             },
         )
+
+    @staticmethod
+    def select_worldwide_title(movie: dict[str, Any]) -> dict[str, Any]:
+        """
+        Select a conservatively supported public title without preferring a language.
+
+        TMDB does not expose title popularity by audience. Its alternative-title
+        records are country-scoped, so a title only overrides the configured-language
+        primary title when the same normalized title is listed in at least three
+        distinct country markets. Ties and weak evidence keep the primary title.
+        """
+        primary = str(movie.get("title") or movie.get("original_title") or "").strip()
+        primary_key = normalize_title(primary)
+        groups: dict[str, dict[str, Any]] = {}
+
+        for item in movie.get("alternative_titles") or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            country = str(item.get("country") or "").strip().upper()
+            if not title or not country:
+                continue
+
+            title_type = str(item.get("type") or "").casefold()
+            if any(marker in title_type for marker in ("working title", "internal title", "temporary title")):
+                continue
+
+            key = normalize_title(title)
+            if not key or key == primary_key:
+                continue
+
+            group = groups.setdefault(
+                key,
+                {"countries": set(), "spellings": {}, "first_seen": len(groups)},
+            )
+            group["countries"].add(country)
+            group["spellings"][title] = group["spellings"].get(title, 0) + 1
+
+        candidates: list[tuple[int, str, dict[str, Any]]] = []
+        for key, group in groups.items():
+            market_count = len(group["countries"])
+            if market_count < WORLDWIDE_TITLE_MIN_MARKETS:
+                continue
+            spelling = sorted(
+                group["spellings"].items(),
+                key=lambda pair: (-pair[1], len(pair[0]), pair[0].casefold()),
+            )[0][0]
+            candidates.append((market_count, key, {**group, "title": spelling}))
+
+        if not candidates:
+            return {
+                "title": primary,
+                "source": "tmdb_primary_title",
+                "market_count": 0,
+                "markets": [],
+                "policy_version": WORLDWIDE_TITLE_POLICY_VERSION,
+            }
+
+        best_count = max(row[0] for row in candidates)
+        winners = [row for row in candidates if row[0] == best_count]
+        if len(winners) != 1:
+            return {
+                "title": primary,
+                "source": "tmdb_primary_title_ambiguous_alternatives",
+                "market_count": 0,
+                "markets": [],
+                "policy_version": WORLDWIDE_TITLE_POLICY_VERSION,
+            }
+
+        market_count, _, group = winners[0]
+        return {
+            "title": group["title"],
+            "source": "tmdb_alternative_title_multi_market",
+            "market_count": market_count,
+            "markets": sorted(group["countries"]),
+            "policy_version": WORLDWIDE_TITLE_POLICY_VERSION,
+        }
 
     @staticmethod
     def normalize_details(details: dict[str, Any]) -> dict[str, Any]:

@@ -10,7 +10,7 @@ from app.github_api import GitHubAPI
 from app.matching import classify_match, normalize_title, score_candidate, split_title_year, title_similarity
 from app.tineye_evidence import extract_tineye_evidence
 from app.searxng import SearXNGClient
-from app.tmdb import TMDBClient
+from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
 
 
 SCHEMA_VERSION = 2
@@ -350,17 +350,22 @@ class MetadataEngine:
                 details = self.tmdb.movie_details(tmdb_id)
                 self._details_cache[tmdb_id] = details
             normalized = self.tmdb.normalize_details(details)
-            canonical_title = normalized.get("title") or candidate.get("title") or title_hint
+            title_selection = self.tmdb.select_worldwide_title(normalized)
+            canonical_title = title_selection.get("title") or normalized.get("title") or candidate.get("title") or title_hint
             canonical_year = normalized.get("year")
+            canonical_folder_name = (
+                f"{canonical_title} ({canonical_year})" if canonical_year else canonical_title
+            )
+            normalized["worldwide_title"] = canonical_title
+            normalized["worldwide_title_selection"] = title_selection
             record["tmdb"] = normalized
+            record["title_policy_version"] = WORLDWIDE_TITLE_POLICY_VERSION
             record["correction"] = {
-                "canonical_folder_name": (
-                    f"{canonical_title} ({canonical_year})" if canonical_year else canonical_title
-                ),
+                "canonical_folder_name": canonical_folder_name,
+                "worldwide_title": canonical_title,
+                "title_selection": title_selection,
                 "rename_required": safe_segment(folder).casefold()
-                != safe_segment(
-                    f"{canonical_title} ({canonical_year})" if canonical_year else canonical_title
-                ).casefold(),
+                != safe_segment(canonical_folder_name).casefold(),
                 "source_folder_unchanged": True,
             }
             record["status"] = "ready"

@@ -15,7 +15,7 @@ Cloud worker for enriching the public KafiaNet poster catalog with verified TMDB
 - During APPLY, source movie folders are moved into `جاهز/` or `مراجعة/` in one Git tree commit together with their JSON metadata.
 - The original movie-folder name is preserved. Image filenames, extensions, and bytes are unchanged; existing Git blob SHAs are reused instead of downloading and re-uploading images.
 - Every non-JSON file in a selected movie folder moves with that folder. The metadata JSON is written separately.
-- A confirmed movie's JSON filename uses the canonical TMDB title/year. A movie that remains unresolved in `مراجعة/` keeps its original folder name as the JSON filename.
+- A confirmed movie's JSON filename uses the best-supported worldwide public title/year. TMDB's primary title is kept unless the same alternative title is recorded in at least three distinct country markets; a tie keeps the primary title. The rule is language-neutral and never strips original-script text automatically. The chosen title and market evidence are recorded in JSON; the full original and alternative titles remain available in TMDB metadata. A movie that remains unresolved in `مراجعة/` keeps its original folder name as the JSON filename.
 - Existing `مراجعة/` entries are re-scanned on later batches and can be promoted to `جاهز/` when a later match is verified. `جاهز/` and `مكرر/` are not treated as new source folders.
 - A low-confidence or conflicting TinEye/TMDB match goes to `مراجعة`; it is not guessed.
 - Every processing run requires the separately deployed, Bearer-protected KafiaNet-SearXNG app; there is no silent fallback to title-only matching.
