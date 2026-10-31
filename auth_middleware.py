@@ -48,7 +48,7 @@ class BearerTokenMiddleware:
             return self._response(
                 start_response,
                 "200 OK",
-                b"ok\\n",
+                b"ok\n",
                 head_only=(method == "HEAD"),
             )
 
@@ -57,7 +57,7 @@ class BearerTokenMiddleware:
             return self._response(
                 start_response,
                 "401 Unauthorized",
-                b"unauthorized\\n",
+                b"unauthorized\n",
                 head_only=(method == "HEAD"),
                 extra_headers=[("WWW-Authenticate", 'Bearer realm="KafiaNet SearXNG"')],
             )
