@@ -78,7 +78,7 @@ class PosterOrganizationTests(unittest.TestCase):
             posters_branch="main",
         )
         engine.github = FakeEngineGitHub(folders, index)
-        engine._record_for_folder = lambda item: dict(records[item["folder"]])
+        engine._record_for_folder = lambda item, previous_output_path=None: dict(records[item["folder"]])
         return engine
 
     def make_api(self, tree):
