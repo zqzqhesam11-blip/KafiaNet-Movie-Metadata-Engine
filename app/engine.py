@@ -558,6 +558,9 @@ class MetadataEngine:
                     source_folder = str(row["source_folder"])
                     old_prefix = f"جاهز/{source_folder}"
                     new_prefix = f"مكرر/{tmdb_id}/{source_folder}"
+                    original_image_path = (
+                        row.get("original_image_path") or row.get("image_path")
+                    )
                     moved_images = self.github.list_folder_blobs(old_prefix)
                     image_source_prefix = old_prefix
                     # During the first migration, older READY JSON files may
@@ -575,10 +578,8 @@ class MetadataEngine:
                             row["image_path"] = target_path
                             old_record["source"]["image_path"] = target_path
                             old_record["source"]["image_url"] = self.github.raw_url(target_path)
-                    old_record["source"].setdefault(
-                        "original_image_path",
-                        row.get("original_image_path") or row.get("image_path"),
-                    )
+                    old_record["source"].setdefault("original_image_path", original_image_path)
+                    row["original_image_path"] = original_image_path
 
                     old_record["status"] = "duplicate"
                     old_record["duplicate_group"] = {
