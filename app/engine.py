@@ -184,6 +184,15 @@ class MetadataEngine:
         ]
         scored.sort(key=lambda row: row[0], reverse=True)
 
+        if not tineye_results:
+            return None, {
+                "status": "review",
+                **scored[0][3],
+                "reason": "TinEye returned no reverse-image matches; title-only candidate requires review",
+                "candidate_id": scored[0][2].get("id"),
+                "candidate_title": scored[0][2].get("title"),
+            }, evidence
+
         if tineye_failed:
             return None, {
                 "status": "review",
