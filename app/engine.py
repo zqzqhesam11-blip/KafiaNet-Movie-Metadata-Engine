@@ -14,6 +14,8 @@ from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
 
 
 SCHEMA_VERSION = 2
+MIN_REQUIRED_TITLE_MATCH = 0.88
+TINeye_TITLE_HINT_LIMIT = 8
 
 
 def safe_segment(value: str) -> str:
@@ -143,7 +145,7 @@ class MetadataEngine:
         # TinEye image filenames can carry a useful film title even when the
         # local folder name is abbreviated or misspelled. Keep fan-out bounded.
         seen_hints = {normalize_title(value) for value in folder_title_variants}
-        for hint in evidence["title_hints"][:3]:
+        for hint in evidence["title_hints"][:TINeye_TITLE_HINT_LIMIT]:
             normalized_hint = normalize_title(hint)
             if not normalized_hint or normalized_hint in seen_hints:
                 continue
@@ -192,39 +194,70 @@ class MetadataEngine:
             ] or [(score_candidate(title, year, candidate), title)]
             return max(scored_variants, key=lambda row: row[0]["confidence"])
 
-        # TinEye links can point to an unrelated page that happened to reuse
-        # the poster. Validate direct IMDb/TMDB IDs against the source title
-        # and release year before they can be authoritative. A wrong folder
-        # year remains correctable when an unscoped TMDB title search
-        # independently returns the same exact-title movie.
+        def title_match_detail(candidate: dict[str, Any]) -> dict[str, Any]:
+            """Require a meaningful title match from the folder or TinEye poster evidence."""
+            candidate_names = [
+                str(candidate.get("title") or "").strip(),
+                str(candidate.get("original_title") or "").strip(),
+            ]
+            folder_matches = [
+                (title_similarity(variant, name), variant, name)
+                for variant in folder_title_variants
+                for name in candidate_names
+                if variant and name
+            ]
+            tineye_matches = [
+                (title_similarity(hint, name), hint, name)
+                for hint in evidence["title_hints"][:TINeye_TITLE_HINT_LIMIT]
+                for name in candidate_names
+                if hint and name
+            ]
+            best_folder = max(folder_matches, default=(0.0, None, None))
+            best_tineye = max(tineye_matches, default=(0.0, None, None))
+            if best_folder[0] >= best_tineye[0]:
+                score, source_value, matched_name = best_folder
+                source = "source_folder"
+            else:
+                score, source_value, matched_name = best_tineye
+                source = "tineye_poster_title"
+            return {
+                "title_match_score": round(float(score), 4),
+                "title_match_source": source if score else "none",
+                "matched_source_title": source_value,
+                "matched_tmdb_title": matched_name,
+                "title_match_required": True,
+                "title_match_passed": float(score) >= MIN_REQUIRED_TITLE_MATCH,
+            }
+
+        # A trusted IMDb/TMDB ID is never enough by itself: every candidate
+        # must also match a title from the source folder or from the TinEye
+        # poster filename/title evidence, even when no competing candidate exists.
         rejected_external_ids: list[dict[str, Any]] = []
         direct_sources = {"tineye_imdb", "tineye_tmdb"}
         for candidate_id in list(candidates):
             candidate_sources = sources.get(candidate_id, set())
-            if not (candidate_sources & direct_sources) or year is None:
+            if not (candidate_sources & direct_sources):
                 continue
 
             candidate = candidates[candidate_id]
             folder_detail, best_folder_variant = best_folder_match(candidate)
-            folder_similarity = float(folder_detail["title_similarity"])
-            hint_similarity = max(
-                [
-                    title_similarity(hint, str(candidate.get("title") or ""))
-                    for hint in evidence["title_hints"][:3]
-                ] + [
-                    title_similarity(hint, str(candidate.get("original_title") or ""))
-                    for hint in evidence["title_hints"][:3]
-                ],
-                default=0.0,
-            )
-            title_support = max(folder_similarity, hint_similarity)
+            title_detail = title_match_detail(candidate)
             rejection_reason = None
-            if folder_detail["tmdb_year"] is None:
+            if not title_detail["title_match_passed"]:
+                rejection_reason = (
+                    "TinEye external ID rejected because the candidate title does not match "
+                    "the source folder or any TinEye poster title"
+                )
+            elif year is not None and folder_detail["tmdb_year"] is None:
                 rejection_reason = "TMDB candidate has no release year while the source folder has one"
-            elif title_support < 0.88:
-                rejection_reason = "TinEye external ID title does not agree with the source folder or title hints"
-            elif folder_detail["year_delta"] is not None and folder_detail["year_delta"] > 1 and (
-                folder_similarity < 0.94 or "folder_search" not in candidate_sources
+            elif (
+                year is not None
+                and folder_detail["year_delta"] is not None
+                and folder_detail["year_delta"] > 1
+                and (
+                    folder_detail["title_similarity"] < 0.94
+                    or "folder_search" not in candidate_sources
+                )
             ):
                 rejection_reason = (
                     "TinEye external ID year differs by more than one year without an independent exact-title search match"
@@ -238,12 +271,12 @@ class MetadataEngine:
                     "source_year": year,
                     "year_delta": folder_detail["year_delta"],
                     "best_folder_title_variant": best_folder_variant,
-                    "title_support": round(title_support, 4),
+                    **title_detail,
                     "sources": sorted(candidate_sources & direct_sources),
                     "reason": rejection_reason,
                 })
-                # Preserve candidates also found by an independent title search;
-                # remove candidates supported only by the rejected backlink.
+                # Keep independently folder-searched candidates available for
+                # scoring, but never let the rejected external ID act as proof.
                 if not (candidate_sources - direct_sources):
                     candidates.pop(candidate_id, None)
 
@@ -266,13 +299,14 @@ class MetadataEngine:
             folder_detail, best_folder_variant = best_folder_match(candidate)
             folder_similarity = float(folder_detail["title_similarity"])
             hint_scores = [
-                title_similarity(hint, str(candidate.get("title") or ""))
-                for hint in evidence["title_hints"][:3]
+                (title_similarity(hint, str(candidate.get("title") or "")), hint)
+                for hint in evidence["title_hints"][:TINeye_TITLE_HINT_LIMIT]
             ] + [
-                title_similarity(hint, str(candidate.get("original_title") or ""))
-                for hint in evidence["title_hints"][:3]
+                (title_similarity(hint, str(candidate.get("original_title") or "")), hint)
+                for hint in evidence["title_hints"][:TINeye_TITLE_HINT_LIMIT]
             ]
-            tineye_similarity = max(hint_scores, default=0.0)
+            tineye_similarity, best_tineye_hint = max(hint_scores, default=(0.0, None))
+            title_detail = title_match_detail(candidate)
             best_similarity = max(folder_similarity, tineye_similarity)
 
             tmdb_year = folder_detail["tmdb_year"]
@@ -289,17 +323,8 @@ class MetadataEngine:
                 "folder_title_similarity": round(folder_similarity, 4),
                 "best_folder_title_variant": best_folder_variant,
                 "tineye_title_similarity": round(tineye_similarity, 4),
-                "best_tineye_hint": (
-                    max(
-                        evidence["title_hints"][:3],
-                        key=lambda hint: max(
-                            title_similarity(hint, str(candidate.get("title") or "")),
-                            title_similarity(hint, str(candidate.get("original_title") or "")),
-                        ),
-                    )
-                    if evidence["title_hints"][:3] and tineye_similarity > 0
-                    else None
-                ),
+                "best_tineye_hint": best_tineye_hint if tineye_similarity > 0 else None,
+                **title_detail,
                 "source_year": year,
                 "tmdb_year": tmdb_year,
                 "year_delta": year_delta,
@@ -518,6 +543,18 @@ class MetadataEngine:
                     "Exact source-folder title, independent TinEye title hint, "
                     "and TMDB search agree; TMDB release year will be used for the JSON filename"
                 ),
+            }, evidence
+
+        if not top_detail.get("title_match_passed"):
+            return None, {
+                "status": "review",
+                **top_detail,
+                "reason": (
+                    "Candidate did not pass the mandatory title match against "
+                    "the source folder or TinEye poster title"
+                ),
+                "candidate_id": top_candidate.get("id"),
+                "candidate_title": top_candidate.get("title"),
             }, evidence
 
         status = classify_match(top_detail, self.settings.match_accept_score)
