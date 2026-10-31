@@ -23,3 +23,6 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
+
+      - name: Build Hostless Docker image
+        run: docker build --pull -t kafianet-metadata-engine:test .
