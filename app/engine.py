@@ -4,7 +4,6 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import quote
 
 from app.config import Settings
 from app.github_api import GitHubAPI
@@ -14,7 +13,7 @@ from app.searxng import SearXNGClient
 from app.tmdb import TMDBClient
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def safe_segment(value: str) -> str:
@@ -347,10 +346,7 @@ class MetadataEngine:
         return record
 
     def run_batch(self, limit: int, apply: bool) -> dict[str, Any]:
-        if apply:
-            self.settings.validate_for_processing(apply=True)
-        elif not self.settings.tmdb_bearer_token:
-            raise RuntimeError("TMDB_BEARER_TOKEN is required even for DRY RUN")
+        self.settings.validate_for_processing(apply=apply)
 
         folders = self.github.list_film_folders()
         index = self.github.get_json_file("metadata/index.json") or {"schema_version": 1, "items": []}
