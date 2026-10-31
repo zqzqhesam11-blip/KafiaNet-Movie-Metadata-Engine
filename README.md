@@ -1,55 +1,50 @@
-# KafiaNet Movie Metadata Engine
+# KafiaNet authenticated SearXNG service
 
-Cloud worker for enriching the public KafiaNet poster catalog with verified TMDB metadata.
+This branch contains a dedicated Hostless deployment for KafiaNet's reverse-image
+search endpoint. It runs the official SearXNG container and protects every route
+except `GET/HEAD /health` with a Bearer token.
 
-## Repositories
+## Hostless deployment
 
-- Source images: `zqzqhesam11-blip/KafiaNet-Movie-Posters` (public).
-- Engine code: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine`.
-- Results are written back to the **poster repository**, so metadata commits do not trigger a redeploy of this engine.
+Create a separate Hostless App from this same GitHub repository with:
 
-## Safety defaults
+- Repository: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine`
+- Branch: `feature/kafianet-searxng-auth-20261031`
+- App name: `KafiaNet-SearXNG`
+- Working directory: `/`
+- Build system: Docker
+- Dockerfile: `Dockerfile`
+- Hostless file: `hostless.yaml`
+- Health check: HTTP `/health`, every 20 seconds
 
-- The CLI defaults to **DRY RUN**. It never writes to GitHub unless `--apply` is supplied.
-- It does not rename, move, delete, or rewrite poster image folders.
-- A low-confidence TMDB match goes to `مراجعة`; it is not guessed.
-- Duplicate identity is based on TMDB movie ID, not title spelling.
-- API keys and tokens are read only from Hostless environment variables. Never commit secrets.
+Do not select `main` for this service: this branch intentionally contains the
+SearXNG container as its repository root. The metadata engine remains on `main`.
 
-## Hostless setup
+## Required Hostless environment variables
 
-Connect this repository to Hostless as a Python App. The included `hostless.yaml` configures the API health endpoint and a paused test cron job. Do not resume the cron job until the environment variables below are configured and a five-film DRY_RUN is reviewed.
+Generate two independent high-entropy secrets in Hostless:
 
-Required environment variables:
+- `SEARXNG_TOKEN`: Bearer token required by the gateway on all non-health routes.
+- `SEARXNG_SECRET`: SearXNG Flask/session secret; the official container maps this
+  value into the SearXNG settings.
 
-- `TMDB_BEARER_TOKEN`: TMDB v3 API Bearer token.
-- `GITHUB_TOKEN`: fine-grained token with Contents read/write on the poster repository.
-- `POSTERS_REPO`: defaults to `zqzqhesam11-blip/KafiaNet-Movie-Posters`.
-- `POSTERS_BRANCH`: defaults to `main`.
+Never commit either value or paste it into chat. Use the same `SEARXNG_TOKEN`
+value in the metadata engine app as its `SEARXNG_TOKEN`.
 
-Optional:
+## Endpoint contract
 
-- `SEARXNG_URL`: SearXNG base URL. If set, the worker sends the public poster URL as an online URL search to the TinEye engine.
-- `SEARXNG_TOKEN`: only if the SearXNG deployment is protected by a token.
-- `TMDB_LANGUAGE`: defaults to `en-US`.
-- `BATCH_LIMIT`: defaults to `5`.
-- `MATCH_ACCEPT_SCORE`: defaults to `0.94`.
+- Health: `GET /health` returns HTTP 200 without authentication.
+- Search: `GET /search?q=<public-image-url>&engines=tineye&format=json` requires
+  `Authorization: Bearer <SEARXNG_TOKEN>`.
+- JSON output is enabled in SearXNG settings.
+- TinEye is enabled from the stock SearXNG engine configuration.
 
-## Local checks
+The TinEye engine is a URL-search engine: the query must be a publicly reachable
+image URL. It is not an official TinEye API integration.
 
-```bash
-python -m pip install -r requirements.txt
-python -m unittest discover -s tests -v
-python -m app.cli run --limit 5
-```
+## Security notes
 
-The command above is DRY RUN. To write metadata, use `python -m app.cli run --limit 5 --apply`.
-
-## Output layout
-
-- `جاهز/<source-folder>/movie.json`: high-confidence TMDB match.
-- `مكرر/<tmdb-id>/<source-folder>.json`: each source folder sharing a TMDB ID.
-- `مراجعة/<source-folder>/movie.json`: uncertain or missing match.
-- `metadata/index.json`: source-folder to TMDB identity/status mapping.
-
-Existing poster folders and images are preserved during the metadata phase. Folder rename plans are recorded in JSON and must be reviewed separately before any rename operation.
+- The wrapper checks the Authorization header using constant-time comparison.
+- No token is stored in Git.
+- All SearXNG pages and API routes are protected, not just `/search`.
+- Hostless health probes are the only unauthenticated route.
