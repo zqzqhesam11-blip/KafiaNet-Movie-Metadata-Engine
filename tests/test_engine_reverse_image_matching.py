@@ -32,7 +32,7 @@ class FakeTMDB:
         return dict(self.details_by_id.get(tmdb_id, MATRIX))
 
 
-class TinEyeTMDBMatchingTests(unittest.TestCase):
+class GoogleLensTMDBMatchingTests(unittest.TestCase):
     def make_engine(self, tmdb):
         engine = MetadataEngine.__new__(MetadataEngine)
         engine.settings = SimpleNamespace(match_accept_score=0.94)
@@ -40,7 +40,7 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         engine._details_cache = {}
         return engine
 
-    def test_tineye_image_filename_can_recover_wrong_folder_name(self):
+    def test_reverse_image_image_filename_can_recover_wrong_folder_name(self):
         tmdb = FakeTMDB(folder_results={"The Matrix": [dict(MATRIX)]}, imdb_results={})
         engine = self.make_engine(tmdb)
         candidate, match, evidence = engine._find_movie(
@@ -56,7 +56,7 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         )
         self.assertEqual(candidate["id"], 603)
         self.assertEqual(match["status"], "ready")
-        self.assertEqual(match["best_tineye_hint"], "The Matrix")
+        self.assertEqual(match["best_reverse_image_hint"], "The Matrix")
         self.assertIn(("The Matrix", None), tmdb.search_calls)
         self.assertIn("title_hints", evidence)
 
@@ -93,7 +93,7 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertEqual(candidate["id"], 603)
         self.assertEqual(match["status"], "ready")
         self.assertEqual(match["confidence"], 1.0)
-        self.assertEqual(match["title_match_source"], "tineye_poster_title")
+        self.assertEqual(match["title_match_source"], "reverse_image_poster_title")
         self.assertEqual(match["matched_source_title"], "The Matrix")
         self.assertEqual(evidence["imdb_ids"], ["tt0133093"])
 
@@ -114,7 +114,7 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertEqual(match["status"], "review")
         self.assertIn("mandatory title match", match["reason"])
 
-    def test_unrelated_tineye_id_is_rejected_when_folder_title_matches(self):
+    def test_unrelated_reverse_image_id_is_rejected_when_folder_title_matches(self):
         gladiator = {
             "id": 98,
             "title": "Gladiator",
@@ -203,7 +203,7 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertIn(("State of Siege", None), tmdb.search_calls)
         self.assertEqual(evidence["rejected_external_ids"], [])
 
-    def test_wrong_folder_year_can_be_corrected_by_exact_tineye_title_hint(self):
+    def test_wrong_folder_year_can_be_corrected_by_exact_reverse_image_title_hint(self):
         corrected = {
             "id": 91487,
             "title": "State of Siege",
@@ -382,9 +382,9 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         )
         self.assertIsNone(candidate)
         self.assertEqual(match["status"], "review")
-        self.assertIn("TinEye reverse-image request failed", match["reason"])
+        self.assertIn("GoogleLens reverse-image request failed", match["reason"])
 
-    def test_no_tineye_matches_keeps_title_only_candidate_in_review(self):
+    def test_no_reverse_image_matches_keeps_title_only_candidate_in_review(self):
         tmdb = FakeTMDB(folder_results={"The Matrix": [dict(MATRIX)]})
         engine = self.make_engine(tmdb)
         candidate, match, _ = engine._find_movie("The Matrix", 1999, [])

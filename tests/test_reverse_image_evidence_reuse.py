@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from app.engine import MetadataEngine
 
 
-class PreviousGoogle LensEvidenceTests(unittest.TestCase):
+class PreviousGoogleLensEvidenceTests(unittest.TestCase):
     def make_engine(self, latest_results, previous_results):
         engine = MetadataEngine.__new__(MetadataEngine)
         engine.settings = SimpleNamespace(

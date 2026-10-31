@@ -15,7 +15,7 @@ from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
 
 SCHEMA_VERSION = 2
 MIN_REQUIRED_TITLE_MATCH = 0.88
-TINEYE_TITLE_HINT_LIMIT = 8
+REVERSE_IMAGE_TITLE_HINT_LIMIT = 8
 
 
 def safe_segment(value: str) -> str:
@@ -38,8 +38,9 @@ class MetadataEngine:
             settings.tmdb_language,
             settings.http_timeout_seconds,
         )
-        self.reverse_image = Google LensAPIClient(
-            settings.reverse_image_api_key,
+        self.reverse_image = BrightDataGoogleLensClient(
+            settings.brightdata_api_key,
+            settings.brightdata_serp_zone,
             timeout=max(45, settings.http_timeout_seconds),
         )
 
@@ -140,7 +141,7 @@ class MetadataEngine:
         # Google Lens image filenames can carry a useful film title even when the
         # local folder name is abbreviated or misspelled. Keep fan-out bounded.
         seen_hints = {normalize_title(value) for value in folder_title_variants}
-        for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]:
+        for hint in evidence["title_hints"][:REVERSE_IMAGE_TITLE_HINT_LIMIT]:
             normalized_hint = normalize_title(hint)
             if not normalized_hint or normalized_hint in seen_hints:
                 continue
@@ -203,7 +204,7 @@ class MetadataEngine:
             ]
             reverse_image_matches = [
                 (title_similarity(hint, name), hint, name)
-                for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]
+                for hint in evidence["title_hints"][:REVERSE_IMAGE_TITLE_HINT_LIMIT]
                 for name in candidate_names
                 if hint and name
             ]
@@ -299,10 +300,10 @@ class MetadataEngine:
             folder_similarity = float(folder_detail["title_similarity"])
             hint_scores = [
                 (title_similarity(hint, str(candidate.get("title") or "")), hint)
-                for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]
+                for hint in evidence["title_hints"][:REVERSE_IMAGE_TITLE_HINT_LIMIT]
             ] + [
                 (title_similarity(hint, str(candidate.get("original_title") or "")), hint)
-                for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]
+                for hint in evidence["title_hints"][:REVERSE_IMAGE_TITLE_HINT_LIMIT]
             ]
             reverse_image_similarity, best_reverse_image_hint = max(hint_scores, default=(0.0, None))
             title_detail = title_match_detail(candidate)
@@ -637,6 +638,7 @@ class MetadataEngine:
             "reverse_image": {
                 "enabled": self.reverse_image is not None,
                 "provider": "google_lens_brightdata",
+                "provider": "google_lens_brightdata",
                 "results": reverse_image_results,
                 "results_source": reverse_image_results_source,
                 "latest_query": {
@@ -734,7 +736,7 @@ class MetadataEngine:
                         # Preserve the original processing error; Git history still
                         # retains the previously committed metadata if this read fails.
                         previous_record = None
-                previous_reverse_image = (previous_record or {}).get("reverse_image") or {}
+                previous_reverse_image = (previous_record or {}).get("reverse_image") or (previous_record or {}).get("tineye") or {}
                 previous_reverse_image_results = [
                     result for result in (previous_reverse_image.get("results") or [])
                     if isinstance(result, dict)
@@ -763,6 +765,7 @@ class MetadataEngine:
                     },
                     "reverse_image": {
                         "enabled": self.reverse_image is not None,
+                "provider": "google_lens_brightdata",
                         "results": previous_reverse_image_results,
                         "results_source": "previous_saved" if previous_reverse_image_results else "none",
                         "latest_query": {

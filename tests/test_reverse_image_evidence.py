@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import unittest
 
-from app.tineye_evidence import (
-    extract_tineye_evidence,
+from app.image_evidence import (
+    extract_reverse_image_evidence,
     imdb_id_from_url,
     tmdb_movie_id_from_url,
 )
 
 
-class TinEyeEvidenceTests(unittest.TestCase):
+class ReverseImageEvidenceTests(unittest.TestCase):
     def test_extracts_movie_title_from_image_filename(self):
-        evidence = extract_tineye_evidence([
+        evidence = extract_reverse_image_evidence([
             {
                 "title": "The.Matrix.1999.1080p.POSTER.jpg",
                 "url": "https://example.com/gallery",
@@ -23,7 +23,7 @@ class TinEyeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["tmdb_ids"], [])
 
     def test_preserves_numeric_title_and_connector_words(self):
-        evidence = extract_tineye_evidence([
+        evidence = extract_reverse_image_evidence([
             {
                 "title": "2001.A.Space.Odyssey.1968.POSTER.jpg",
                 "url": "https://example.com/movie",
@@ -44,13 +44,13 @@ class TinEyeEvidenceTests(unittest.TestCase):
         )
 
     def test_preserves_short_numeric_movie_title(self):
-        evidence = extract_tineye_evidence([
+        evidence = extract_reverse_image_evidence([
             {"title": "1917.POSTER.jpg", "url": "https://example.com/movie", "source": ""}
         ])
         self.assertEqual(evidence["title_hints"], ["1917"])
 
     def test_ignores_generic_image_names(self):
-        evidence = extract_tineye_evidence([
+        evidence = extract_reverse_image_evidence([
             {"title": "poster.jpg", "url": "https://example.com", "source": ""}
         ])
         self.assertEqual(evidence["title_hints"], [])
@@ -64,13 +64,13 @@ class TinEyeEvidenceTests(unittest.TestCase):
             "cecchettins murder a about a woman who endures beatings and belittling "
             "by her overbearing husband was topping the box office "
         ) * 3
-        evidence = extract_tineye_evidence([
+        evidence = extract_reverse_image_evidence([
             {"title": caption, "url": "https://example.com/photo", "source": ""}
         ])
         self.assertEqual(evidence["title_hints"], [])
 
     def test_extracts_year_country_director_and_keeps_backlink_association(self):
-        evidence = extract_tineye_evidence([{
+        evidence = extract_reverse_image_evidence([{
             "title": "State-of-Emergency-2010.jpg",
             "url": "https://www.imdb.com/title/tt1705134/",
             "source": "https://cdn.example.com/poster.jpg",
