@@ -91,7 +91,9 @@ class GitHubAPI:
 
             filename = parts[-1]
             suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-            if suffix not in IMAGE_EXTENSIONS:
+            # The folder must contain at least one supported image, but once
+            # selected, move every non-JSON file in that folder with it.
+            if suffix == ".json":
                 continue
 
             candidate = candidates.get(folder)
@@ -121,10 +123,14 @@ class GitHubAPI:
                 candidate["poster_files"],
                 key=lambda row: row["path"].casefold(),
             )
-            if not poster_files:
+            image_files = [
+                row for row in poster_files
+                if "." + row["path"].rsplit(".", 1)[-1].lower() in IMAGE_EXTENSIONS
+            ]
+            if not image_files:
                 continue
             candidate["poster_files"] = poster_files
-            candidate["image_path"] = poster_files[0]["path"]
+            candidate["image_path"] = image_files[0]["path"]
             folders.append(candidate)
 
         return sorted(folders, key=lambda item: item["folder"].casefold())
