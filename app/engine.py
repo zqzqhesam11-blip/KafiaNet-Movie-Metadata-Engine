@@ -68,6 +68,10 @@ class MetadataEngine:
         tineye_results: list[dict[str, Any]],
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
         evidence = extract_tineye_evidence(tineye_results)
+        tineye_failed = any(
+            isinstance(item, dict) and item.get("error")
+            for item in tineye_results
+        )
         candidates: dict[str, dict[str, Any]] = {}
         sources: dict[str, set[str]] = {}
         folder_candidates: dict[str, dict[str, Any]] = {}
@@ -179,6 +183,15 @@ class MetadataEngine:
             for candidate_id, candidate in candidates.items()
         ]
         scored.sort(key=lambda row: row[0], reverse=True)
+
+        if tineye_failed:
+            return None, {
+                "status": "review",
+                **scored[0][3],
+                "reason": "TinEye reverse-image request failed; folder-only candidate must be reviewed",
+                "candidate_id": scored[0][2].get("id"),
+                "candidate_title": scored[0][2].get("title"),
+            }, evidence
 
         direct_ids = {
             candidate_id
