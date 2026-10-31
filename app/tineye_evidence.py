@@ -11,8 +11,7 @@ GENERIC_WORDS = {
     "poster", "posters", "movie", "movies", "film", "films", "cover",
     "covers", "image", "images", "thumbnail", "thumb", "download",
     "original", "large", "small", "medium", "full", "hd", "jpg", "jpeg",
-    "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "the", "and",
-    "of", "for", "from", "official", "artwork", "bluray",
+    "png", "webp", "gif", "bmp", "tif", "tiff", "avif",     "of", "for", "from", "official", "artwork", "bluray",
     "brrip", "webrip", "webdl", "hdrip", "x264", "x265", "h264", "h265",
 }
 
@@ -51,7 +50,7 @@ def _clean_hint(value: str) -> str | None:
     value = re.sub(r"[_+.-]+", " ", value)
     value = re.sub(r"[^0-9A-Za-zÀ-ÖØ-öø-ÿ\u0400-\u04FF\u0600-\u06FF ]+", " ", value)
     words = [
-        word.casefold()
+        word
         for word in value.split()
         if word.casefold() not in GENERIC_WORDS and len(word) > 1
     ]
