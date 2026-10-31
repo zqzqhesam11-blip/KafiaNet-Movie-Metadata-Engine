@@ -5,7 +5,8 @@ Cloud worker for enriching the public KafiaNet poster catalog with verified TMDB
 ## Repositories
 
 - Source images: `zqzqhesam11-blip/KafiaNet-Movie-Posters` (public).
-- Engine code: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine`.
+- Engine code: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine` on `main`.
+- Reverse-image service: deploy the same repository on branch `feature/kafianet-searxng-auth-20261031` as the separate Hostless app `KafiaNet-SearXNG`.
 - Results are written back to the **poster repository**, so metadata commits do not trigger a redeploy of this engine.
 
 ## Safety defaults
