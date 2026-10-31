@@ -9,7 +9,7 @@ from app.config import Settings
 from app.github_api import GitHubAPI
 from app.matching import classify_match, normalize_title, score_candidate, split_title_year, title_search_variants, title_similarity
 from app.tineye_evidence import extract_tineye_evidence
-from app.searxng import SearXNGClient
+from app.tineye_api import TinEyeAPIClient
 from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
 
 
@@ -38,27 +38,22 @@ class MetadataEngine:
             settings.tmdb_language,
             settings.http_timeout_seconds,
         )
-        self.searxng = (
-            SearXNGClient(
-                settings.searxng_url,
-                settings.searxng_token,
-                timeout=max(45, settings.http_timeout_seconds),
-            )
-            if settings.searxng_url
-            else None
+        self.tineye = TinEyeAPIClient(
+            settings.tineye_api_key,
+            timeout=max(45, settings.http_timeout_seconds),
         )
 
     def close(self) -> None:
         self.github.close()
         self.tmdb.close()
-        if self.searxng:
-            self.searxng.close()
+        if self.tineye:
+            self.tineye.close()
 
     def _tineye_results(self, image_url: str) -> list[dict[str, Any]]:
-        if not self.searxng:
+        if not self.tineye:
             return []
         try:
-            return self.searxng.tineye_by_image_url(image_url)
+            return self.tineye.search_by_image_url(image_url)
         except Exception as exc:
             # A reverse-image provider failure must never invent or block TMDB identity.
             return [{"error": type(exc).__name__, "message": str(exc)[:300]}]
@@ -640,7 +635,7 @@ class MetadataEngine:
             },
             "match": match,
             "tineye": {
-                "enabled": self.searxng is not None,
+                "enabled": self.tineye is not None,
                 "results": tineye_results,
                 "results_source": tineye_results_source,
                 "latest_query": {
@@ -766,7 +761,7 @@ class MetadataEngine:
                         "reason": "Processing failed before a verified movie match; item is eligible for retry",
                     },
                     "tineye": {
-                        "enabled": self.searxng is not None,
+                        "enabled": self.tineye is not None,
                         "results": previous_tineye_results,
                         "results_source": "previous_saved" if previous_tineye_results else "none",
                         "latest_query": {
