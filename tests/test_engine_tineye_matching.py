@@ -90,7 +90,7 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
             imdb_results={"tt0133093": [dict(MATRIX)]},
         )
         engine = self.make_engine(tmdb)
-        candidate, match, _ = engine._find_movie(
+        candidate, match, evidence = engine._find_movie(
             "Gladiator",
             2000,
             [
@@ -166,6 +166,30 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertEqual(match["tmdb_year"], 1972)
         self.assertIn(("State of Siege", None), tmdb.search_calls)
         self.assertEqual(evidence["rejected_external_ids"], [])
+
+    def test_wrong_folder_year_can_be_corrected_by_exact_tineye_title_hint(self):
+        corrected = {
+            "id": 91487,
+            "title": "State of Siege",
+            "original_title": "État de siège",
+            "release_date": "1972-05-30",
+        }
+        tmdb = FakeTMDB(folder_results={"State of Siege": [corrected]})
+        engine = self.make_engine(tmdb)
+        candidate, match, _ = engine._find_movie(
+            "State of Siege",
+            1982,
+            [
+                {
+                    "title": "State.of.Siege.1972.poster.jpg",
+                    "url": "https://example.com/poster",
+                }
+            ],
+        )
+        self.assertEqual(candidate["id"], 91487)
+        self.assertEqual(match["status"], "ready")
+        self.assertTrue(match["source_year_corrected"])
+        self.assertEqual(match["tmdb_year"], 1972)
 
     def test_parenthetical_alias_finds_alternative_original_title(self):
         breathless = {

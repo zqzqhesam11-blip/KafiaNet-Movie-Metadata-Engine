@@ -184,7 +184,7 @@ class PosterOrganizationTests(unittest.TestCase):
             "image_path": "Original Folder (1998)/poster.jpg",
             "poster_files": [
                 {
-                    "path": "Original Folder (2020)/poster.jpg",
+                    "path": "Original Folder (1998)/poster.jpg",
                     "relative_path": "poster.jpg",
                     "sha": "poster-sha",
                     "mode": "100644",

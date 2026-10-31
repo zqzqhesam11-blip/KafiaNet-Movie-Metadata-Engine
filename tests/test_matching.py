@@ -24,6 +24,14 @@ class MatchingTests(unittest.TestCase):
         )
         self.assertEqual(classify_match(score, 0.94), "ready")
 
+    def test_missing_tmdb_year_cannot_be_auto_accepted_when_folder_has_year(self):
+        score = score_candidate(
+            "The Matrix",
+            1999,
+            {"title": "The Matrix", "original_title": "The Matrix"},
+        )
+        self.assertEqual(classify_match(score, 0.94), "review")
+
     def test_year_conflict_goes_to_review(self):
         score = score_candidate(
             "The Matrix",

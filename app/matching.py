@@ -106,6 +106,8 @@ def score_candidate(
 
 
 def classify_match(score: dict[str, Any], threshold: float) -> str:
+    if score["source_year"] is not None and score["tmdb_year"] is None:
+        return "review"
     if score["confidence"] < threshold:
         return "review"
     if score["year_delta"] is not None and score["year_delta"] > 1:

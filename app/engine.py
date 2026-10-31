@@ -405,6 +405,25 @@ class MetadataEngine:
                 "candidate_ids": [scored[0][2].get("id"), scored[1][2].get("id")],
             }, evidence
 
+        source_year_corrected = bool(
+            top_detail["year_delta"] is not None
+            and top_detail["year_delta"] > 1
+            and top_detail["folder_title_similarity"] >= 0.98
+            and top_detail["tineye_title_similarity"] >= 0.94
+            and "folder_search" in sources.get(top_id, set())
+        )
+        if source_year_corrected:
+            return top_candidate, {
+                "status": "ready",
+                **top_detail,
+                "confidence": 1.0,
+                "source_year_corrected": True,
+                "reason": (
+                    "Exact source-folder title, independent TinEye title hint, "
+                    "and TMDB search agree; TMDB release year will be used for the JSON filename"
+                ),
+            }, evidence
+
         status = classify_match(top_detail, self.settings.match_accept_score)
         if status != "ready":
             return None, {
