@@ -7,7 +7,8 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Settings:
     tmdb_bearer_token: str
-    tineye_api_key: str
+    brightdata_api_key: str
+    brightdata_serp_zone: str
     github_token: str
     posters_repo: str
     posters_branch: str
@@ -20,7 +21,8 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             tmdb_bearer_token=os.getenv("TMDB_BEARER_TOKEN", "").strip(),
-            tineye_api_key=os.getenv("TINEYE_API_KEY", "").strip(),
+            brightdata_api_key=os.getenv("BRIGHTDATA_API_KEY", "").strip(),
+            brightdata_serp_zone=os.getenv("BRIGHTDATA_SERP_ZONE", "").strip(),
             github_token=os.getenv("GITHUB_TOKEN", "").strip(),
             posters_repo=os.getenv("POSTERS_REPO", "zqzqhesam11-blip/KafiaNet-Movie-Posters").strip(),
             posters_branch=os.getenv("POSTERS_BRANCH", "main").strip(),
@@ -30,19 +32,26 @@ class Settings:
             http_timeout_seconds=max(5.0, float(os.getenv("HTTP_TIMEOUT_SECONDS", "60"))),
         )
 
-    def validate_tineye(self) -> None:
-        if not self.tineye_api_key:
+    def validate_brightdata(self) -> None:
+        missing = []
+        if not self.brightdata_api_key:
+            missing.append("BRIGHTDATA_API_KEY")
+        if not self.brightdata_serp_zone:
+            missing.append("BRIGHTDATA_SERP_ZONE")
+        if missing:
             raise RuntimeError(
-                "Missing required environment variable: TINEYE_API_KEY. "
-                "Configure the official TinEye API key in Hostless; do not paste it into chat."
+                "Missing Bright Data configuration: " + ", ".join(missing) +
+                ". Store the API key and SERP zone in Hostless secrets/environment variables."
             )
 
     def validate_for_processing(self, apply: bool) -> None:
         missing = []
         if not self.tmdb_bearer_token:
             missing.append("TMDB_BEARER_TOKEN")
-        if not self.tineye_api_key:
-            missing.append("TINEYE_API_KEY")
+        if not self.brightdata_api_key:
+            missing.append("BRIGHTDATA_API_KEY")
+        if not self.brightdata_serp_zone:
+            missing.append("BRIGHTDATA_SERP_ZONE")
         if apply and not self.github_token:
             missing.append("GITHUB_TOKEN")
         if missing:
