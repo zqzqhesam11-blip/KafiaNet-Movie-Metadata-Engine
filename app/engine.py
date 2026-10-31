@@ -269,7 +269,7 @@ class MetadataEngine:
         # preserve both candidates for review rather than blending the signals.
         folder_ranked = sorted(
             (
-                (score_candidate(candidate)["confidence"], candidate_id)
+                (score_candidate(title, year, candidate)["confidence"], candidate_id)
                 for candidate_id, candidate in folder_candidates.items()
             ),
             reverse=True,
