@@ -129,6 +129,20 @@ class GitHubAPI:
 
         return sorted(folders, key=lambda item: item["folder"].casefold())
 
+    def list_folder_blobs(self, prefix: str) -> list[dict[str, str]]:
+        normalized = prefix.rstrip("/") + "/"
+        return [
+            {
+                "path": str(item["path"]),
+                "sha": str(item["sha"]),
+                "mode": str(item.get("mode") or "100644"),
+            }
+            for item in self.recursive_tree()
+            if item.get("type") == "blob"
+            and str(item.get("path") or "").startswith(normalized)
+            and not str(item.get("path") or "").lower().endswith(".json")
+        ]
+
     def raw_url(self, path: str) -> str:
         encoded = "/".join(quote(part, safe="") for part in path.split("/"))
         return f"https://raw.githubusercontent.com/{self.repo}/{self.branch}/{encoded}"
