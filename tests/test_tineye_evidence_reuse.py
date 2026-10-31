@@ -14,7 +14,7 @@ class PreviousTinEyeEvidenceTests(unittest.TestCase):
             posters_repo="owner/posters",
             posters_branch="main",
         )
-        engine.searxng = object()
+        engine.tineye = object()
         engine.github = Mock()
         engine.github.raw_url.return_value = "https://raw.example/poster.jpg"
         engine.github.get_json_file.return_value = {
@@ -59,7 +59,7 @@ class PreviousTinEyeEvidenceTests(unittest.TestCase):
         }]
         latest_error = [{
             "error": "RuntimeError",
-            "message": "TinEye engine unresponsive: suspended",
+            "message": "TinEye API rate limit or service failure",
         }]
         engine = self.make_engine(latest_error, previous)
 
