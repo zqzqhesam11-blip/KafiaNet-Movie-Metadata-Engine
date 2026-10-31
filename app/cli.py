@@ -17,6 +17,7 @@ def main() -> int:
 
     apply = bool(args.apply and not args.dry_run)
     settings = Settings.from_env()
+    settings.validate_for_processing(apply=apply)
     limit = args.limit or settings.batch_limit
 
     engine = MetadataEngine(settings)
