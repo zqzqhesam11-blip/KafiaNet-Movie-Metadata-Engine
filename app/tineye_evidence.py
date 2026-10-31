@@ -11,7 +11,8 @@ GENERIC_WORDS = {
     "poster", "posters", "movie", "movies", "film", "films", "cover",
     "covers", "image", "images", "thumbnail", "thumb", "download",
     "original", "large", "small", "medium", "full", "hd", "jpg", "jpeg",
-    "png", "webp", "gif", "bmp", "tif", "tiff", "avif",     "of", "for", "from", "official", "artwork", "bluray",
+    "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "of", "for", "from",
+    "official", "artwork", "bluray",
     "brrip", "webrip", "webdl", "hdrip", "x264", "x265", "h264", "h265",
 }
 
@@ -57,6 +58,8 @@ def _clean_hint(value: str) -> str | None:
     if not words or not any(any(ch.isalpha() for ch in word) for word in words):
         return None
     hint = " ".join(words).strip()
+    if re.fullmatch(r"(?:tt\\d{5,12}|img\\d+|image\\d+|[0-9a-f]{16,})", hint, flags=re.I):
+        return None
     return hint if len(hint) >= 3 else None
 
 
