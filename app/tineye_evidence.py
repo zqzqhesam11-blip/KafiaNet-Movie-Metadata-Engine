@@ -12,7 +12,7 @@ GENERIC_WORDS = {
     "covers", "image", "images", "thumbnail", "thumb", "download",
     "original", "large", "small", "medium", "full", "hd", "jpg", "jpeg",
     "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "the", "and",
-    "a", "an", "of", "for", "from", "official", "artwork", "bluray",
+    "of", "for", "from", "official", "artwork", "bluray",
     "brrip", "webrip", "webdl", "hdrip", "x264", "x265", "h264", "h265",
 }
 
