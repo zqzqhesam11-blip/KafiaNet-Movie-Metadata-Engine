@@ -15,7 +15,7 @@ from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
 
 SCHEMA_VERSION = 2
 MIN_REQUIRED_TITLE_MATCH = 0.88
-TINeye_TITLE_HINT_LIMIT = 8
+TINEYE_TITLE_HINT_LIMIT = 8
 
 
 def safe_segment(value: str) -> str:
@@ -145,7 +145,7 @@ class MetadataEngine:
         # TinEye image filenames can carry a useful film title even when the
         # local folder name is abbreviated or misspelled. Keep fan-out bounded.
         seen_hints = {normalize_title(value) for value in folder_title_variants}
-        for hint in evidence["title_hints"][:TINeye_TITLE_HINT_LIMIT]:
+        for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]:
             normalized_hint = normalize_title(hint)
             if not normalized_hint or normalized_hint in seen_hints:
                 continue
@@ -208,7 +208,7 @@ class MetadataEngine:
             ]
             tineye_matches = [
                 (title_similarity(hint, name), hint, name)
-                for hint in evidence["title_hints"][:TINeye_TITLE_HINT_LIMIT]
+                for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]
                 for name in candidate_names
                 if hint and name
             ]
@@ -287,8 +287,12 @@ class MetadataEngine:
                 "status": "review",
                 "confidence": 0.0,
                 "reason": (
-                    "TinEye external IDs failed source-title/year validation; "
-                    "no independent TMDB title candidate remained"
+                    "No candidate passed the mandatory title match against the source folder or TinEye poster title"
+                    if any(
+                        "title does not match" in str(item.get("reason") or "")
+                        for item in rejected_external_ids
+                    )
+                    else "TinEye external IDs failed source-year validation; no independent TMDB title candidate remained"
                 ),
                 "candidate_ids": [
                     item["candidate_id"] for item in rejected_external_ids
@@ -300,10 +304,10 @@ class MetadataEngine:
             folder_similarity = float(folder_detail["title_similarity"])
             hint_scores = [
                 (title_similarity(hint, str(candidate.get("title") or "")), hint)
-                for hint in evidence["title_hints"][:TINeye_TITLE_HINT_LIMIT]
+                for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]
             ] + [
                 (title_similarity(hint, str(candidate.get("original_title") or "")), hint)
-                for hint in evidence["title_hints"][:TINeye_TITLE_HINT_LIMIT]
+                for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]
             ]
             tineye_similarity, best_tineye_hint = max(hint_scores, default=(0.0, None))
             title_detail = title_match_detail(candidate)
