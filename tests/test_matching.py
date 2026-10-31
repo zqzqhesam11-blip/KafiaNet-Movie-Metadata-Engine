@@ -1,11 +1,17 @@
 import unittest
 
-from app.matching import classify_match, normalize_title, score_candidate, split_title_year
+from app.matching import classify_match, normalize_title, score_candidate, split_title_year, title_search_variants
 
 
 class MatchingTests(unittest.TestCase):
     def test_split_year(self):
         self.assertEqual(split_title_year("Movie Name (2024)"), ("Movie Name", 2024))
+
+    def test_parenthetical_public_title_aliases_are_searched_separately(self):
+        self.assertEqual(
+            title_search_variants("Breathless (À Bout de Souffle)"),
+            ["Breathless (À Bout de Souffle)", "Breathless", "À Bout de Souffle"],
+        )
 
     def test_normalize_title(self):
         self.assertEqual(normalize_title("À Bout de Souffle"), "a bout de souffle")

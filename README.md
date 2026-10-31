@@ -13,7 +13,8 @@ Cloud worker for enriching the public KafiaNet poster catalog with verified TMDB
 
 - The CLI defaults to **DRY RUN**. It never writes to GitHub unless `--apply` is supplied.
 - During APPLY, source movie folders are moved into `جاهز/` or `مراجعة/` in one Git tree commit together with their JSON metadata.
-- The original movie-folder name is preserved. Image filenames, extensions, and bytes are unchanged; existing Git blob SHAs are reused instead of downloading and re-uploading images.
+- **The source movie-folder name is never changed**, even when its title or year is wrong. The folder is only classified/moved under `جاهز/`, `مراجعة/`, or `مكرر/` using its exact original name. Only the JSON basename changes to the verified TMDB worldwide title and release year. The JSON metadata records the original folder name and TMDB correction separately.
+- Image filenames, extensions, and bytes are unchanged; existing Git blob SHAs are reused instead of downloading and re-uploading images.
 - Every non-JSON file in a selected movie folder moves with that folder. The metadata JSON is written separately.
 - A confirmed movie's JSON filename uses the best-supported worldwide public title/year. TMDB's primary title is kept unless the same alternative title is recorded in at least three distinct country markets; a tie keeps the primary title. The rule is language-neutral and never strips original-script text automatically. The chosen title and market evidence are recorded in JSON; the full original and alternative titles remain available in TMDB metadata. A movie that remains unresolved in `مراجعة/` keeps its original folder name as the JSON filename.
 - Existing `مراجعة/` entries are re-scanned on later batches and can be promoted to `جاهز/` when a later match is verified. `جاهز/` and `مكرر/` are not treated as new source folders.
@@ -67,9 +68,9 @@ APPLY creates one atomic Git commit in the configured poster repository for each
 
 ## Output layout
 
-- `جاهز/<source-folder>/<canonical-title> (<year>).json`: high-confidence TMDB match. The source-folder name remains unchanged; the JSON filename uses the canonical title/year.
-- `مراجعة/<source-folder>/<source-folder>.json`: uncertain or missing match. Its source folder and JSON filename retain the original name until resolved.
-- `مكرر/<tmdb-id>/<source-folder>/<canonical-title> (<year>).json`: each source folder sharing a TMDB ID.
+- `جاهز/<exact-original-source-folder>/<canonical-title> (<year>).json`: high-confidence TMDB match. The directory name remains exactly as supplied; only the JSON filename uses the verified canonical title/year.
+- `مراجعة/<exact-original-source-folder>/<exact-original-source-folder>.json`: uncertain or missing match. Its folder and JSON filename retain the original name until a match is verified.
+- `مكرر/<tmdb-id>/<exact-original-source-folder>/<canonical-title> (<year>).json`: each source folder sharing a TMDB ID; its source-folder portion is not renamed.
 - `metadata/index.json`: source-folder to TMDB identity/status mapping.
 
 All image and other non-JSON files are kept inside the corresponding movie folder when it moves. The image paths and raw image URLs in the JSON metadata and index are updated to their destination paths.

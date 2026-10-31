@@ -22,6 +22,7 @@ class CliSummaryTests(unittest.TestCase):
             "tineye_unresponsive": 12,
             "tineye_no_matches": 5,
             "tineye_previous_evidence_reused": 8,
+            "tineye_rejected_external_ids": 3,
             "records": [{"large": "must not appear"}],
             "planned_output_files": ["very/long/path.json"],
             "planned_image_moves": ["poster.jpg"],
@@ -33,7 +34,7 @@ class CliSummaryTests(unittest.TestCase):
         self.assertIn("ready=178 review=20 duplicates=2", output)
         self.assertIn("commit_sha=abc123", output)
         self.assertIn(
-            "tineye_unresponsive=12 no_matches=5 reused_saved_evidence=8",
+            "tineye_unresponsive=12 no_matches=5 reused_saved_evidence=8 rejected_external_ids=3",
             output,
         )
         self.assertNotIn("must not appear", output)

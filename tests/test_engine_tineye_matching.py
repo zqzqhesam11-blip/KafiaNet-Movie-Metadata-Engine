@@ -78,7 +78,7 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertEqual(match["confidence"], 1.0)
         self.assertEqual(evidence["imdb_ids"], ["tt0133093"])
 
-    def test_high_confidence_folder_conflict_routes_to_review(self):
+    def test_unrelated_tineye_id_is_rejected_when_folder_title_matches(self):
         gladiator = {
             "id": 98,
             "title": "Gladiator",
@@ -101,9 +101,89 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertIsNone(candidate)
-        self.assertEqual(match["status"], "review")
-        self.assertIn("conflicts", match["reason"])
+        self.assertEqual(candidate["id"], 98)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["best_folder_title_variant"], "Gladiator")
+        self.assertEqual(evidence["rejected_external_ids"][0]["candidate_id"], "603")
+
+    def test_wrong_year_and_unrelated_imdb_backlink_do_not_override_folder_match(self):
+        bulado = {
+            "id": 737756,
+            "title": "Buladó",
+            "original_title": "Buladó",
+            "release_date": "2020-09-24",
+        }
+        unrelated = {
+            "id": 396810,
+            "title": "The Last Word",
+            "original_title": "The Last Word",
+            "release_date": "2016-09-09",
+        }
+        tmdb = FakeTMDB(
+            folder_results={"Buladó": [bulado]},
+            imdb_results={"tt5023260": [unrelated]},
+        )
+        engine = self.make_engine(tmdb)
+        candidate, match, evidence = engine._find_movie(
+            "Buladó",
+            2020,
+            [
+                {
+                    "title": "Bulado poster 2020.jpg",
+                    "url": "https://www.imdb.com/title/tt5023260/",
+                }
+            ],
+        )
+        self.assertEqual(candidate["id"], 737756)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(evidence["rejected_external_ids"][0]["candidate_id"], "396810")
+
+    def test_wrong_folder_year_is_corrected_from_exact_title_and_imdb_id(self):
+        corrected = {
+            "id": 91487,
+            "title": "State of Siege",
+            "original_title": "État de siège",
+            "release_date": "1972-05-30",
+        }
+        tmdb = FakeTMDB(
+            folder_results={"State of Siege": [corrected]},
+            imdb_results={"tt0070959": [corrected]},
+        )
+        engine = self.make_engine(tmdb)
+        candidate, match, evidence = engine._find_movie(
+            "State of Siege",
+            1982,
+            [
+                {
+                    "title": "State.of.Siege.1972.poster.jpg",
+                    "url": "https://www.imdb.com/title/tt0070959/",
+                }
+            ],
+        )
+        self.assertEqual(candidate["id"], 91487)
+        self.assertEqual(match["status"], "ready")
+        self.assertTrue(match["source_year_corrected"])
+        self.assertEqual(match["tmdb_year"], 1972)
+        self.assertIn(("State of Siege", None), tmdb.search_calls)
+        self.assertEqual(evidence["rejected_external_ids"], [])
+
+    def test_parenthetical_alias_finds_alternative_original_title(self):
+        breathless = {
+            "id": 269,
+            "title": "Breathless",
+            "original_title": "À bout de souffle",
+            "release_date": "1960-03-16",
+        }
+        tmdb = FakeTMDB(folder_results={"À Bout de Souffle": [breathless]})
+        engine = self.make_engine(tmdb)
+        candidate, match, _ = engine._find_movie(
+            "Breathless (À Bout de Souffle)",
+            1960,
+            [{"title": "Breathless.1960.poster.jpg", "url": "https://example.com/poster"}],
+        )
+        self.assertEqual(candidate["id"], 269)
+        self.assertEqual(match["status"], "ready")
+        self.assertIn(("À Bout de Souffle", 1960), tmdb.search_calls)
 
     def test_multiple_direct_movie_ids_route_to_review(self):
         second = {
