@@ -45,7 +45,7 @@ class BearerTokenMiddlewareTests(unittest.TestCase):
         response, body = self.request()
         self.assertEqual(response["status"], "401 Unauthorized")
         self.assertIn("WWW-Authenticate", response["headers"])
-        self.assertEqual(body, b"unauthorized\\n")
+        self.assertEqual(body, b"unauthorized\n")
         self.assertEqual(self.forwarded, 0)
 
     def test_wrong_token_is_rejected_without_forwarding(self):
@@ -62,7 +62,7 @@ class BearerTokenMiddlewareTests(unittest.TestCase):
     def test_health_is_available_without_token(self):
         response, body = self.request(path="/health")
         self.assertEqual(response["status"], "200 OK")
-        self.assertEqual(body, b"ok\\n")
+        self.assertEqual(body, b"ok\n")
         self.assertEqual(self.forwarded, 0)
 
     def test_health_head_has_no_body(self):
