@@ -22,6 +22,27 @@ class TinEyeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["imdb_ids"], [])
         self.assertEqual(evidence["tmdb_ids"], [])
 
+    def test_preserves_numeric_title_and_connector_words(self):
+        evidence = extract_tineye_evidence([
+            {
+                "title": "2001.A.Space.Odyssey.1968.POSTER.jpg",
+                "url": "https://example.com/movie",
+                "source": "",
+            },
+            {
+                "title": "The.Lord.of.the.Rings.The.Fellowship.of.the.Ring.jpg",
+                "url": "https://example.com/movie",
+                "source": "",
+            },
+        ])
+        self.assertEqual(
+            evidence["title_hints"],
+            [
+                "2001 A Space Odyssey",
+                "The Lord of the Rings The Fellowship of the Ring",
+            ],
+        )
+
     def test_ignores_generic_image_names(self):
         evidence = extract_tineye_evidence([
             {"title": "poster.jpg", "url": "https://example.com", "source": ""}
