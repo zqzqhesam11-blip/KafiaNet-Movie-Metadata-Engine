@@ -15,9 +15,10 @@ MATRIX = {
 
 
 class FakeTMDB:
-    def __init__(self, folder_results=None, imdb_results=None):
+    def __init__(self, folder_results=None, imdb_results=None, details_by_id=None):
         self.folder_results = folder_results or {}
         self.imdb_results = imdb_results or {}
+        self.details_by_id = details_by_id or {}
         self.search_calls = []
 
     def search_movies(self, title, year=None):
@@ -28,7 +29,7 @@ class FakeTMDB:
         return self.imdb_results.get(imdb_id, [])
 
     def movie_details(self, tmdb_id):
-        return dict(MATRIX)
+        return dict(self.details_by_id.get(tmdb_id, MATRIX))
 
 
 class TinEyeTMDBMatchingTests(unittest.TestCase):
@@ -208,6 +209,79 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertEqual(candidate["id"], 269)
         self.assertEqual(match["status"], "ready")
         self.assertIn(("À Bout de Souffle", 1960), tmdb.search_calls)
+
+    def test_trusted_imdb_link_resolves_same_title_year_collision_using_country_and_director(self):
+        us_film = {
+            "id": 136476,
+            "title": "State of Emergency",
+            "original_title": "State of Emergency",
+            "release_date": "2012-09-17",
+        }
+        russian_film = {
+            "id": 520975,
+            "title": "State of Emergency",
+            "original_title": "Аварийное состояние",
+            "release_date": "2012-06-01",
+        }
+        details = {
+            136476: {
+                "id": 136476,
+                "title": "State of Emergency",
+                "original_title": "State of Emergency",
+                "release_date": "2012-09-17",
+                "runtime": 90,
+                "production_countries": [{"iso_3166_1": "US", "name": "United States of America"}],
+                "credits": {"crew": [{"job": "Director", "name": "Turner Clay"}], "cast": []},
+            },
+            520975: {
+                "id": 520975,
+                "title": "State of Emergency",
+                "original_title": "Аварийное состояние",
+                "release_date": "2012-06-01",
+                "runtime": 100,
+                "production_countries": [{"iso_3166_1": "RU", "name": "Russia"}],
+                "credits": {"crew": [{"job": "Director", "name": "Vsevolod Benigsen"}], "cast": []},
+            },
+        }
+        tmdb = FakeTMDB(
+            folder_results={"State of Emergency": [us_film, russian_film]},
+            imdb_results={"tt1705134": [us_film]},
+            details_by_id=details,
+        )
+        engine = self.make_engine(tmdb)
+
+        candidate, match, evidence = engine._find_movie(
+            "State of Emergency",
+            2012,
+            [{
+                "title": "State-of-Emergency-2010.jpg",
+                "url": "https://www.imdb.com/title/tt1705134/",
+                "source": "https://cdn.example.com/state-of-emergency.jpg",
+                "content": "",
+            }],
+        )
+
+        self.assertEqual(candidate["id"], 136476)
+        self.assertEqual(match["status"], "ready")
+        self.assertTrue(match["same_title_year_collision_resolved"])
+        self.assertIn("same-title/year collision", match["reason"])
+        self.assertEqual(
+            evidence["selected_identity_profile"]["production_countries"],
+            ["United States of America"],
+        )
+        self.assertEqual(
+            evidence["selected_identity_profile"]["directors"],
+            ["Turner Clay"],
+        )
+        self.assertEqual(evidence["same_title_year_candidates"][0]["candidate_id"], "520975")
+        self.assertEqual(
+            evidence["same_title_year_candidates"][0]["directors"],
+            ["Vsevolod Benigsen"],
+        )
+        self.assertEqual(
+            evidence["same_title_year_candidates"][0]["production_countries"],
+            ["Russia"],
+        )
 
     def test_multiple_direct_movie_ids_route_to_review(self):
         second = {

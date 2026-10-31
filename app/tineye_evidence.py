@@ -11,6 +11,16 @@ TMDB_MOVIE_RE = re.compile(r"^/movie/(\d+)(?:[-/]|$)", re.IGNORECASE)
 # image/movie titles. Keep hints bounded before they can reach the TMDB API.
 MAX_TITLE_HINT_CHARS = 160
 MAX_TITLE_HINT_WORDS = 22
+MAX_BACKLINKS = 12
+YEAR_HINT_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+COUNTRY_RE = re.compile(
+    r"\b(?:country(?: of origin)?|production country|production countries)\s*[:=–-]\s*([^|;\n<>]{2,60})",
+    re.IGNORECASE,
+)
+DIRECTOR_RE = re.compile(
+    r"\b(?:director|directed by)\s*[:=–-]\s*([^|;\n<>]{2,80})",
+    re.IGNORECASE,
+)
 
 GENERIC_WORDS = {
     "poster", "posters", "movie", "movies", "film", "films", "cover",
@@ -89,6 +99,10 @@ def extract_tineye_evidence(results: list[dict]) -> dict[str, list]:
     hints: list[str] = []
     imdb_ids: list[str] = []
     tmdb_ids: list[int] = []
+    year_hints: list[int] = []
+    country_hints: list[str] = []
+    director_hints: list[str] = []
+    backlinks: list[dict] = []
 
     for result in results or []:
         if not isinstance(result, dict):
@@ -98,15 +112,23 @@ def extract_tineye_evidence(results: list[dict]) -> dict[str, list]:
         if title and title.casefold() not in {item.casefold() for item in hints}:
             hints.append(title)
 
+        linked_imdb_ids: list[str] = []
+        linked_tmdb_ids: list[int] = []
         for field in ("url", "source"):
             url = str(result.get(field) or "")
             imdb_id = imdb_id_from_url(url)
-            if imdb_id and imdb_id not in imdb_ids:
-                imdb_ids.append(imdb_id)
+            if imdb_id:
+                if imdb_id not in imdb_ids:
+                    imdb_ids.append(imdb_id)
+                if imdb_id not in linked_imdb_ids:
+                    linked_imdb_ids.append(imdb_id)
 
             tmdb_id = tmdb_movie_id_from_url(url)
-            if tmdb_id and tmdb_id not in tmdb_ids:
-                tmdb_ids.append(tmdb_id)
+            if tmdb_id:
+                if tmdb_id not in tmdb_ids:
+                    tmdb_ids.append(tmdb_id)
+                if tmdb_id not in linked_tmdb_ids:
+                    linked_tmdb_ids.append(tmdb_id)
 
         source = str(result.get("source") or "")
         try:
@@ -117,8 +139,38 @@ def extract_tineye_evidence(results: list[dict]) -> dict[str, list]:
         if source_hint and source_hint.casefold() not in {item.casefold() for item in hints}:
             hints.append(source_hint)
 
+        raw_title = str(result.get("title") or "")
+        raw_content = str(result.get("content") or "")
+        raw_text = " ".join((raw_title, raw_content, unquote(basename)))
+        for year_match in YEAR_HINT_RE.findall(raw_text):
+            year_value = int(year_match)
+            if 1888 <= year_value <= 2035 and year_value not in year_hints:
+                year_hints.append(year_value)
+        for country_match in COUNTRY_RE.findall(raw_content):
+            value = country_match.strip(" .,:")
+            if value and value.casefold() not in {item.casefold() for item in country_hints}:
+                country_hints.append(value)
+        for director_match in DIRECTOR_RE.findall(raw_content):
+            value = director_match.strip(" .,:")
+            if value and value.casefold() not in {item.casefold() for item in director_hints}:
+                director_hints.append(value)
+
+        if len(backlinks) < MAX_BACKLINKS:
+            backlinks.append({
+                "title": raw_title[:180],
+                "url": str(result.get("url") or "")[:500],
+                "source": source[:500],
+                "content": raw_content[:500],
+                "imdb_ids": linked_imdb_ids,
+                "tmdb_ids": linked_tmdb_ids,
+            })
+
     return {
         "title_hints": hints[:8],
         "imdb_ids": imdb_ids[:8],
         "tmdb_ids": tmdb_ids[:8],
+        "year_hints": year_hints[:12],
+        "country_hints": country_hints[:8],
+        "director_hints": director_hints[:8],
+        "backlinks": backlinks,
     }
