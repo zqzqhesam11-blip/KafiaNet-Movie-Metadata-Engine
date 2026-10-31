@@ -62,7 +62,8 @@ def _clean_hint(value: str) -> str | None:
     words = [
         word
         for word in value.split()
-        if word.casefold() not in GENERIC_WORDS and len(word) > 1
+        if word.casefold() not in GENERIC_WORDS
+        and (len(word) > 1 or word.casefold() in {"a", "i"})
     ]
     if not words or not any(any(ch.isalpha() for ch in word) for word in words):
         return None
