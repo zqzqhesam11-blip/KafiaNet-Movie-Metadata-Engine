@@ -488,12 +488,16 @@ class MetadataEngine:
                 )
 
             target_images: list[str] = []
+            target_image_paths: list[str] = []
             source_prefix = str(item.get("source_prefix") or folder).rstrip("/")
             for poster in poster_files:
                 source_path = str(poster["path"])
                 relative_path = str(poster.get("relative_path") or source_path[len(source_prefix) + 1:])
                 target_path = f"{target_prefix}/{relative_path}"
                 target_images.append(target_path)
+                suffix = "." + source_path.rsplit(".", 1)[-1].lower() if "." in source_path else ""
+                if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}:
+                    target_image_paths.append(target_path)
                 if source_path != target_path:
                     if not poster.get("sha"):
                         raise RuntimeError(f"Missing Git blob SHA; refusing image move: {source_path}")
@@ -512,8 +516,10 @@ class MetadataEngine:
                 or previous.get("image_path")
                 or old_source
             )
-            record["source"]["image_path"] = target_images[0]
-            record["source"]["image_url"] = self.github.raw_url(target_images[0])
+            if not target_image_paths:
+                raise RuntimeError(f"No supported poster image found for folder: {folder}")
+            record["source"]["image_path"] = target_image_paths[0]
+            record["source"]["image_url"] = self.github.raw_url(target_image_paths[0])
 
             out_path = f"{target_prefix}/{json_filename(record, folder)}"
             record["output_path"] = out_path
@@ -521,7 +527,7 @@ class MetadataEngine:
 
             row = next(row for row in projected if row["source_folder"] == folder)
             row["status"] = record["status"]
-            row["image_path"] = target_images[0]
+            row["image_path"] = target_image_paths[0]
             row["original_image_path"] = record["source"]["original_image_path"]
             row["output_path"] = out_path
             row["tmdb_id"] = tmdb_id
