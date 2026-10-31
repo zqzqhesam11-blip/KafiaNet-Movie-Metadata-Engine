@@ -98,7 +98,12 @@ class GitHubAPI:
             return None
         response.raise_for_status()
         data = response.json()
-        content = base64.b64decode(data.get("content") or "").decode("utf-8")
+        encoded = data.get("content") or ""
+        if not encoded or data.get("encoding") != "base64":
+            # Large files may not include content in the Contents API response.
+            blob = self._get(f"/git/blobs/{data['sha']}")
+            encoded = blob.get("content") or ""
+        content = base64.b64decode(encoded).decode("utf-8")
         import json
         return json.loads(content)
 
