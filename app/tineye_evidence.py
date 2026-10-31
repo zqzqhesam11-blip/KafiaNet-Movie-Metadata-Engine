@@ -11,8 +11,8 @@ GENERIC_WORDS = {
     "poster", "posters", "movie", "movies", "film", "films", "cover",
     "covers", "image", "images", "thumbnail", "thumb", "download",
     "original", "large", "small", "medium", "full", "hd", "jpg", "jpeg",
-    "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "of", "for", "from",
-    "official", "artwork", "bluray", "brrip", "webrip", "webdl", "hdrip",
+    "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "official",
+    "artwork", "bluray", "brrip", "webrip", "webdl", "hdrip",
     "x264", "x265", "h264", "h265",
 }
 
@@ -46,9 +46,17 @@ def _clean_hint(value: str) -> str | None:
 
     value = value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     value = re.sub(r"\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)$", "", value, flags=re.I)
-    value = re.sub(r"\b(?:19|20)\d{2}\b", " ", value)
-    value = re.sub(r"\b(?:480|720|1080|1440|2160)p\b|\b4k\b", " ", value, flags=re.I)
     value = re.sub(r"[_+.-]+", " ", value)
+
+    # Preserve an opening numeric title (e.g. "1917" or "2001: A Space Odyssey"),
+    # while dropping a later release-year suffix from common poster filenames.
+    parts = value.split()
+    parts = [
+        part for index, part in enumerate(parts)
+        if index == 0 or not re.fullmatch(r"(?:19|20)\d{2}", part)
+    ]
+    value = " ".join(parts)
+    value = re.sub(r"\b(?:480|720|1080|1440|2160)p\b|\b4k\b", " ", value, flags=re.I)
     value = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in value)
 
     words = [
