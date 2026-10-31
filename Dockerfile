@@ -1,17 +1,21 @@
-FROM python:3.12-slim
+FROM searxng/searxng:latest
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+# Keep SearXNG's official startup script (settings setup, permissions and
+# environment handling), but replace its final Granian target with our
+# WSGI authentication wrapper.
+USER root
+WORKDIR /usr/local/searxng
 
-WORKDIR /app
+COPY --chown=977:977 settings.yml /etc/searxng/settings.yml
+COPY --chown=977:977 auth_middleware.py /usr/local/searxng/auth_middleware.py
+COPY --chown=977:977 kafianet_gateway.py /usr/local/searxng/kafianet_gateway.py
 
-COPY requirements.txt .
-RUN python -m pip install --no-cache-dir -r requirements.txt
+RUN set -eu; \
+    grep -Fq 'exec /usr/local/searxng/.venv/bin/granian searx.webapp:app' /usr/local/searxng/entrypoint.sh; \
+    sed -i 's#exec /usr/local/searxng/.venv/bin/granian searx.webapp:app#export GRANIAN_HOST=0.0.0.0; export GRANIAN_PORT="${PORT:-8080}"; exec /usr/local/searxng/.venv/bin/granian kafianet_gateway:app#' /usr/local/searxng/entrypoint.sh; \
+    chmod 0644 /etc/searxng/settings.yml /usr/local/searxng/auth_middleware.py /usr/local/searxng/kafianet_gateway.py
 
-COPY app ./app
-COPY tests ./tests
-
+ENV SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+USER 977:977
