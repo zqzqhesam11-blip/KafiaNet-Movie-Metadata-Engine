@@ -55,6 +55,20 @@ class TinEyeEvidenceTests(unittest.TestCase):
         ])
         self.assertEqual(evidence["title_hints"], [])
 
+    def test_rejects_long_news_caption_as_a_movie_title_hint(self):
+        caption = (
+            "caption corrects spelling of surname to cecchettin director and actress "
+            "paola cortellesi attends an interview with the associated press in rome "
+            "tuesday nov 21 paola cortellesi directed ancora domani theres still "
+            "tomorrow as the country was transfixed by developments in giulia "
+            "cecchettins murder a about a woman who endures beatings and belittling "
+            "by her overbearing husband was topping the box office "
+        ) * 3
+        evidence = extract_tineye_evidence([
+            {"title": caption, "url": "https://example.com/photo", "source": ""}
+        ])
+        self.assertEqual(evidence["title_hints"], [])
+
     def test_extracts_imdb_id_only_from_imdb_host(self):
         self.assertEqual(
             imdb_id_from_url("https://www.imdb.com/title/tt0133093/"),

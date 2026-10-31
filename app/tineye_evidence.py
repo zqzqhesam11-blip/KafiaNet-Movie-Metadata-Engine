@@ -7,6 +7,11 @@ from urllib.parse import unquote, urlparse
 
 IMDB_ID_RE = re.compile(r"\b(tt\d{5,12})\b", re.IGNORECASE)
 TMDB_MOVIE_RE = re.compile(r"^/movie/(\d+)(?:[-/]|$)", re.IGNORECASE)
+# TinEye result titles may be full article captions or snippets rather than
+# image/movie titles. Keep hints bounded before they can reach the TMDB API.
+MAX_TITLE_HINT_CHARS = 160
+MAX_TITLE_HINT_WORDS = 22
+
 GENERIC_WORDS = {
     "poster", "posters", "movie", "movies", "film", "films", "cover",
     "covers", "image", "images", "thumbnail", "thumb", "download",
@@ -47,6 +52,9 @@ def _clean_hint(value: str) -> str | None:
     value = value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     value = re.sub(r"\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)$", "", value, flags=re.I)
     value = re.sub(r"[_+.-]+", " ", value)
+    # Reject article/caption prose instead of turning it into a TMDB query.
+    if len(value) > MAX_TITLE_HINT_CHARS or len(value.split()) > MAX_TITLE_HINT_WORDS:
+        return None
 
     # Preserve an opening numeric title (e.g. "1917" or "2001: A Space Odyssey"),
     # while dropping a later release-year suffix from common poster filenames.

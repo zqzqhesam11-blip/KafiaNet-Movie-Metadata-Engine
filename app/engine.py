@@ -404,7 +404,54 @@ class MetadataEngine:
                 f"[KafiaNet] [{position}/{total}] START {item['folder']}",
                 flush=True,
             )
-            record = self._record_for_folder(item)
+            try:
+                record = self._record_for_folder(item)
+            except Exception as exc:
+                # Isolate failures to this film. Persist it as REVIEW so a later
+                # batch can retry it; one malformed TinEye title or API response
+                # must not abort the remaining films in the batch.
+                folder = item["folder"]
+                image_path = item["image_path"]
+                title_hint, year_hint = split_title_year(folder)
+                image_url = self.github.raw_url(image_path)
+                record = {
+                    "schema_version": SCHEMA_VERSION,
+                    "processed_utc": datetime.now(timezone.utc).isoformat(),
+                    "source": {
+                        "repository": self.settings.posters_repo,
+                        "branch": self.settings.posters_branch,
+                        "folder": folder,
+                        "image_path": image_path,
+                        "image_url": image_url,
+                    },
+                    "original": {
+                        "folder_name": folder,
+                        "title_hint": title_hint,
+                        "year_hint": year_hint,
+                    },
+                    "match": {
+                        "status": "review",
+                        "confidence": 0.0,
+                        "reason": "Processing failed before a verified movie match; item is eligible for retry",
+                    },
+                    "tineye": {
+                        "enabled": self.searxng is not None,
+                        "results": [],
+                        "evidence": {},
+                    },
+                    "tmdb": None,
+                    "correction": None,
+                    "status": "review",
+                    "processing_error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc).replace("\n", " ")[:500],
+                    },
+                }
+                print(
+                    f"[KafiaNet] [{position}/{total}] ERROR "
+                    f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')[:220]}",
+                    flush=True,
+                )
             records.append(record)
             tmdb_id = (record.get("tmdb") or {}).get("tmdb_id")
             print(
