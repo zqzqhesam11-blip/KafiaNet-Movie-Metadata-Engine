@@ -25,6 +25,12 @@ def format_summary(result: dict[str, Any]) -> str:
         ),
     ]
 
+    lines.append(
+        f"tineye_unresponsive={result.get('tineye_unresponsive', 0)} "
+        f"no_matches={result.get('tineye_no_matches', 0)} "
+        f"reused_saved_evidence={result.get('tineye_previous_evidence_reused', 0)}"
+    )
+
     if mode == "DRY_RUN":
         lines.append(
             "planned_json_files="

@@ -311,14 +311,51 @@ class MetadataEngine:
             "reason": "High-confidence folder title or TinEye image-title match",
         }, evidence
 
-    def _record_for_folder(self, item: dict[str, str]) -> dict[str, Any]:
+    def _record_for_folder(
+        self,
+        item: dict[str, str],
+        previous_output_path: str | None = None,
+    ) -> dict[str, Any]:
         folder = item["folder"]
         image_path = item["image_path"]
         title_hint, year_hint = split_title_year(folder)
         image_url = self.github.raw_url(image_path)
 
-        tineye_results = self._tineye_results(image_url)
+        latest_tineye_results = self._tineye_results(image_url)
+        latest_errors = [
+            item for item in latest_tineye_results
+            if isinstance(item, dict) and item.get("error")
+        ]
+        latest_query_status = (
+            "error" if latest_errors
+            else "ok" if latest_tineye_results
+            else "no_matches"
+        )
+
+        # A temporary empty/unresponsive TinEye response must not erase useful
+        # reverse-image evidence already stored for this exact poster.
+        tineye_results = latest_tineye_results
+        tineye_results_source = "live"
+        if not latest_tineye_results or latest_errors:
+            previous_record = (
+                self.github.get_json_file(previous_output_path)
+                if previous_output_path
+                else None
+            )
+            previous_tineye = (previous_record or {}).get("tineye") or {}
+            saved_results = previous_tineye.get("results") or []
+            reusable_results = [
+                result for result in saved_results
+                if isinstance(result, dict)
+                and not result.get("error")
+                and any(result.get(key) for key in ("title", "url", "source"))
+            ]
+            if reusable_results:
+                tineye_results = reusable_results
+                tineye_results_source = "previous_saved"
+
         candidate, match, tineye_evidence = self._find_movie(title_hint, year_hint, tineye_results)
+        tineye_evidence["results_source"] = tineye_results_source
 
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -339,6 +376,11 @@ class MetadataEngine:
             "tineye": {
                 "enabled": self.searxng is not None,
                 "results": tineye_results,
+                "results_source": tineye_results_source,
+                "latest_query": {
+                    "status": latest_query_status,
+                    "errors": latest_errors,
+                },
                 "evidence": tineye_evidence,
             },
         }
@@ -404,8 +446,12 @@ class MetadataEngine:
                 f"[KafiaNet] [{position}/{total}] START {item['folder']}",
                 flush=True,
             )
+            previous_row = old_by_folder.get(item["folder"]) or {}
             try:
-                record = self._record_for_folder(item)
+                record = self._record_for_folder(
+                    item,
+                    previous_output_path=previous_row.get("output_path"),
+                )
             except Exception as exc:
                 # Isolate failures to this film. Persist it as REVIEW so a later
                 # batch can retry it; one malformed TinEye title or API response
@@ -414,6 +460,21 @@ class MetadataEngine:
                 image_path = item["image_path"]
                 title_hint, year_hint = split_title_year(folder)
                 image_url = self.github.raw_url(image_path)
+                previous_record = None
+                if previous_row.get("output_path"):
+                    try:
+                        previous_record = self.github.get_json_file(previous_row["output_path"])
+                    except Exception:
+                        # Preserve the original processing error; Git history still
+                        # retains the previously committed metadata if this read fails.
+                        previous_record = None
+                previous_tineye = (previous_record or {}).get("tineye") or {}
+                previous_tineye_results = [
+                    result for result in (previous_tineye.get("results") or [])
+                    if isinstance(result, dict)
+                    and not result.get("error")
+                    and any(result.get(key) for key in ("title", "url", "source"))
+                ]
                 record = {
                     "schema_version": SCHEMA_VERSION,
                     "processed_utc": datetime.now(timezone.utc).isoformat(),
@@ -436,8 +497,16 @@ class MetadataEngine:
                     },
                     "tineye": {
                         "enabled": self.searxng is not None,
-                        "results": [],
-                        "evidence": {},
+                        "results": previous_tineye_results,
+                        "results_source": "previous_saved" if previous_tineye_results else "none",
+                        "latest_query": {
+                            "status": "processing_error",
+                            "errors": [{
+                                "type": type(exc).__name__,
+                                "message": str(exc).replace("\\n", " ")[:300],
+                            }],
+                        },
+                        "evidence": previous_tineye.get("evidence") or {},
                     },
                     "tmdb": None,
                     "correction": None,
@@ -454,9 +523,13 @@ class MetadataEngine:
                 )
             records.append(record)
             tmdb_id = (record.get("tmdb") or {}).get("tmdb_id")
+            tineye_info = record.get("tineye") or {}
+            latest_query_status = (tineye_info.get("latest_query") or {}).get("status", "unknown")
+            tineye_source = tineye_info.get("results_source", "live")
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
-                f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'}",
+                f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
+                f"tineye={latest_query_status} evidence={tineye_source}",
                 flush=True,
             )
 
@@ -684,6 +757,20 @@ class MetadataEngine:
             "ready": ready_count,
             "review": review_count,
             "duplicates_in_this_batch": duplicate_count,
+            "tineye_unresponsive": sum(
+                1 for record in records
+                if (record.get("tineye") or {}).get("latest_query", {}).get("status")
+                in {"error", "processing_error"}
+            ),
+            "tineye_no_matches": sum(
+                1 for record in records
+                if (record.get("tineye") or {}).get("latest_query", {}).get("status")
+                == "no_matches"
+            ),
+            "tineye_previous_evidence_reused": sum(
+                1 for record in records
+                if (record.get("tineye") or {}).get("results_source") == "previous_saved"
+            ),
             "planned_output_files": sorted(files),
             "planned_image_moves": sorted(moves),
             "planned_source_image_deletes": image_deletes,
