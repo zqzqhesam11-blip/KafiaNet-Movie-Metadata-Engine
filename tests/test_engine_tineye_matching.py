@@ -143,6 +143,14 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertEqual(match["status"], "review")
         self.assertIn("TinEye reverse-image request failed", match["reason"])
 
+    def test_no_tineye_matches_keeps_title_only_candidate_in_review(self):
+        tmdb = FakeTMDB(folder_results={"The Matrix": [dict(MATRIX)]})
+        engine = self.make_engine(tmdb)
+        candidate, match, _ = engine._find_movie("The Matrix", 1999, [])
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertIn("no reverse-image matches", match["reason"])
+
     def test_no_tmdb_match_is_review(self):
         engine = self.make_engine(FakeTMDB())
         candidate, match, _ = engine._find_movie("not a film", None, [])
