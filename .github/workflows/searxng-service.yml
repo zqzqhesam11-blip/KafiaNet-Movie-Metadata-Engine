@@ -20,3 +20,33 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_auth_middleware.py' -v
       - name: Build container image
         run: docker build --pull -t kafianet-searxng-auth:test .
+      - name: Container smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="ci-smoke-token-not-a-production-secret"
+          secret="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          docker run -d --name kafianet-searxng-smoke \
+            -e SEARXNG_TOKEN="$token" \
+            -e SEARXNG_SECRET="$secret" \
+            -p 127.0.0.1:18080:8080 \
+            kafianet-searxng-auth:test
+          cleanup() {
+            docker logs kafianet-searxng-smoke || true
+            docker rm -f kafianet-searxng-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          healthy=false
+          for attempt in $(seq 1 45); do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/health || true)"
+            if [ "$code" = "200" ]; then healthy=true; break; fi
+            sleep 2
+          done
+          if [ "$healthy" != "true" ]; then
+            echo "Container health endpoint did not become ready"
+            exit 1
+          fi
+          unauth="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/ || true)"
+          test "$unauth" = "401"
+          auth="$(curl -sS -H "Authorization: Bearer $token" -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/ || true)"
+          test "$auth" = "200"
