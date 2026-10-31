@@ -55,7 +55,7 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         )
         self.assertEqual(candidate["id"], 603)
         self.assertEqual(match["status"], "ready")
-        self.assertEqual(match["best_tineye_hint"], "The Matrix")
+        self.assertEqual(match["best_tineye_hint"], "the matrix")
         self.assertIn(("The Matrix", None), tmdb.search_calls)
         self.assertIn("title_hints", evidence)
 
