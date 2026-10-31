@@ -12,8 +12,8 @@ GENERIC_WORDS = {
     "covers", "image", "images", "thumbnail", "thumb", "download",
     "original", "large", "small", "medium", "full", "hd", "jpg", "jpeg",
     "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "of", "for", "from",
-    "official", "artwork", "bluray",
-    "brrip", "webrip", "webdl", "hdrip", "x264", "x265", "h264", "h265",
+    "official", "artwork", "bluray", "brrip", "webrip", "webdl", "hdrip",
+    "x264", "x265", "h264", "h265",
 }
 
 
@@ -49,7 +49,8 @@ def _clean_hint(value: str) -> str | None:
     value = re.sub(r"\b(?:19|20)\d{2}\b", " ", value)
     value = re.sub(r"\b(?:480|720|1080|1440|2160)p\b|\b4k\b", " ", value, flags=re.I)
     value = re.sub(r"[_+.-]+", " ", value)
-    value = re.sub(r"[^0-9A-Za-zÀ-ÖØ-öø-ÿ\u0400-\u04FF\u0600-\u06FF ]+", " ", value)
+    value = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in value)
+
     words = [
         word
         for word in value.split()
@@ -57,8 +58,9 @@ def _clean_hint(value: str) -> str | None:
     ]
     if not words or not any(any(ch.isalpha() for ch in word) for word in words):
         return None
+
     hint = " ".join(words).strip()
-    if re.fullmatch(r"(?:tt\\d{5,12}|img\\d+|image\\d+|[0-9a-f]{16,})", hint, flags=re.I):
+    if re.fullmatch(r"(?:tt\d{5,12}|img\d+|image\d+|[0-9a-f]{16,})", hint, flags=re.I):
         return None
     return hint if len(hint) >= 3 else None
 
