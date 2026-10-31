@@ -43,6 +43,12 @@ class TinEyeEvidenceTests(unittest.TestCase):
             ],
         )
 
+    def test_preserves_short_numeric_movie_title(self):
+        evidence = extract_tineye_evidence([
+            {"title": "1917.POSTER.jpg", "url": "https://example.com/movie", "source": ""}
+        ])
+        self.assertEqual(evidence["title_hints"], ["1917"])
+
     def test_ignores_generic_image_names(self):
         evidence = extract_tineye_evidence([
             {"title": "poster.jpg", "url": "https://example.com", "source": ""}
