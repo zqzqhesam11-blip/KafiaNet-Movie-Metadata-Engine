@@ -178,8 +178,25 @@ class GitHubAPI:
         message: str = "Add KafiaNet movie metadata batch",
         moves: dict[str, dict[str, str]] | None = None,
     ) -> str:
-        if not files and not deletes:
-            raise ValueError("No files or deletions to commit")
+        deleted_paths = set(deletes or [])
+        move_items: list[dict[str, Any]] = []
+        for path, source in sorted((moves or {}).items()):
+            if path in files or path in deleted_paths:
+                raise ValueError(f"Conflicting Git tree operation for path: {path}")
+            sha = str(source.get("sha") or "")
+            if not sha:
+                raise ValueError(f"Missing source blob SHA for image move: {path}")
+            move_items.append(
+                {
+                    "path": path,
+                    "mode": str(source.get("mode") or "100644"),
+                    "type": "blob",
+                    "sha": sha,
+                }
+            )
+
+        if not files and not deleted_paths and not move_items:
+            raise ValueError("No files, moves, or deletions to commit")
 
         expected_head, base_tree = self._branch_commit()
         tree_items: list[dict[str, Any]] = []
@@ -193,22 +210,7 @@ class GitHubAPI:
                 {"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]}
             )
 
-        deleted_paths = set(deletes or [])
-        for path, source in sorted((moves or {}).items()):
-            if path in files or path in deleted_paths:
-                raise ValueError(f"Conflicting Git tree operation for path: {path}")
-            sha = str(source.get("sha") or "")
-            if not sha:
-                raise ValueError(f"Missing source blob SHA for image move: {path}")
-            tree_items.append(
-                {
-                    "path": path,
-                    "mode": str(source.get("mode") or "100644"),
-                    "type": "blob",
-                    "sha": sha,
-                }
-            )
-
+        tree_items.extend(move_items)
         for path in sorted(deleted_paths):
             tree_items.append(
                 {"path": path, "mode": "100644", "type": "blob", "sha": None}
