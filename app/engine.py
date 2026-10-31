@@ -471,13 +471,13 @@ class MetadataEngine:
                     "tmdb_id": int(tmdb_id),
                     "source_folders": sorted(row["source_folder"] for row in group),
                 }
-                target_prefix = f"مكرر/{tmdb_id}/{safe_segment(folder)}"
+                target_prefix = f"مكرر/{tmdb_id}/{folder}"
                 duplicate_count += 1
             elif record["status"] == "ready":
-                target_prefix = f"جاهز/{safe_segment(folder)}"
+                target_prefix = f"جاهز/{folder}"
                 ready_count += 1
             else:
-                target_prefix = f"مراجعة/{safe_segment(folder)}"
+                target_prefix = f"مراجعة/{folder}"
                 review_count += 1
 
             item = item_by_folder[folder]
@@ -556,12 +556,18 @@ class MetadataEngine:
                             f"Cannot safely move duplicate metadata; existing file is missing: {previous_path}"
                         )
                     source_folder = str(row["source_folder"])
-                    old_prefix = f"جاهز/{safe_segment(source_folder)}"
-                    new_prefix = f"مكرر/{tmdb_id}/{safe_segment(source_folder)}"
+                    old_prefix = f"جاهز/{source_folder}"
+                    new_prefix = f"مكرر/{tmdb_id}/{source_folder}"
                     moved_images = self.github.list_folder_blobs(old_prefix)
+                    image_source_prefix = old_prefix
+                    # During the first migration, older READY JSON files may
+                    # exist while their images are still in the original root.
+                    if not moved_images:
+                        moved_images = self.github.list_folder_blobs(source_folder)
+                        image_source_prefix = source_folder
                     for poster in moved_images:
                         source_path = poster["path"]
-                        relative_path = source_path[len(old_prefix) + 1:]
+                        relative_path = source_path[len(image_source_prefix) + 1:]
                         target_path = f"{new_prefix}/{relative_path}"
                         moves[target_path] = {"sha": poster["sha"], "mode": poster["mode"]}
                         image_deletes.append(source_path)
@@ -569,6 +575,10 @@ class MetadataEngine:
                             row["image_path"] = target_path
                             old_record["source"]["image_path"] = target_path
                             old_record["source"]["image_url"] = self.github.raw_url(target_path)
+                    old_record["source"].setdefault(
+                        "original_image_path",
+                        row.get("original_image_path") or row.get("image_path"),
+                    )
 
                     old_record["status"] = "duplicate"
                     old_record["duplicate_group"] = {
