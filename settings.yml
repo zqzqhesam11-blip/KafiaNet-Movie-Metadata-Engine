@@ -1,0 +1,24 @@
+# KafiaNet private reverse-image search configuration.
+# Retain default SearXNG settings, while enabling JSON responses and TinEye.
+use_default_settings: true
+
+general:
+  instance_name: "KafiaNet Reverse Image Search"
+  debug: false
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  # The official container replaces this placeholder from SEARXNG_SECRET.
+  secret_key: "ultrasecretkey"
+  bind_address: "0.0.0.0"
+  limiter: false
+  image_proxy: false
+
+engines:
+  - name: tineye
+    disabled: false
+    timeout: 30.0
