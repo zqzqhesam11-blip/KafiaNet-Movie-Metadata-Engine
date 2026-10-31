@@ -523,9 +523,13 @@ class MetadataEngine:
                 )
             records.append(record)
             tmdb_id = (record.get("tmdb") or {}).get("tmdb_id")
+            tineye_info = record.get("tineye") or {}
+            latest_query_status = (tineye_info.get("latest_query") or {}).get("status", "unknown")
+            tineye_source = tineye_info.get("results_source", "live")
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
-                f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'}",
+                f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
+                f"tineye={latest_query_status} evidence={tineye_source}",
                 flush=True,
             )
 
@@ -753,6 +757,20 @@ class MetadataEngine:
             "ready": ready_count,
             "review": review_count,
             "duplicates_in_this_batch": duplicate_count,
+            "tineye_unresponsive": sum(
+                1 for record in records
+                if (record.get("tineye") or {}).get("latest_query", {}).get("status")
+                in {"error", "processing_error"}
+            ),
+            "tineye_no_matches": sum(
+                1 for record in records
+                if (record.get("tineye") or {}).get("latest_query", {}).get("status")
+                == "no_matches"
+            ),
+            "tineye_previous_evidence_reused": sum(
+                1 for record in records
+                if (record.get("tineye") or {}).get("results_source") == "previous_saved"
+            ),
             "planned_output_files": sorted(files),
             "planned_image_moves": sorted(moves),
             "planned_source_image_deletes": image_deletes,
