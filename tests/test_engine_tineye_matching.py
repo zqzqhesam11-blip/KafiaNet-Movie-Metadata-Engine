@@ -60,9 +60,7 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertIn("title_hints", evidence)
 
     def test_trusted_imdb_backlink_resolves_tmdb_identity(self):
-        tmdb = FakeTMDB(
-            imdb_results={"tt0133093": [dict(MATRIX)]},
-        )
+        tmdb = FakeTMDB(imdb_results={"tt0133093": [dict(MATRIX)]})
         engine = self.make_engine(tmdb)
         candidate, match, evidence = engine._find_movie(
             "abbreviated unknown folder",
@@ -132,6 +130,18 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertIsNone(candidate)
         self.assertEqual(match["status"], "review")
         self.assertEqual(set(match["candidate_ids"]), {"603", "155"})
+
+    def test_failed_reverse_image_search_forces_review(self):
+        tmdb = FakeTMDB(folder_results={"The Matrix": [dict(MATRIX)]})
+        engine = self.make_engine(tmdb)
+        candidate, match, _ = engine._find_movie(
+            "The Matrix",
+            1999,
+            [{"error": "Timeout", "message": "provider unavailable"}],
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertIn("TinEye reverse-image request failed", match["reason"])
 
     def test_no_tmdb_match_is_review(self):
         engine = self.make_engine(FakeTMDB())
