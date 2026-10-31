@@ -9,13 +9,3 @@ health_check:
   type: http
   http_path: /health
   interval_in_seconds: 20
-
-# PAUSED intentionally. Run and review a five-film DRY_RUN before any APPLY.
-cron_jobs:
-  - name: kafianet-metadata-batch
-    command: python -m app.cli run --limit 5 --dry-run
-    schedule: "*/30 * * * *"
-    timezone_utc_offset: 3
-    cpus: 0.1
-    memory: 256
-    status: paused
