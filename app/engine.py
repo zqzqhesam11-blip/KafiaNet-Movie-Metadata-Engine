@@ -7,7 +7,7 @@ from typing import Any
 
 from app.config import Settings
 from app.github_api import GitHubAPI
-from app.matching import classify_match, normalize_title, score_candidate, split_title_year, title_similarity
+from app.matching import classify_match, normalize_title, score_candidate, split_title_year, title_search_variants, title_similarity
 from app.tineye_evidence import extract_tineye_evidence
 from app.searxng import SearXNGClient
 from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
@@ -87,13 +87,27 @@ class MetadataEngine:
             if source == "folder_search":
                 folder_candidates[key] = candidate
 
-        # The original folder name remains the primary text-search signal.
-        for candidate in self.tmdb.search_movies(title, year):
-            add_candidate(candidate, "folder_search")
+        # Keep the exact source folder text as the identity, but search its
+        # parenthetical aliases separately (e.g. Breathless / À Bout de Souffle).
+        # If the stored year is wrong, retry a title-only TMDB query only when
+        # the year-scoped query did not return an exact-year title candidate.
+        folder_title_variants = title_search_variants(title) or [title]
+        evidence["folder_title_variants"] = folder_title_variants
+        for folder_variant in folder_title_variants:
+            folder_results = self.tmdb.search_movies(folder_variant, year)
+            for candidate in folder_results:
+                add_candidate(candidate, "folder_search")
+            has_exact_year = any(
+                score_candidate(folder_variant, year, candidate)["year_delta"] == 0
+                for candidate in folder_results
+            ) if year is not None else True
+            if year is not None and not has_exact_year:
+                for candidate in self.tmdb.search_movies(folder_variant, None):
+                    add_candidate(candidate, "folder_search")
 
-        # TinEye image filenames can carry a reliable film title even when the
+        # TinEye image filenames can carry a useful film title even when the
         # local folder name is abbreviated or misspelled. Keep fan-out bounded.
-        seen_hints = {normalize_title(title)}
+        seen_hints = {normalize_title(value) for value in folder_title_variants}
         for hint in evidence["title_hints"][:3]:
             normalized_hint = normalize_title(hint)
             if not normalized_hint or normalized_hint in seen_hints:
@@ -127,6 +141,7 @@ class MetadataEngine:
             key: sorted(value) for key, value in sources.items()
         }
         evidence["resolution_errors"] = resolution_errors
+        evidence["rejected_external_ids"] = []
 
         if not candidates:
             return None, {
@@ -135,8 +150,85 @@ class MetadataEngine:
                 "reason": "TMDB returned no candidates from folder or TinEye evidence",
             }, evidence
 
+        def best_folder_match(candidate: dict[str, Any]) -> tuple[dict[str, Any], str]:
+            scored_variants = [
+                (score_candidate(variant, year, candidate), variant)
+                for variant in folder_title_variants
+            ] or [(score_candidate(title, year, candidate), title)]
+            return max(scored_variants, key=lambda row: row[0]["confidence"])
+
+        # TinEye links can point to an unrelated page that happened to reuse
+        # the poster. Validate direct IMDb/TMDB IDs against the source title
+        # and release year before they can be authoritative. A wrong folder
+        # year remains correctable when an unscoped TMDB title search
+        # independently returns the same exact-title movie.
+        rejected_external_ids: list[dict[str, Any]] = []
+        direct_sources = {"tineye_imdb", "tineye_tmdb"}
+        for candidate_id in list(candidates):
+            candidate_sources = sources.get(candidate_id, set())
+            if not (candidate_sources & direct_sources) or year is None:
+                continue
+
+            candidate = candidates[candidate_id]
+            folder_detail, best_folder_variant = best_folder_match(candidate)
+            folder_similarity = float(folder_detail["title_similarity"])
+            hint_similarity = max(
+                [
+                    title_similarity(hint, str(candidate.get("title") or ""))
+                    for hint in evidence["title_hints"][:3]
+                ] + [
+                    title_similarity(hint, str(candidate.get("original_title") or ""))
+                    for hint in evidence["title_hints"][:3]
+                ],
+                default=0.0,
+            )
+            title_support = max(folder_similarity, hint_similarity)
+            rejection_reason = None
+            if folder_detail["tmdb_year"] is None:
+                rejection_reason = "TMDB candidate has no release year while the source folder has one"
+            elif title_support < 0.88:
+                rejection_reason = "TinEye external ID title does not agree with the source folder or title hints"
+            elif folder_detail["year_delta"] is not None and folder_detail["year_delta"] > 1 and (
+                folder_similarity < 0.94 or "folder_search" not in candidate_sources
+            ):
+                rejection_reason = (
+                    "TinEye external ID year differs by more than one year without an independent exact-title search match"
+                )
+
+            if rejection_reason:
+                rejected_external_ids.append({
+                    "candidate_id": candidate_id,
+                    "candidate_title": candidate.get("title"),
+                    "candidate_year": folder_detail["tmdb_year"],
+                    "source_year": year,
+                    "year_delta": folder_detail["year_delta"],
+                    "best_folder_title_variant": best_folder_variant,
+                    "title_support": round(title_support, 4),
+                    "sources": sorted(candidate_sources & direct_sources),
+                    "reason": rejection_reason,
+                })
+                # Preserve candidates also found by an independent title search;
+                # remove candidates supported only by the rejected backlink.
+                if not (candidate_sources - direct_sources):
+                    candidates.pop(candidate_id, None)
+
+        evidence["rejected_external_ids"] = rejected_external_ids
+
+        if not candidates:
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": (
+                    "TinEye external IDs failed source-title/year validation; "
+                    "no independent TMDB title candidate remained"
+                ),
+                "candidate_ids": [
+                    item["candidate_id"] for item in rejected_external_ids
+                ],
+            }, evidence
+
         def candidate_score(candidate: dict[str, Any]) -> dict[str, Any]:
-            folder_detail = score_candidate(title, year, candidate)
+            folder_detail, best_folder_variant = best_folder_match(candidate)
             folder_similarity = float(folder_detail["title_similarity"])
             hint_scores = [
                 title_similarity(hint, str(candidate.get("title") or ""))
@@ -160,6 +252,7 @@ class MetadataEngine:
                 "confidence": round(confidence, 4),
                 "title_similarity": round(best_similarity, 4),
                 "folder_title_similarity": round(folder_similarity, 4),
+                "best_folder_title_variant": best_folder_variant,
                 "tineye_title_similarity": round(tineye_similarity, 4),
                 "best_tineye_hint": (
                     max(
@@ -206,10 +299,15 @@ class MetadataEngine:
                 "candidate_title": scored[0][2].get("title"),
             }, evidence
 
+        rejected_ids = {
+            str(item["candidate_id"]) for item in rejected_external_ids
+        }
         direct_ids = {
             candidate_id
             for candidate_id, candidate_sources in sources.items()
-            if {"tineye_imdb", "tineye_tmdb"} & candidate_sources
+            if candidate_id in candidates
+            and candidate_id not in rejected_ids
+            and ({"tineye_imdb", "tineye_tmdb"} & candidate_sources)
         }
 
         # Multiple distinct direct IDs from image backlinks are conflicting
@@ -230,7 +328,7 @@ class MetadataEngine:
             # If the folder name independently identifies another high-confidence
             # film, the disagreement requires human review.
             folder_scored = [
-                (score_candidate(title, year, candidate)["confidence"], candidate_id)
+                (best_folder_match(candidate)[0]["confidence"], candidate_id)
                 for candidate_id, candidate in folder_candidates.items()
             ]
             folder_scored.sort(reverse=True)
@@ -246,11 +344,17 @@ class MetadataEngine:
                     "candidate_ids": [direct_id, folder_scored[0][1]],
                 }, evidence
 
-            if direct_detail["year_delta"] is not None and direct_detail["year_delta"] > 1:
+            source_year_corrected = bool(
+                direct_detail["year_delta"] is not None
+                and direct_detail["year_delta"] > 1
+                and direct_detail["folder_title_similarity"] >= 0.94
+                and "folder_search" in sources.get(direct_id, set())
+            )
+            if direct_detail["year_delta"] is not None and direct_detail["year_delta"] > 1 and not source_year_corrected:
                 return None, {
                     "status": "review",
                     **direct_detail,
-                    "reason": "TinEye external ID conflicts with the source folder year",
+                    "reason": "TinEye external ID conflicts with the source folder year and lacks independent exact-title confirmation",
                     "candidate_id": direct_id,
                     "candidate_title": direct_candidate.get("title"),
                 }, evidence
@@ -259,7 +363,13 @@ class MetadataEngine:
                 "status": "ready",
                 **direct_detail,
                 "confidence": 1.0,
-                "reason": "TinEye backlink resolved to a single trusted IMDb/TMDB movie ID",
+                "source_year_corrected": source_year_corrected,
+                "reason": (
+                    "TinEye ID and independent exact folder-title search agree; "
+                    "TMDB release year will be used for the JSON filename"
+                    if source_year_corrected
+                    else "TinEye backlink resolved to a single title/year-validated IMDb/TMDB movie ID"
+                ),
             }, evidence
 
         top_score, top_id, top_candidate, top_detail = scored[0]
@@ -269,7 +379,7 @@ class MetadataEngine:
         # preserve both candidates for review rather than blending the signals.
         folder_ranked = sorted(
             (
-                (score_candidate(title, year, candidate)["confidence"], candidate_id)
+                (best_folder_match(candidate)[0]["confidence"], candidate_id)
                 for candidate_id, candidate in folder_candidates.items()
             ),
             reverse=True,
@@ -293,6 +403,25 @@ class MetadataEngine:
                 **top_detail,
                 "reason": "Ambiguous TMDB candidates have nearly equal combined scores",
                 "candidate_ids": [scored[0][2].get("id"), scored[1][2].get("id")],
+            }, evidence
+
+        source_year_corrected = bool(
+            top_detail["year_delta"] is not None
+            and top_detail["year_delta"] > 1
+            and top_detail["folder_title_similarity"] >= 0.98
+            and top_detail["tineye_title_similarity"] >= 0.94
+            and "folder_search" in sources.get(top_id, set())
+        )
+        if source_year_corrected:
+            return top_candidate, {
+                "status": "ready",
+                **top_detail,
+                "confidence": 1.0,
+                "source_year_corrected": True,
+                "reason": (
+                    "Exact source-folder title, independent TinEye title hint, "
+                    "and TMDB search agree; TMDB release year will be used for the JSON filename"
+                ),
             }, evidence
 
         status = classify_match(top_detail, self.settings.match_accept_score)
@@ -403,11 +532,15 @@ class MetadataEngine:
             record["tmdb"] = normalized
             record["title_policy_version"] = WORLDWIDE_TITLE_POLICY_VERSION
             record["correction"] = {
+                # Legacy key retained for catalog-reader compatibility; this
+                # is a JSON basename, never a physical folder rename.
                 "canonical_folder_name": canonical_folder_name,
+                "canonical_json_name": canonical_folder_name,
                 "worldwide_title": canonical_title,
                 "title_selection": title_selection,
-                "rename_required": safe_segment(folder).casefold()
+                "json_rename_required": safe_segment(folder).casefold()
                 != safe_segment(canonical_folder_name).casefold(),
+                "rename_required": False,
                 "source_folder_unchanged": True,
             }
             record["status"] = "ready"
@@ -526,10 +659,25 @@ class MetadataEngine:
             tineye_info = record.get("tineye") or {}
             latest_query_status = (tineye_info.get("latest_query") or {}).get("status", "unknown")
             tineye_source = tineye_info.get("results_source", "live")
+            match_info = record.get("match") or {}
+            reason = str(match_info.get("reason") or "unknown")
+            reason = " ".join(reason.replace('"', "'").replace("\\r", " ").replace("\\n", " ").split())[:150]
+            candidate_ids = match_info.get("candidate_ids") or []
+            if not candidate_ids and match_info.get("candidate_id") is not None:
+                candidate_ids = [match_info["candidate_id"]]
+            candidate_text = ",".join(str(value) for value in candidate_ids[:4]) or "none"
+            rejected_ids = [
+                str(value.get("candidate_id"))
+                for value in (tineye_info.get("evidence") or {}).get("rejected_external_ids", [])
+                if isinstance(value, dict) and value.get("candidate_id") is not None
+            ]
+            rejected_text = ",".join(rejected_ids[:4]) or "none"
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
-                f"tineye={latest_query_status} evidence={tineye_source}",
+                f"tineye={latest_query_status} evidence={tineye_source} "
+                f'reason="{reason}" candidates={candidate_text} '
+                f"rejected_external_ids={rejected_text}",
                 flush=True,
             )
 
@@ -554,6 +702,7 @@ class MetadataEngine:
                     "original_image_path": original_image_path,
                     "tmdb_id": (record.get("tmdb") or {}).get("tmdb_id"),
                     "canonical_folder_name": (record.get("correction") or {}).get("canonical_folder_name"),
+                    "canonical_json_name": (record.get("correction") or {}).get("canonical_json_name"),
                     "status": record["status"],
                     "output_path": None,
                 }
@@ -576,7 +725,7 @@ class MetadataEngine:
             correction = record.get("correction") or {}
             tmdb = record.get("tmdb") or {}
             if status in {"ready", "duplicate"}:
-                title = correction.get("canonical_folder_name")
+                title = correction.get("canonical_json_name") or correction.get("canonical_folder_name")
                 if not title and tmdb.get("title"):
                     year = tmdb.get("year")
                     title = f"{tmdb['title']} ({year})" if year else tmdb["title"]
@@ -770,6 +919,14 @@ class MetadataEngine:
             "tineye_previous_evidence_reused": sum(
                 1 for record in records
                 if (record.get("tineye") or {}).get("results_source") == "previous_saved"
+            ),
+            "tineye_rejected_external_ids": sum(
+                len(
+                    ((record.get("tineye") or {}).get("evidence") or {}).get(
+                        "rejected_external_ids", []
+                    )
+                )
+                for record in records
             ),
             "planned_output_files": sorted(files),
             "planned_image_moves": sorted(moves),

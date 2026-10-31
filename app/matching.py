@@ -7,6 +7,7 @@ from typing import Any
 
 
 YEAR_RE = re.compile(r"\s*[\[(（](19\d{2}|20\d{2})[\])）]\s*$")
+TITLE_ALIAS_RE = re.compile(r"[\[(（]([^()\[\]（）]+)[\])）]")
 
 
 def split_title_year(folder_name: str) -> tuple[str, int | None]:
@@ -15,6 +16,40 @@ def split_title_year(folder_name: str) -> tuple[str, int | None]:
     if not match:
         return value, None
     return value[: match.start()].strip(), int(match.group(1))
+
+
+def title_search_variants(title: str) -> list[str]:
+    """Return the original title, its unbracketed form, and parenthetical aliases.
+
+    Folder names are source identifiers and are never rewritten. This helper
+    only broadens TMDB search so names such as "Breathless (À Bout de Souffle)"
+    can be found by either public title.
+    """
+    value = str(title or "").strip()
+    if not value:
+        return []
+
+    variants = [value]
+    aliases = [
+        match.group(1).strip()
+        for match in TITLE_ALIAS_RE.finditer(value)
+        if match.group(1).strip()
+        and not re.fullmatch(r"(?:19|20)\d{2}", match.group(1).strip())
+    ]
+    base = TITLE_ALIAS_RE.sub(" ", value)
+    base = " ".join(base.split()).strip()
+    if base:
+        variants.append(base)
+    variants.extend(aliases)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for variant in variants:
+        key = normalize_title(variant)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(variant)
+    return result
 
 
 def normalize_title(value: str) -> str:
@@ -71,6 +106,8 @@ def score_candidate(
 
 
 def classify_match(score: dict[str, Any], threshold: float) -> str:
+    if score["source_year"] is not None and score["tmdb_year"] is None:
+        return "review"
     if score["confidence"] < threshold:
         return "review"
     if score["year_delta"] is not None and score["year_delta"] > 1:

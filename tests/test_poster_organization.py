@@ -177,14 +177,14 @@ class PosterOrganizationTests(unittest.TestCase):
             1,
         )
 
-    def test_ready_film_moves_folder_and_uses_canonical_json_filename(self):
+    def test_wrong_source_year_keeps_folder_name_and_changes_only_json_filename(self):
         item = {
-            "folder": "Original Folder (2020)",
-            "source_prefix": "Original Folder (2020)",
-            "image_path": "Original Folder (2020)/poster.jpg",
+            "folder": "Original Folder (1998)",
+            "source_prefix": "Original Folder (1998)",
+            "image_path": "Original Folder (1998)/poster.jpg",
             "poster_files": [
                 {
-                    "path": "Original Folder (2020)/poster.jpg",
+                    "path": "Original Folder (1998)/poster.jpg",
                     "relative_path": "poster.jpg",
                     "sha": "poster-sha",
                     "mode": "100644",
@@ -198,25 +198,37 @@ class PosterOrganizationTests(unittest.TestCase):
                 "image_url": "https://raw.example/original.jpg",
             },
             "tmdb": {"tmdb_id": 42, "title": "Correct Film", "year": 2020},
-            "correction": {"canonical_folder_name": "Correct Film (2020)"},
+            "correction": {
+                "canonical_folder_name": "Correct Film (2020)",
+                "canonical_json_name": "Correct Film (2020)",
+                "json_rename_required": True,
+                "rename_required": False,
+                "source_folder_unchanged": True,
+            },
             "status": "ready",
         }
         engine = self.make_engine([item], {"items": []}, {item["folder"]: record})
 
         result = engine.run_batch(limit=1, apply=True)
         committed = engine.github.committed
-        json_path = "جاهز/Original Folder (2020)/Correct Film (2020).json"
+        json_path = "جاهز/Original Folder (1998)/Correct Film (2020).json"
 
         self.assertEqual(result["commit_sha"], "test-commit")
         self.assertIn(json_path, committed["files"])
         saved = json.loads(committed["files"][json_path])
-        self.assertEqual(saved["source"]["image_path"], "جاهز/Original Folder (2020)/poster.jpg")
+        self.assertEqual(saved["source"]["image_path"], "جاهز/Original Folder (1998)/poster.jpg")
+        self.assertTrue(saved["correction"]["source_folder_unchanged"])
+        self.assertFalse(saved["correction"]["rename_required"])
+        self.assertTrue(saved["correction"]["json_rename_required"])
+        self.assertNotIn("Correct Film (2020)/poster.jpg", committed["moves"])
         self.assertEqual(saved["source"]["original_image_path"], item["image_path"])
         self.assertEqual(
-            committed["moves"]["جاهز/Original Folder (2020)/poster.jpg"]["sha"],
+            committed["moves"]["جاهز/Original Folder (1998)/poster.jpg"]["sha"],
             "poster-sha",
         )
         self.assertIn(item["image_path"], committed["deletes"])
+        self.assertIn("جاهز/Original Folder (1998)/poster.jpg", committed["moves"])
+        self.assertNotIn("Correct Film (2020)", " ".join(committed["moves"]))
 
     def test_review_folder_can_be_promoted_to_ready(self):
         item = {
