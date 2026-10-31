@@ -131,6 +131,34 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertEqual(match["status"], "review")
         self.assertEqual(set(match["candidate_ids"]), {"603", "155"})
 
+    def test_folder_conflict_scoring_uses_source_title_and_year(self):
+        matrix_reloaded = {
+            "id": 604,
+            "title": "The Matrix Reloaded",
+            "original_title": "The Matrix Reloaded",
+            "release_date": "2003-05-15",
+        }
+        tmdb = FakeTMDB(
+            folder_results={
+                "The Matrix": [dict(MATRIX)],
+                "The Matrix Reloaded": [matrix_reloaded],
+            }
+        )
+        engine = self.make_engine(tmdb)
+        candidate, match, _ = engine._find_movie(
+            "The Matrix",
+            1999,
+            [
+                {
+                    "title": "The.Matrix.Reloaded.2003.poster.jpg",
+                    "url": "https://example.com/posters",
+                    "source": "https://cdn.example.com/matrix-reloaded.jpg",
+                }
+            ],
+        )
+        self.assertEqual(candidate["id"], 603)
+        self.assertEqual(match["status"], "ready")
+
     def test_failed_reverse_image_search_forces_review(self):
         tmdb = FakeTMDB(folder_results={"The Matrix": [dict(MATRIX)]})
         engine = self.make_engine(tmdb)
