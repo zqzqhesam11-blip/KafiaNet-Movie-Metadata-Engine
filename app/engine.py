@@ -193,11 +193,15 @@ class MetadataEngine:
                 "candidate_title": scored[0][2].get("title"),
             }, evidence
 
-        if tineye_failed:
+        if tineye_failed or resolution_errors:
             return None, {
                 "status": "review",
                 **scored[0][3],
-                "reason": "TinEye reverse-image request failed; folder-only candidate must be reviewed",
+                "reason": (
+                    "TinEye reverse-image request failed; folder-only candidate must be reviewed"
+                    if tineye_failed
+                    else "TMDB could not resolve a TinEye external movie ID; candidate must be reviewed"
+                ),
                 "candidate_id": scored[0][2].get("id"),
                 "candidate_title": scored[0][2].get("title"),
             }, evidence
