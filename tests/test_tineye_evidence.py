@@ -69,6 +69,20 @@ class TinEyeEvidenceTests(unittest.TestCase):
         ])
         self.assertEqual(evidence["title_hints"], [])
 
+    def test_extracts_year_country_director_and_keeps_backlink_association(self):
+        evidence = extract_tineye_evidence([{
+            "title": "State-of-Emergency-2010.jpg",
+            "url": "https://www.imdb.com/title/tt1705134/",
+            "source": "https://cdn.example.com/poster.jpg",
+            "content": "Director: Turner Clay | Country of origin: United States | Release year: 2011",
+        }])
+        self.assertEqual(evidence["imdb_ids"], ["tt1705134"])
+        self.assertIn(2010, evidence["year_hints"])
+        self.assertIn(2011, evidence["year_hints"])
+        self.assertEqual(evidence["country_hints"], ["United States"])
+        self.assertEqual(evidence["director_hints"], ["Turner Clay"])
+        self.assertEqual(evidence["backlinks"][0]["imdb_ids"], ["tt1705134"])
+
     def test_extracts_imdb_id_only_from_imdb_host(self):
         self.assertEqual(
             imdb_id_from_url("https://www.imdb.com/title/tt0133093/"),
