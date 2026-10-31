@@ -1,22 +1,8 @@
 build:
   system: docker
-
-dockerfile_path: Dockerfile
-
-start_command: sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}'
+  dockerfile_path: Dockerfile
 
 health_check:
   type: http
   http_path: /health
   interval_in_seconds: 20
-
-# PAUSED intentionally. Configure TMDB_BEARER_TOKEN and GITHUB_TOKEN,
-# run and review a five-film DRY_RUN, then resume from Hostless.
-cron_jobs:
-  - name: kafianet-metadata-batch
-    command: python -m app.cli run --limit 5 --dry-run
-    schedule: "*/30 * * * *"
-    timezone_utc_offset: 3
-    cpus: 0.2
-    memory: 512
-    status: paused
