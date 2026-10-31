@@ -35,6 +35,20 @@ class TMDBClient:
         data = self._get("/search/movie", params)
         return list(data.get("results") or [])
 
+    def find_by_imdb_id(self, imdb_id: str) -> list[dict[str, Any]]:
+        """Resolve a trusted IMDb identifier to TMDB movie records."""
+        imdb_id = imdb_id.strip().lower()
+        if not imdb_id.startswith("tt") or not imdb_id[2:].isdigit():
+            return []
+        data = self._get(
+            f"/find/{imdb_id}",
+            {
+                "external_source": "imdb_id",
+                "language": self.language,
+            },
+        )
+        return list(data.get("movie_results") or [])
+
     def movie_details(self, tmdb_id: int) -> dict[str, Any]:
         return self._get(
             f"/movie/{tmdb_id}",
