@@ -7,8 +7,8 @@ import httpx
 class SearXNGClient:
     def __init__(self, base_url: str, token: str = "", timeout: float = 45):
         self.base_url = base_url.rstrip("/")
-        if not self.base_url.startswith(("https://", "http://")):
-            raise ValueError("SEARXNG_URL must be an absolute HTTP(S) URL")
+        if not self.base_url.startswith("https://"):
+            raise ValueError("SEARXNG_URL must be an absolute HTTPS URL")
         if not token.strip():
             raise RuntimeError("SEARXNG_TOKEN is required for the protected SearXNG service")
         headers = {
