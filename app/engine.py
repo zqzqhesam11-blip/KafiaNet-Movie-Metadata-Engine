@@ -446,8 +446,8 @@ class MetadataEngine:
                 f"[KafiaNet] [{position}/{total}] START {item['folder']}",
                 flush=True,
             )
+            previous_row = old_by_folder.get(item["folder"]) or {}
             try:
-                previous_row = old_by_folder.get(item["folder"]) or {}
                 record = self._record_for_folder(
                     item,
                     previous_output_path=previous_row.get("output_path"),
@@ -460,6 +460,21 @@ class MetadataEngine:
                 image_path = item["image_path"]
                 title_hint, year_hint = split_title_year(folder)
                 image_url = self.github.raw_url(image_path)
+                previous_record = None
+                if previous_row.get("output_path"):
+                    try:
+                        previous_record = self.github.get_json_file(previous_row["output_path"])
+                    except Exception:
+                        # Preserve the original processing error; Git history still
+                        # retains the previously committed metadata if this read fails.
+                        previous_record = None
+                previous_tineye = (previous_record or {}).get("tineye") or {}
+                previous_tineye_results = [
+                    result for result in (previous_tineye.get("results") or [])
+                    if isinstance(result, dict)
+                    and not result.get("error")
+                    and any(result.get(key) for key in ("title", "url", "source"))
+                ]
                 record = {
                     "schema_version": SCHEMA_VERSION,
                     "processed_utc": datetime.now(timezone.utc).isoformat(),
@@ -482,8 +497,16 @@ class MetadataEngine:
                     },
                     "tineye": {
                         "enabled": self.searxng is not None,
-                        "results": [],
-                        "evidence": {},
+                        "results": previous_tineye_results,
+                        "results_source": "previous_saved" if previous_tineye_results else "none",
+                        "latest_query": {
+                            "status": "processing_error",
+                            "errors": [{
+                                "type": type(exc).__name__,
+                                "message": str(exc).replace("\\n", " ")[:300],
+                            }],
+                        },
+                        "evidence": previous_tineye.get("evidence") or {},
                     },
                     "tmdb": None,
                     "correction": None,
