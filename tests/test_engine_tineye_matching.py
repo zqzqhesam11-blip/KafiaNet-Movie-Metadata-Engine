@@ -40,7 +40,7 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         return engine
 
     def test_tineye_image_filename_can_recover_wrong_folder_name(self):
-        tmdb = FakeTMDB(folder_results={}, imdb_results={})
+        tmdb = FakeTMDB(folder_results={"The Matrix": [dict(MATRIX)]}, imdb_results={})
         engine = self.make_engine(tmdb)
         candidate, match, evidence = engine._find_movie(
             "bad folder label",
