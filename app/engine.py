@@ -171,7 +171,16 @@ class MetadataEngine:
         records = [self._record_for_folder(item) for item in pending]
         projected = list(old_items)
 
+        previous_by_folder = {
+            str(row.get("source_folder")): row
+            for row in projected
+        }
+        stale_output_paths: list[str] = []
+
         for record in records:
+            previous = previous_by_folder.get(record["source"]["folder"])
+            if previous and previous.get("output_path"):
+                stale_output_paths.append(str(previous["output_path"]))
             projected = [
                 row for row in projected
                 if row.get("source_folder") != record["source"]["folder"]
@@ -194,7 +203,7 @@ class MetadataEngine:
                 by_id.setdefault(str(tmdb_id), []).append(row)
 
         files: dict[str, str] = {}
-        deletes: list[str] = []
+        deletes: list[str] = list(stale_output_paths)
         ready_count = review_count = duplicate_count = 0
 
         for record in records:
@@ -265,7 +274,14 @@ class MetadataEngine:
             "duplicates_in_this_batch": duplicate_count,
             "planned_output_files": sorted(files),
             "records": records,
-            "next_pending_estimate": max(0, len(folders) - len(projected)),
+            "next_pending_estimate": sum(
+                1 for item in folders
+                if item["folder"] not in {
+                    str(row.get("source_folder"))
+                    for row in projected
+                    if row.get("status") in {"ready", "duplicate"}
+                }
+            ),
         }
 
         if apply and files:
