@@ -18,7 +18,7 @@ class TinEyeEvidenceTests(unittest.TestCase):
                 "source": "https://cdn.example.com/art/the-matrix-cover.jpg",
             }
         ])
-        self.assertIn("the matrix 1080p", [x.casefold() for x in evidence["title_hints"]])
+        self.assertIn("the matrix", [x.casefold() for x in evidence["title_hints"]])
         self.assertEqual(evidence["imdb_ids"], [])
         self.assertEqual(evidence["tmdb_ids"], [])
 
