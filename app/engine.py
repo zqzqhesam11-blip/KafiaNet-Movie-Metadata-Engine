@@ -203,7 +203,7 @@ class MetadataEngine:
                 by_id.setdefault(str(tmdb_id), []).append(row)
 
         files: dict[str, str] = {}
-        deletes: list[str] = list(stale_output_paths)
+        deletes: list[str] = []
         ready_count = review_count = duplicate_count = 0
 
         for record in records:
@@ -228,6 +228,13 @@ class MetadataEngine:
             record["output_path"] = out_path
             files[out_path] = json.dumps(record, ensure_ascii=False, indent=2) + "\n"
 
+        # Remove a previous output only when this batch changes its destination.
+        for record in records:
+            previous = previous_by_folder.get(record["source"]["folder"])
+            previous_path = previous.get("output_path") if previous else None
+            if previous_path and previous_path != record["output_path"]:
+                deletes.append(str(previous_path))
+
         # When a newly found ID makes an earlier READY entry a duplicate, copy its
         # existing metadata JSON into the duplicate group and delete its old READY path.
         if apply:
@@ -238,19 +245,22 @@ class MetadataEngine:
                     previous_path = row.get("output_path")
                     if previous_path and previous_path.startswith("جاهز/"):
                         old_record = self.github.get_json_file(previous_path)
-                        if old_record:
-                            source_folder = str(row["source_folder"])
-                            new_path = f"مكرر/{tmdb_id}/{safe_segment(source_folder)}/movie.json"
-                            old_record["status"] = "duplicate"
-                            old_record["duplicate_group"] = {
-                                "tmdb_id": int(tmdb_id),
-                                "source_folders": sorted(x["source_folder"] for x in group),
-                            }
-                            old_record["output_path"] = new_path
-                            files[new_path] = json.dumps(old_record, ensure_ascii=False, indent=2) + "\n"
-                            deletes.append(previous_path)
-                            row["status"] = "duplicate"
-                            row["output_path"] = new_path
+                        if not old_record:
+                            raise RuntimeError(
+                                f"Cannot safely move duplicate metadata; existing file is missing: {previous_path}"
+                            )
+                        source_folder = str(row["source_folder"])
+                        new_path = f"مكرر/{tmdb_id}/{safe_segment(source_folder)}/movie.json"
+                        old_record["status"] = "duplicate"
+                        old_record["duplicate_group"] = {
+                            "tmdb_id": int(tmdb_id),
+                            "source_folders": sorted(x["source_folder"] for x in group),
+                        }
+                        old_record["output_path"] = new_path
+                        files[new_path] = json.dumps(old_record, ensure_ascii=False, indent=2) + "\n"
+                        deletes.append(previous_path)
+                        row["status"] = "duplicate"
+                        row["output_path"] = new_path
 
         # Set output paths/status for newly processed rows after duplicate grouping.
         for record in records:
