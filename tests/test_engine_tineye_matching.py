@@ -60,24 +60,59 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
         self.assertIn(("The Matrix", None), tmdb.search_calls)
         self.assertIn("title_hints", evidence)
 
-    def test_trusted_imdb_backlink_resolves_tmdb_identity(self):
+    def test_trusted_imdb_id_without_any_matching_title_stays_in_review(self):
         tmdb = FakeTMDB(imdb_results={"tt0133093": [dict(MATRIX)]})
         engine = self.make_engine(tmdb)
         candidate, match, evidence = engine._find_movie(
             "abbreviated unknown folder",
             None,
-            [
-                {
-                    "title": "poster.jpg",
-                    "url": "https://www.imdb.com/title/tt0133093/",
-                    "source": "https://cdn.example.com/poster.jpg",
-                }
-            ],
+            [{
+                "title": "poster.jpg",
+                "url": "https://www.imdb.com/title/tt0133093/",
+                "source": "https://cdn.example.com/poster.jpg",
+            }],
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertIn("mandatory title match", match["reason"])
+        self.assertEqual(evidence["imdb_ids"], ["tt0133093"])
+        self.assertEqual(evidence["rejected_external_ids"][0]["candidate_id"], "603")
+
+    def test_trusted_imdb_backlink_requires_and_accepts_matching_poster_title(self):
+        tmdb = FakeTMDB(imdb_results={"tt0133093": [dict(MATRIX)]})
+        engine = self.make_engine(tmdb)
+        candidate, match, evidence = engine._find_movie(
+            "abbreviated unknown folder",
+            None,
+            [{
+                "title": "The.Matrix.1999.poster.jpg",
+                "url": "https://www.imdb.com/title/tt0133093/",
+                "source": "https://cdn.example.com/poster.jpg",
+            }],
         )
         self.assertEqual(candidate["id"], 603)
         self.assertEqual(match["status"], "ready")
         self.assertEqual(match["confidence"], 1.0)
+        self.assertEqual(match["title_match_source"], "tineye_poster_title")
+        self.assertEqual(match["matched_source_title"], "The Matrix")
         self.assertEqual(evidence["imdb_ids"], ["tt0133093"])
+
+    def test_folder_candidate_without_title_match_is_not_auto_accepted_even_without_collision(self):
+        tmdb = FakeTMDB(folder_results={"Unknown Folder": [{
+            "id": 777,
+            "title": "Completely Different Movie",
+            "original_title": "Completely Different Movie",
+            "release_date": "2020-01-01",
+        }]})
+        engine = self.make_engine(tmdb)
+        candidate, match, _ = engine._find_movie(
+            "Unknown Folder",
+            2020,
+            [{"title": "poster.jpg", "url": "https://example.com/gallery"}],
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertIn("mandatory title match", match["reason"])
 
     def test_unrelated_tineye_id_is_rejected_when_folder_title_matches(self):
         gladiator = {
@@ -301,8 +336,8 @@ class TinEyeTMDBMatchingTests(unittest.TestCase):
             "unknown",
             None,
             [
-                {"title": "first.jpg", "url": "https://www.imdb.com/title/tt0133093/"},
-                {"title": "second.jpg", "url": "https://www.imdb.com/title/tt0468569/"},
+                {"title": "The.Matrix.1999.poster.jpg", "url": "https://www.imdb.com/title/tt0133093/"},
+                {"title": "The.Dark.Knight.2008.poster.jpg", "url": "https://www.imdb.com/title/tt0468569/"},
             ],
         )
         self.assertIsNone(candidate)
