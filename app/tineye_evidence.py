@@ -12,7 +12,8 @@ GENERIC_WORDS = {
     "covers", "image", "images", "thumbnail", "thumb", "download",
     "original", "large", "small", "medium", "full", "hd", "jpg", "jpeg",
     "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "the", "and",
-    "a", "an", "of", "for", "from", "official", "artwork",
+    "a", "an", "of", "for", "from", "official", "artwork", "bluray",
+    "brrip", "webrip", "webdl", "hdrip", "x264", "x265", "h264", "h265",
 }
 
 
@@ -43,10 +44,10 @@ def _clean_hint(value: str) -> str | None:
     if not value:
         return None
 
-    # Strip query fragments, path separators, and the final image extension.
     value = value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     value = re.sub(r"\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)$", "", value, flags=re.I)
     value = re.sub(r"\b(?:19|20)\d{2}\b", " ", value)
+    value = re.sub(r"\b(?:480|720|1080|1440|2160)p\b|\b4k\b", " ", value, flags=re.I)
     value = re.sub(r"[_+.-]+", " ", value)
     value = re.sub(r"[^0-9A-Za-zÀ-ÖØ-öø-ÿ\u0400-\u04FF\u0600-\u06FF ]+", " ", value)
     words = [
@@ -84,8 +85,6 @@ def extract_tineye_evidence(results: list[dict]) -> dict[str, list]:
             if tmdb_id and tmdb_id not in tmdb_ids:
                 tmdb_ids.append(tmdb_id)
 
-        # The source is often the matched image URL, whose filename may carry
-        # a better title than the webpage's image_name field.
         source = str(result.get("source") or "")
         try:
             basename = PurePosixPath(urlparse(source).path).name
