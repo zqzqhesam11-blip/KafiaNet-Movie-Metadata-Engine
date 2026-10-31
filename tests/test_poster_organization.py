@@ -9,6 +9,9 @@ class FakeResponse:
     def __init__(self, payload):
         self.payload = payload
 
+    def raise_for_status(self):
+        return None
+
     def json(self):
         return self.payload
 
