@@ -100,6 +100,7 @@ class PosterOrganizationTests(unittest.TestCase):
     def test_commit_moves_existing_image_blob_without_reuploading_it(self):
         api = GitHubAPI.__new__(GitHubAPI)
         api._branch_commit = lambda: ("old-head", "base-tree")
+        api.branch = "main"
         api.client = FakeTreeClient()
 
         result = api.commit_files(
