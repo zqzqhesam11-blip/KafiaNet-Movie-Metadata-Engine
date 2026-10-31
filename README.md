@@ -55,7 +55,8 @@ python -m unittest discover -s tests -v
 python -m app.cli run --limit 5
 ```
 
-The command above is read-only DRY RUN. Review `planned_output_files`, `planned_image_moves`, and `planned_source_image_deletes` before applying the same batch:
+The CLI prints a compact batch summary by default; it does not dump every movie's JSON metadata or long file-path arrays into the terminal. Use `--verbose` only when you explicitly need the full JSON report. The command above is read-only DRY RUN.
+
 
 ```bash
 python -m app.cli run --limit 5 --apply
