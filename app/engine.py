@@ -8,7 +8,8 @@ from urllib.parse import quote
 
 from app.config import Settings
 from app.github_api import GitHubAPI
-from app.matching import classify_match, score_candidate, split_title_year
+from app.matching import classify_match, normalize_title, score_candidate, split_title_year, title_similarity
+from app.tineye_evidence import extract_tineye_evidence
 from app.searxng import SearXNGClient
 from app.tmdb import TMDBClient
 
@@ -24,6 +25,7 @@ def safe_segment(value: str) -> str:
 class MetadataEngine:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._details_cache: dict[int, dict[str, Any]] = {}
         self.github = GitHubAPI(
             settings.posters_repo,
             settings.posters_branch,
@@ -60,41 +62,229 @@ class MetadataEngine:
             # A reverse-image provider failure must never invent or block TMDB identity.
             return [{"error": type(exc).__name__, "message": str(exc)[:300]}]
 
-    def _find_movie(self, title: str, year: int | None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-        results = self.tmdb.search_movies(title, year)
-        scored = []
-        for candidate in results:
-            score = score_candidate(title, year, candidate)
-            scored.append((score["confidence"], candidate, score))
-        scored.sort(key=lambda row: row[0], reverse=True)
+    def _find_movie(
+        self,
+        title: str,
+        year: int | None,
+        tineye_results: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
+        evidence = extract_tineye_evidence(tineye_results)
+        candidates: dict[str, dict[str, Any]] = {}
+        sources: dict[str, set[str]] = {}
+        folder_candidates: dict[str, dict[str, Any]] = {}
+        resolution_errors: list[dict[str, str]] = []
 
-        if not scored:
+        def add_candidate(candidate: dict[str, Any], source: str) -> None:
+            candidate_id = candidate.get("id")
+            if candidate_id is None:
+                return
+            key = str(candidate_id)
+            candidates.setdefault(key, candidate)
+            sources.setdefault(key, set()).add(source)
+            if source == "folder_search":
+                folder_candidates[key] = candidate
+
+        # The original folder name remains the primary text-search signal.
+        for candidate in self.tmdb.search_movies(title, year):
+            add_candidate(candidate, "folder_search")
+
+        # TinEye image filenames can carry a reliable film title even when the
+        # local folder name is abbreviated or misspelled. Keep fan-out bounded.
+        seen_hints = {normalize_title(title)}
+        for hint in evidence["title_hints"][:3]:
+            normalized_hint = normalize_title(hint)
+            if not normalized_hint or normalized_hint in seen_hints:
+                continue
+            seen_hints.add(normalized_hint)
+            for candidate in self.tmdb.search_movies(hint, year):
+                add_candidate(candidate, "tineye_title")
+
+        # Trusted IMDb / TMDB URLs found in TinEye backlinks are stronger than
+        # a guessed filename. IDs are accepted only from the official domains.
+        for imdb_id in evidence["imdb_ids"][:3]:
+            try:
+                for candidate in self.tmdb.find_by_imdb_id(imdb_id):
+                    add_candidate(candidate, "tineye_imdb")
+            except Exception as exc:
+                resolution_errors.append(
+                    {"type": "imdb_lookup", "id": imdb_id, "error": type(exc).__name__}
+                )
+
+        for tmdb_id in evidence["tmdb_ids"][:3]:
+            try:
+                details = self.tmdb.movie_details(int(tmdb_id))
+                self._details_cache[int(tmdb_id)] = details
+                add_candidate(details, "tineye_tmdb")
+            except Exception as exc:
+                resolution_errors.append(
+                    {"type": "tmdb_lookup", "id": str(tmdb_id), "error": type(exc).__name__}
+                )
+
+        evidence["resolved_sources"] = {
+            key: sorted(value) for key, value in sources.items()
+        }
+        evidence["resolution_errors"] = resolution_errors
+
+        if not candidates:
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "TMDB returned no search candidates",
+                "reason": "TMDB returned no candidates from folder or TinEye evidence",
+            }, evidence
+
+        def candidate_score(candidate: dict[str, Any]) -> dict[str, Any]:
+            folder_detail = score_candidate(title, year, candidate)
+            folder_similarity = float(folder_detail["title_similarity"])
+            hint_scores = [
+                title_similarity(hint, str(candidate.get("title") or ""))
+                for hint in evidence["title_hints"][:3]
+            ] + [
+                title_similarity(hint, str(candidate.get("original_title") or ""))
+                for hint in evidence["title_hints"][:3]
+            ]
+            tineye_similarity = max(hint_scores, default=0.0)
+            best_similarity = max(folder_similarity, tineye_similarity)
+
+            tmdb_year = folder_detail["tmdb_year"]
+            year_delta = folder_detail["year_delta"]
+            confidence = best_similarity
+            if year is not None and tmdb_year is not None:
+                confidence = best_similarity * 0.90 + (0.10 if year_delta == 0 else 0.0)
+                if year_delta is not None and year_delta > 1:
+                    confidence *= 0.82
+
+            return {
+                "confidence": round(confidence, 4),
+                "title_similarity": round(best_similarity, 4),
+                "folder_title_similarity": round(folder_similarity, 4),
+                "tineye_title_similarity": round(tineye_similarity, 4),
+                "best_tineye_hint": (
+                    max(
+                        evidence["title_hints"][:3],
+                        key=lambda hint: max(
+                            title_similarity(hint, str(candidate.get("title") or "")),
+                            title_similarity(hint, str(candidate.get("original_title") or "")),
+                        ),
+                    )
+                    if evidence["title_hints"][:3] and tineye_similarity > 0
+                    else None
+                ),
+                "source_year": year,
+                "tmdb_year": tmdb_year,
+                "year_delta": year_delta,
+                "evidence_sources": sorted(sources.get(str(candidate.get("id")), set())),
             }
 
-        top_score, top_candidate, top_detail = scored[0]
+        scored = [
+            (candidate_score(candidate)["confidence"], str(candidate_id), candidate, candidate_score(candidate))
+            for candidate_id, candidate in candidates.items()
+        ]
+        scored.sort(key=lambda row: row[0], reverse=True)
+
+        direct_ids = {
+            candidate_id
+            for candidate_id, candidate_sources in sources.items()
+            if {"tineye_imdb", "tineye_tmdb"} & candidate_sources
+        }
+
+        # Multiple distinct direct IDs from image backlinks are conflicting
+        # evidence. Do not select one automatically.
+        if len(direct_ids) > 1:
+            return None, {
+                "status": "review",
+                "confidence": scored[0][0],
+                "reason": "TinEye backlinks resolved to multiple different TMDB movie IDs",
+                "candidate_ids": sorted(direct_ids, key=int),
+            }, evidence
+
+        if len(direct_ids) == 1:
+            direct_id = next(iter(direct_ids))
+            direct_candidate = candidates[direct_id]
+            direct_detail = candidate_score(direct_candidate)
+
+            # If the folder name independently identifies another high-confidence
+            # film, the disagreement requires human review.
+            folder_scored = [
+                (score_candidate(title, year, candidate)["confidence"], candidate_id)
+                for candidate_id, candidate in folder_candidates.items()
+            ]
+            folder_scored.sort(reverse=True)
+            if (
+                folder_scored
+                and folder_scored[0][1] != direct_id
+                and folder_scored[0][0] >= self.settings.match_accept_score
+            ):
+                return None, {
+                    "status": "review",
+                    **direct_detail,
+                    "reason": "TinEye external ID conflicts with a high-confidence folder-title match",
+                    "candidate_ids": [direct_id, folder_scored[0][1]],
+                }, evidence
+
+            if direct_detail["year_delta"] is not None and direct_detail["year_delta"] > 1:
+                return None, {
+                    "status": "review",
+                    **direct_detail,
+                    "reason": "TinEye external ID conflicts with the source folder year",
+                    "candidate_id": direct_id,
+                    "candidate_title": direct_candidate.get("title"),
+                }, evidence
+
+            return direct_candidate, {
+                "status": "ready",
+                **direct_detail,
+                "confidence": 1.0,
+                "reason": "TinEye backlink resolved to a single trusted IMDb/TMDB movie ID",
+            }, evidence
+
+        top_score, top_id, top_candidate, top_detail = scored[0]
         second_score = scored[1][0] if len(scored) > 1 else 0.0
-        if top_score - second_score < 0.025 and len(scored) > 1:
+
+        # If folder-name matching and TinEye-title matching strongly disagree,
+        # preserve both candidates for review rather than blending the signals.
+        folder_ranked = sorted(
+            (
+                (score_candidate(candidate)["confidence"], candidate_id)
+                for candidate_id, candidate in folder_candidates.items()
+            ),
+            reverse=True,
+        )
+        if (
+            folder_ranked
+            and folder_ranked[0][1] != top_id
+            and folder_ranked[0][0] >= self.settings.match_accept_score
+            and top_score >= self.settings.match_accept_score
+        ):
             return None, {
                 "status": "review",
                 **top_detail,
-                "reason": "Ambiguous TMDB candidates have nearly equal scores",
-                "candidate_ids": [scored[0][1].get("id"), scored[1][1].get("id")],
-            }
+                "reason": "TinEye title evidence conflicts with a high-confidence folder-title match",
+                "candidate_ids": [top_id, folder_ranked[0][1]],
+            }, evidence
+
+        if len(scored) > 1 and top_score - second_score < 0.025:
+            return None, {
+                "status": "review",
+                **top_detail,
+                "reason": "Ambiguous TMDB candidates have nearly equal combined scores",
+                "candidate_ids": [scored[0][2].get("id"), scored[1][2].get("id")],
+            }, evidence
 
         status = classify_match(top_detail, self.settings.match_accept_score)
         if status != "ready":
             return None, {
                 "status": "review",
                 **top_detail,
-                "reason": "Title/year confidence is below the automatic-accept threshold",
+                "reason": "Combined folder/TinEye title and year confidence is below the automatic-accept threshold",
                 "candidate_id": top_candidate.get("id"),
                 "candidate_title": top_candidate.get("title"),
-            }
-        return top_candidate, {"status": "ready", **top_detail, "reason": "High-confidence title/year match"}
+            }, evidence
+
+        return top_candidate, {
+            "status": "ready",
+            **top_detail,
+            "reason": "High-confidence folder title or TinEye image-title match",
+        }, evidence
 
     def _record_for_folder(self, item: dict[str, str]) -> dict[str, Any]:
         folder = item["folder"]
@@ -103,7 +293,7 @@ class MetadataEngine:
         image_url = self.github.raw_url(image_path)
 
         tineye_results = self._tineye_results(image_url)
-        candidate, match = self._find_movie(title_hint, year_hint)
+        candidate, match, tineye_evidence = self._find_movie(title_hint, year_hint, tineye_results)
 
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -124,11 +314,16 @@ class MetadataEngine:
             "tineye": {
                 "enabled": self.searxng is not None,
                 "results": tineye_results,
+                "evidence": tineye_evidence,
             },
         }
 
         if candidate:
-            details = self.tmdb.movie_details(int(candidate["id"]))
+            tmdb_id = int(candidate["id"])
+            details = self._details_cache.get(tmdb_id)
+            if details is None:
+                details = self.tmdb.movie_details(tmdb_id)
+                self._details_cache[tmdb_id] = details
             normalized = self.tmdb.normalize_details(details)
             canonical_title = normalized.get("title") or candidate.get("title") or title_hint
             canonical_year = normalized.get("year")
