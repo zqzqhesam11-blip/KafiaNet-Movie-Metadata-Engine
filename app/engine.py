@@ -311,14 +311,51 @@ class MetadataEngine:
             "reason": "High-confidence folder title or TinEye image-title match",
         }, evidence
 
-    def _record_for_folder(self, item: dict[str, str]) -> dict[str, Any]:
+    def _record_for_folder(
+        self,
+        item: dict[str, str],
+        previous_output_path: str | None = None,
+    ) -> dict[str, Any]:
         folder = item["folder"]
         image_path = item["image_path"]
         title_hint, year_hint = split_title_year(folder)
         image_url = self.github.raw_url(image_path)
 
-        tineye_results = self._tineye_results(image_url)
+        latest_tineye_results = self._tineye_results(image_url)
+        latest_errors = [
+            item for item in latest_tineye_results
+            if isinstance(item, dict) and item.get("error")
+        ]
+        latest_query_status = (
+            "error" if latest_errors
+            else "ok" if latest_tineye_results
+            else "no_matches"
+        )
+
+        # A temporary empty/unresponsive TinEye response must not erase useful
+        # reverse-image evidence already stored for this exact poster.
+        tineye_results = latest_tineye_results
+        tineye_results_source = "live"
+        if not latest_tineye_results or latest_errors:
+            previous_record = (
+                self.github.get_json_file(previous_output_path)
+                if previous_output_path
+                else None
+            )
+            previous_tineye = (previous_record or {}).get("tineye") or {}
+            saved_results = previous_tineye.get("results") or []
+            reusable_results = [
+                result for result in saved_results
+                if isinstance(result, dict)
+                and not result.get("error")
+                and any(result.get(key) for key in ("title", "url", "source"))
+            ]
+            if reusable_results:
+                tineye_results = reusable_results
+                tineye_results_source = "previous_saved"
+
         candidate, match, tineye_evidence = self._find_movie(title_hint, year_hint, tineye_results)
+        tineye_evidence["results_source"] = tineye_results_source
 
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -339,6 +376,11 @@ class MetadataEngine:
             "tineye": {
                 "enabled": self.searxng is not None,
                 "results": tineye_results,
+                "results_source": tineye_results_source,
+                "latest_query": {
+                    "status": latest_query_status,
+                    "errors": latest_errors,
+                },
                 "evidence": tineye_evidence,
             },
         }
@@ -405,7 +447,11 @@ class MetadataEngine:
                 flush=True,
             )
             try:
-                record = self._record_for_folder(item)
+                previous_row = old_by_folder.get(item["folder"]) or {}
+                record = self._record_for_folder(
+                    item,
+                    previous_output_path=previous_row.get("output_path"),
+                )
             except Exception as exc:
                 # Isolate failures to this film. Persist it as REVIEW so a later
                 # batch can retry it; one malformed TinEye title or API response
