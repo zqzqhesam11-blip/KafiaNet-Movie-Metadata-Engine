@@ -119,7 +119,13 @@ def _compare_lens_metadata(
     relevant = [
         item for item in observations
         if isinstance(item, dict)
-        and normalize_title(item.get("lens_title") or "") in allowed_titles
+        and (
+            normalize_title(item.get("lens_title") or "") in allowed_titles
+            or any(
+                _phrase_in_lens_text(query, str(item.get("lens_title") or ""))
+                for query in allowed_titles
+            )
+        )
     ]
     years = list(dict.fromkeys(
         int(value)
@@ -814,6 +820,31 @@ class MetadataEngine:
                         "candidate_ids": [int(selected_id)],
                     }, evidence
             metadata = sole_identity.get("metadata_match") or {}
+            has_official_lens_identity = bool(
+                sole_identity.get("imdb_ids_from_lens")
+                or sole_identity.get("tmdb_ids_from_lens")
+            )
+            if (
+                not has_official_lens_identity
+                and not metadata.get("evidence_qualified")
+            ):
+                return None, {
+                    "status": "review",
+                    "confidence": float(sole_identity.get("title_similarity") or 0.0),
+                    "reason": (
+                        "A Lens title found one TMDB candidate, but Lens did not provide "
+                        "at least two independent matching metadata facts to verify its identity"
+                    ),
+                    "candidate_ids": [int(selected_id)],
+                    "candidate_comparisons": [{
+                        "tmdb_id": int(selected_id),
+                        "title": sole_identity.get("title"),
+                        "imdb_id": sole_identity.get("imdb_id"),
+                        "title_similarity": sole_identity.get("title_similarity"),
+                        "metadata_profile": sole_identity.get("metadata_profile"),
+                        "metadata_match": metadata,
+                    }],
+                }, evidence
             if len(metadata.get("conflicts") or {}) >= 2 and not metadata.get("strong_match_count"):
                 return None, {
                     "status": "review", "confidence": 0.0,
@@ -1271,6 +1302,28 @@ class MetadataEngine:
                     f"[KafiaNet] [{position}/{total}] LENS_TITLE "
                     f"query='{safe_log_detail(query_report.get('query'), 120)}' "
                     f"tmdb_candidate_ids={','.join(str(value) for value in (query_report.get('qualified_candidate_ids') or [])[:10]) or 'none'}",
+                    flush=True,
+                )
+
+            for lens_result in (identity_evidence.get("backlinks") or [])[:12]:
+                lens_metadata = lens_result.get("metadata_clues") or {}
+                lens_page = (
+                    lens_result.get("resolved_url")
+                    or (lens_result.get("resolved_urls") or [None])[0]
+                    or lens_result.get("url")
+                )
+                print(
+                    f"[KafiaNet] [{position}/{total}] LENS_RESULT "
+                    f"title='{safe_log_detail(lens_result.get('title'), 130)}' "
+                    f"snippet='{safe_log_detail(lens_result.get('content'), 360)}' "
+                    f"year_clues={','.join(str(value) for value in (lens_metadata.get('years') or [])) or 'none'} "
+                    f"country_clues='{safe_log_detail(', '.join(lens_metadata.get('countries') or []), 90)}' "
+                    f"director_clues='{safe_log_detail(', '.join(lens_metadata.get('directors') or []), 90)}' "
+                    f"cast_clues='{safe_log_detail(', '.join(lens_metadata.get('cast') or []), 110)}' "
+                    f"character_clues='{safe_log_detail(', '.join(lens_metadata.get('characters') or []), 90)}' "
+                    f"rating_clues='{safe_log_detail(', '.join(str(value.get('value')) for value in (lens_metadata.get('ratings') or []) if isinstance(value, dict)), 60)}' "
+                    f"url='{safe_log_detail(lens_page, 180)}' "
+                    f"url_error='{safe_log_detail(lens_result.get('url_resolution_error'), 120)}'",
                     flush=True,
                 )
 

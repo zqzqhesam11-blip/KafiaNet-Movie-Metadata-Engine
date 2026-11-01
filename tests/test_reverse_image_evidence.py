@@ -73,6 +73,26 @@ class ReverseImageEvidenceTests(unittest.TestCase):
             [item.casefold() for item in evidence["lens_title_queries"]],
         )
 
+    def test_repeated_lens_title_phrases_remove_dvd_retailer_and_person_noise(self):
+        titles = [
+            "Breathless Import Amazon fr DVD et Blu ray",
+            "bout de souffle Breathless DVD import Dvd",
+            "Tallenge Breathless A Bout De Souffle Jean Luc Godard",
+            "A BOUT DE SOUFFLE JEAN LUC GODARD JEAN SEBERG JEAN PAUL",
+            "Classics bout de souffle Jean Luc Godard France",
+        ]
+        evidence = extract_reverse_image_evidence([
+            {"title": title, "url": f"https://example.com/result/{index}"}
+            for index, title in enumerate(titles)
+        ])
+
+        queries = [value.casefold() for value in evidence["lens_title_queries"]]
+        self.assertIn("bout de souffle", queries)
+        self.assertIn("a bout de souffle", queries)
+        self.assertNotIn("amazon", " ".join(queries))
+        self.assertNotIn("dvd", " ".join(queries))
+        self.assertLessEqual(len(queries), 5)
+
     def test_image_filename_does_not_become_a_lens_title_query(self):
         evidence = extract_reverse_image_evidence([{
             "title": "",
