@@ -12,11 +12,11 @@ import httpx
 
 BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 GOOGLE_LENS_URL = "https://lens.google.com/uploadbyurl"
+LENS_QUERY_HINT = "movie ID in TMDB and IMDb"
 MAX_NORMALIZED_RESULTS = 80
 MAX_GOTO_RESOLUTION_WORKERS = 8
 MAX_TRANSIENT_RETRIES = 2
 TRANSIENT_HTTP_STATUSES = {500, 502, 503, 504}
-MAX_OFFICIAL_SEARCH_TITLES = 3
 
 
 class BrightDataAPIError(RuntimeError):
@@ -176,6 +176,9 @@ class BrightDataGoogleLensClient:
             )
         query = {
             "url": image_url,
+            # Refine the same image search with the user's fixed instruction.
+            # This is sent as Lens' q parameter; no second text-search request runs.
+            "q": LENS_QUERY_HINT,
             "hl": "en",
             "brd_json": "1",
             "brd_lens": "visual_matches",
@@ -340,23 +343,6 @@ class BrightDataGoogleLensClient:
         return False
 
     @staticmethod
-    def _lens_title_for_query(value: str) -> str:
-        title = str(value or "").strip()
-        title = re.sub(r"\s*(?:[-|–]\s*)?(?:IMDb|TMDB)\s*$", "", title, flags=re.I)
-        title = re.sub(
-            r"\s*[-|–]\s*(?:Netflix|Wikipedia|Rotten Tomatoes)\b.*$",
-            "",
-            title,
-            flags=re.I,
-        )
-        title = " ".join(title.split())
-        if not title or len(title) > 120 or len(title.split()) > 16:
-            return ""
-        if not any(character.isalpha() for character in title):
-            return ""
-        return title
-
-    @staticmethod
     def _safe_json(response: httpx.Response) -> Any:
         try:
             return response.json()
@@ -418,169 +404,12 @@ class BrightDataGoogleLensClient:
             f"Bright Data {stage} ended without a response after {MAX_TRANSIENT_RETRIES + 1} attempts"
         )
 
-    def search_official_id_pages(self, lens_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Search official IMDb/TMDB movie paths using bounded Lens title hints only.
-
-        The official-domain restriction is the identity filter. Do not add an
-        extra IMDb/TMDB keyword requirement: it can suppress valid movie pages
-        whose indexed title/snippet does not contain those brand words.
-        Folder names and image filenames are never passed into this method.
-        """
-        titles: list[str] = []
-        seen: set[str] = set()
-        for item in lens_results or []:
-            if not isinstance(item, dict) or item.get("error"):
-                continue
-            title = self._lens_title_for_query(item.get("title") or "")
-            key = title.casefold()
-            if title and key not in seen:
-                seen.add(key)
-                titles.append(title)
-            if len(titles) >= MAX_OFFICIAL_SEARCH_TITLES:
-                break
-
-        if not titles:
-            self.last_official_search_diagnostics = {
-                "status": "skipped_no_usable_lens_titles",
-                "title_count": 0,
-                "titles": [],
-                "query": "",
-                "organic_result_count": 0,
-                "official_page_count": 0,
-                "error": None,
-            }
-            return []
-
-        title_terms = " OR ".join(f'"{title}"' for title in titles)
-        query = (
-            f'({title_terms}) '
-            '(site:imdb.com/title OR site:themoviedb.org/movie)'
-        )
-        search_url = "https://www.google.com/search?" + urlencode({
-            "q": query,
-            "hl": "en",
-            "gl": "US",
-            "brd_json": "1",
-        })
-        self.last_official_search_diagnostics = {
-            "status": "requesting",
-            "title_count": len(titles),
-            "titles": titles[:MAX_OFFICIAL_SEARCH_TITLES],
-            "query": query[:700],
-            "organic_result_count": 0,
-            "official_page_count": 0,
-            "error": None,
-        }
-
-        try:
-            response, payload, effective_status, attempts = self._post_serp_with_retries(
-                search_url,
-                "official IMDb/TMDB search",
-            )
-        except BrightDataAPIError as exc:
-            self.last_official_search_diagnostics.update({
-                "status": "error",
-                "error": f"{type(exc).__name__}: {str(exc)[:250]}",
-            })
-            raise
-
-        self.last_official_search_diagnostics.update({
-            "http_status": effective_status,
-            "attempts": attempts,
-        })
-        if effective_status < 200 or effective_status >= 300:
-            error_payload = payload.get("body") if (
-                isinstance(payload, dict) and "status_code" in payload and "body" in payload
-            ) else payload
-            detail = self._error_detail(
-                error_payload,
-                str(error_payload or getattr(response, "text", "") or ""),
-            )
-            message = self._http_error(effective_status, detail)
-            self.last_official_search_diagnostics.update({
-                "status": "quota_error" if effective_status in {402, 429} else "http_error",
-                "error": message,
-            })
-            if effective_status in {402, 429}:
-                raise BrightDataQuotaError(effective_status, message)
-            raise BrightDataAPIError(message)
-
-        if payload is None:
-            headers = getattr(response, "headers", {}) or {}
-            content_type = headers.get("content-type", "unknown") if hasattr(headers, "get") else "unknown"
-            content_length = headers.get("content-length", "unknown") if hasattr(headers, "get") else "unknown"
-            message = (
-                "Google official IMDb/TMDB search returned an empty or non-JSON response "
-                f"(HTTP {effective_status}, content-type={content_type}, "
-                f"content-length={content_length})"
-            )
-            self.last_official_search_diagnostics.update({"status": "invalid_response", "error": message})
-            raise BrightDataAPIError(message)
-
-        if isinstance(payload, dict) and "status_code" in payload and "body" in payload:
-            inner_body = payload.get("body")
-            if not str(inner_body or "").strip():
-                message = (
-                    "Bright Data API envelope was received but the official IMDb/TMDB "
-                    f"search body is empty (inner HTTP {effective_status})"
-                )
-                self.last_official_search_diagnostics.update({"status": "empty_body", "error": message})
-                raise BrightDataAPIError(message)
-            if isinstance(inner_body, str):
-                try:
-                    payload = json.loads(inner_body)
-                except ValueError as exc:
-                    message = (
-                        "Google official IMDb/TMDB search returned a non-JSON API-envelope body "
-                        f"(inner HTTP {effective_status})"
-                    )
-                    self.last_official_search_diagnostics.update({"status": "invalid_body", "error": message})
-                    raise BrightDataAPIError(message) from exc
-            elif isinstance(inner_body, dict):
-                payload = inner_body
-
-        rows = self._rows_from_payload(payload)
-        if rows is None:
-            shape = self._payload_shape(payload)
-            message = "Google official IMDb/TMDB search returned no organic result list; " + shape
-            self.last_official_search_diagnostics.update({
-                "status": "unparsed_response",
-                "payload_shape": shape,
-                "error": message,
-            })
-            raise BrightDataAPIError(message)
-
-        normalized: list[dict[str, Any]] = []
-        for item in rows[:MAX_NORMALIZED_RESULTS]:
-            page_url = self._first_url(item, ("link", "url", "page_url"))
-            if not page_url or not self._official_movie_url(page_url):
-                continue
-            normalized.append({
-                "title": str(item.get("title") or "")[:300],
-                "url": page_url,
-                "resolved_url": page_url,
-                "resolved_urls": [page_url],
-                "url_candidates": [page_url],
-                "source": "",
-                "content": str(item.get("description") or item.get("snippet") or "")[:500],
-                "provider": "google_official_id_search",
-                "search_query": query[:700],
-                "position": item.get("position") or item.get("rank"),
-            })
-
-        self.last_official_search_diagnostics.update({
-            "status": "ok" if normalized else "no_official_pages",
-            "organic_result_count": len(rows),
-            "official_page_count": len(normalized),
-            "error": None,
-        })
-        return normalized
-
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
         """Search one public poster URL with bounded retries for transient provider failures."""
         target_url = self._lens_request_url(image_url)
         self.last_lens_diagnostics = {
             "status": "requesting",
+            "query_text": LENS_QUERY_HINT,
             "http_status": None,
             "attempts": 0,
             "result_count": 0,
