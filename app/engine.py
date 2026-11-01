@@ -168,7 +168,7 @@ def _compare_lens_metadata(
             conflicts[name] = details
 
     if years and candidate_year is not None:
-        record_field("year", years, [candidate_year], any(abs(year - int(candidate_year)) <= 1 for year in years))
+        record_field("year", years, [candidate_year], any(year == int(candidate_year) for year in years))
 
     country_parts = _unique_text([
         part for country in countries for part in _country_tokens(country)
@@ -246,7 +246,7 @@ def _compare_lens_metadata(
         item_fields: list[str] = []
         if (
             years and candidate_year is not None
-            and any(abs(year - int(candidate_year)) <= 1 for year in item_years)
+            and any(year == int(candidate_year) for year in item_years)
         ):
             item_fields.append("year")
         if item_countries and any(
