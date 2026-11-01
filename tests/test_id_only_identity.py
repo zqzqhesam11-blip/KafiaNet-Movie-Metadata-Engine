@@ -223,6 +223,52 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(len(evidence["tmdb_title_search"]["qualified_candidate_ids"]), 2)
         self.assertEqual(len(match["candidate_comparisons"]), 2)
 
+    def test_repeated_lens_phrase_connects_multiple_results_to_one_metadata_fingerprint(self):
+        engine = self.make_engine()
+        details = movie_details(5003, "tt0057345", "Breathless")
+        details["original_title"] = "À bout de souffle"
+        details["release_date"] = "1960-03-16"
+        details["production_countries"] = [
+            {"iso_3166_1": "FR", "name": "France"}
+        ]
+        details["origin_country"] = ["FR"]
+        details["credits"] = {
+            "cast": [],
+            "crew": [{
+                "id": 21,
+                "name": "Jean-Luc Godard",
+                "job": "Director",
+                "department": "Directing",
+            }],
+        }
+        engine.tmdb.records[5003] = details
+        engine.tmdb.search_overrides["A Bout De Souffle"] = [{
+            "id": 5003,
+            "title": "Breathless",
+            "original_title": "À bout de souffle",
+        }]
+
+        candidate, match, evidence = engine._find_movie([
+            {
+                "title": "A Bout De Souffle (1960) Jean Luc Godard",
+                "url": "https://example.com/lens/result-one",
+                "content": "Director: Jean-Luc Godard.",
+            },
+            {
+                "title": "A Bout De Souffle Jean Seberg",
+                "url": "https://example.com/lens/result-two",
+                "content": "Country of origin: France.",
+            },
+        ])
+
+        self.assertEqual(candidate["id"], 5003)
+        self.assertEqual(match["status"], "ready")
+        metadata = evidence["resolved_identity"]["metadata_match"]
+        self.assertIn("year", metadata["matched_fields"])
+        self.assertIn("country", metadata["matched_fields"])
+        self.assertIn("director", metadata["matched_fields"])
+        self.assertTrue(metadata["evidence_qualified"])
+
     def test_lens_metadata_fingerprint_selects_candidate_when_titles_are_ambiguous(self):
         engine = self.make_engine()
         matching = movie_details(5001, "tt0005001", "The Thing")
