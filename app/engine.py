@@ -1139,6 +1139,48 @@ class MetadataEngine:
                 f"unresolved_imdb_ids={unresolved_imdb} unresolved_tmdb_ids={unresolved_tmdb}",
                 flush=True,
             )
+
+            title_search_report = identity_evidence.get("tmdb_title_search") or {}
+            for query_report in (title_search_report.get("queries") or [])[:8]:
+                print(
+                    f"[KafiaNet] [{position}/{total}] LENS_TITLE "
+                    f"query='{safe_log_detail(query_report.get('query'), 120)}' "
+                    f"tmdb_candidate_ids={','.join(str(value) for value in (query_report.get('qualified_candidate_ids') or [])[:10]) or 'none'}",
+                    flush=True,
+                )
+
+            for candidate_report in (identity_evidence.get("candidate_identities") or [])[:12]:
+                profile = candidate_report.get("metadata_profile") or {}
+                metadata = candidate_report.get("metadata_match") or {}
+                cast_names = [
+                    str(person.get("name") or "")
+                    for person in (profile.get("cast") or [])[:5]
+                    if isinstance(person, dict) and person.get("name")
+                ]
+                character_names = [
+                    str(person.get("character") or "")
+                    for person in (profile.get("cast") or [])[:5]
+                    if isinstance(person, dict) and person.get("character")
+                ]
+                matched_fields = ",".join(metadata.get("matched_fields") or []) or "none"
+                conflict_fields = ",".join((metadata.get("conflicts") or {}).keys()) or "none"
+                print(
+                    f"[KafiaNet] [{position}/{total}] TMDB_CANDIDATE "
+                    f"id={candidate_report.get('tmdb_id')} "
+                    f"title='{safe_log_detail(candidate_report.get('title'), 110)}' "
+                    f"imdb_id={candidate_report.get('imdb_id') or 'none'} "
+                    f"year={profile.get('year') or 'none'} "
+                    f"countries='{safe_log_detail(', '.join(profile.get('countries') or []), 100)}' "
+                    f"director='{safe_log_detail(', '.join(profile.get('directors') or []), 90)}' "
+                    f"cast='{safe_log_detail(', '.join(cast_names), 110)}' "
+                    f"characters='{safe_log_detail(', '.join(character_names), 90)}' "
+                    f"rating={profile.get('rating') if profile.get('rating') is not None else 'none'} "
+                    f"votes={profile.get('rating_votes') if profile.get('rating_votes') is not None else 'none'} "
+                    f"lens_support={candidate_report.get('lens_title_support_count', 0)} "
+                    f"matched={matched_fields} conflicts={conflict_fields} "
+                    f"strong_metadata_matches={metadata.get('strong_match_count', 0)}",
+                    flush=True,
+                )
             if self._stop_batch:
                 print(
                     f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status}; "
