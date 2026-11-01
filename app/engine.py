@@ -85,10 +85,9 @@ class MetadataEngine:
         )
         lens_tmdb_ids = extract_tmdb_movie_ids(reverse_image_results)
         tmdb_id_lookup = {
-            "status": "not_used_id_only",
-            "queries": [],
-            "result_count": 0,
-            "qualified_candidate_ids": list(lens_tmdb_ids),
+            "status": "no_tmdb_id" if not lens_tmdb_ids else "resolving",
+            "tmdb_ids": list(lens_tmdb_ids),
+            "details_resolved": 0,
             "errors": [],
             "folder_name_used": False,
             "image_filename_used": False,
@@ -167,6 +166,9 @@ class MetadataEngine:
         evidence["id_resolution"]["unresolved_tmdb_ids"] = [
             int(row["tmdb_id"]) for row in details_errors
         ]
+        evidence["tmdb_id_lookup"]["details_resolved"] = len(resolved)
+        evidence["tmdb_id_lookup"]["errors"] = details_errors
+        evidence["tmdb_id_lookup"]["status"] = "error" if details_errors else "resolved"
         if details_errors:
             return None, {
                 "status": "review",
@@ -182,23 +184,40 @@ class MetadataEngine:
             imdb_id = str(
                 (normalized.get("external_ids") or {}).get("imdb_id") or ""
             ).strip().lower() or None
-            profile = _candidate_metadata_profile(normalized)
+            countries = [
+                str(item.get("name") or item.get("iso_3166_1") or "")
+                for item in (normalized.get("production_countries") or [])
+                if isinstance(item, dict) and (item.get("name") or item.get("iso_3166_1"))
+            ]
+            directors = [
+                str(item.get("name") or "")
+                for item in (normalized.get("directors") or [])
+                if isinstance(item, dict) and item.get("name")
+            ]
+            cast = [
+                {
+                    "name": str(item.get("name") or ""),
+                    "character": str(item.get("character") or ""),
+                }
+                for item in (normalized.get("cast") or [])[:8]
+                if isinstance(item, dict)
+            ]
+            tmdb_summary = {
+                "year": normalized.get("year"),
+                "countries": countries,
+                "directors": directors,
+                "cast": cast,
+                "rating": normalized.get("vote_average"),
+                "rating_votes": normalized.get("vote_count"),
+                "poster_count": len(normalized.get("posters") or []),
+            }
             identity = {
                 "tmdb_id": tmdb_id,
                 "imdb_id": imdb_id,
                 "title": normalized.get("title"),
                 "original_title": normalized.get("original_title"),
                 "year": normalized.get("year"),
-                "metadata_profile": profile,
-                "metadata_match": {
-                    "strategy": "not_used_tmdb_id_only",
-                    "matched_fields": [],
-                    "conflicts": {},
-                },
-                "lens_title_queries": [],
-                "lens_title_support_count": 0,
-                "title_similarity": None,
-                "cross_provider_match": False,
+                "tmdb_data": tmdb_summary,
             }
             identities.append(identity)
 
@@ -207,6 +226,7 @@ class MetadataEngine:
         # Multiple distinct official TMDB IDs are conflicting image results.
         # Fetch and show their TMDB profiles, but never choose one using text.
         if len(identities) != 1:
+            evidence["tmdb_id_lookup"]["status"] = "ambiguous_multiple_tmdb_ids"
             return None, {
                 "status": "review",
                 "confidence": 0.0,
@@ -220,7 +240,7 @@ class MetadataEngine:
                         "tmdb_id": row["tmdb_id"],
                         "title": row["title"],
                         "imdb_id": row["imdb_id"],
-                        "metadata_profile": row["metadata_profile"],
+                        "tmdb_data": row["tmdb_data"],
                     }
                     for row in identities
                 ],
@@ -533,8 +553,9 @@ class MetadataEngine:
             candidate_text = ",".join(str(value) for value in candidate_ids[:4]) or "none"
             identity_evidence = reverse_image_info.get("evidence") or {}
             unresolved_ids = identity_evidence.get("id_resolution") or {}
-            unresolved_imdb = ",".join(str(value) for value in (unresolved_ids.get("unresolved_imdb_ids") or [])[:3]) or "none"
-            unresolved_tmdb = ",".join(str(value) for value in (unresolved_ids.get("unresolved_tmdb_ids") or [])[:3]) or "none"
+            unresolved_tmdb = ",".join(
+                str(value) for value in (unresolved_ids.get("unresolved_tmdb_ids") or [])[:10]
+            ) or "none"
             lens_diag = (reverse_image_info.get("latest_query") or {}).get("diagnostics") or {}
             lens_error_items = (reverse_image_info.get("latest_query") or {}).get("errors") or []
 
@@ -551,6 +572,7 @@ class MetadataEngine:
                 lens_error = safe_log_detail(
                     f"{first_error.get('type', 'ProviderError')}: {first_error.get('message') or first_error.get('error')}"
                 )
+            tmdb_lookup = identity_evidence.get("tmdb_id_lookup") or {}
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
@@ -560,95 +582,34 @@ class MetadataEngine:
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
                 f"lens_error='{lens_error}' "
-                f"tmdb_id_lookup={(identity_evidence.get('tmdb_id_lookup') or {}).get('status', 'unknown')} "
-                f"tmdb_id_queries={len((identity_evidence.get('tmdb_id_lookup') or {}).get('queries') or [])} "
-                f"tmdb_id_matches={len((identity_evidence.get('tmdb_id_lookup') or {}).get('qualified_candidate_ids') or [])} "
+                f"tmdb_id_lookup={tmdb_lookup.get('status', 'unknown')} "
+                f"tmdb_ids={','.join(str(value) for value in (tmdb_lookup.get('tmdb_ids') or [])[:10]) or 'none'} "
+                f"tmdb_details_resolved={tmdb_lookup.get('details_resolved', 0)} "
+                f'tmdb_details_errors={len(tmdb_lookup.get("errors") or [])} '
                 f'reason="{reason}" candidates={candidate_text} '
-                f"unresolved_imdb_ids={unresolved_imdb} unresolved_tmdb_ids={unresolved_tmdb}",
+                f"unresolved_tmdb_ids={unresolved_tmdb}",
                 flush=True,
             )
 
-            title_search_report = identity_evidence.get("tmdb_id_lookup") or {}
-            for query_report in (title_search_report.get("queries") or [])[:8]:
-                print(
-                    f"[KafiaNet] [{position}/{total}] LENS_TITLE "
-                    f"query='{safe_log_detail(query_report.get('query'), 120)}' "
-                    f"tmdb_candidate_ids={','.join(str(value) for value in (query_report.get('qualified_candidate_ids') or [])[:10]) or 'none'}",
-                    flush=True,
-                )
-
-            for lens_result in (identity_evidence.get("backlinks") or [])[:12]:
-                lens_metadata = lens_result.get("metadata_clues") or {}
-                lens_page = (
-                    lens_result.get("resolved_url")
-                    or (lens_result.get("resolved_urls") or [None])[0]
-                    or lens_result.get("url")
-                )
-                print(
-                    f"[KafiaNet] [{position}/{total}] LENS_RESULT "
-                    f"title='{safe_log_detail(lens_result.get('title'), 130)}' "
-                    f"snippet='{safe_log_detail(lens_result.get('content'), 360)}' "
-                    f"year_clues={','.join(str(value) for value in (lens_metadata.get('years') or [])) or 'none'} "
-                    f"country_clues='{safe_log_detail(', '.join(lens_metadata.get('countries') or []), 90)}' "
-                    f"director_clues='{safe_log_detail(', '.join(lens_metadata.get('directors') or []), 90)}' "
-                    f"cast_clues='{safe_log_detail(', '.join(lens_metadata.get('cast') or []), 110)}' "
-                    f"character_clues='{safe_log_detail(', '.join(lens_metadata.get('characters') or []), 90)}' "
-                    f"rating_clues='{safe_log_detail(', '.join(str(value.get('value')) for value in (lens_metadata.get('ratings') or []) if isinstance(value, dict)), 60)}' "
-                    f"url='{safe_log_detail(lens_page, 180)}' "
-                    f"url_error='{safe_log_detail(lens_result.get('url_resolution_error'), 120)}'",
-                    flush=True,
-                )
-
-            for candidate_report in (identity_evidence.get("candidate_identities") or [])[:12]:
-                profile = candidate_report.get("metadata_profile") or {}
-                metadata = candidate_report.get("metadata_match") or {}
+            for candidate_report in (identity_evidence.get("candidate_identities") or [])[:10]:
+                tmdb_data = candidate_report.get("tmdb_data") or {}
                 cast_names = [
                     str(person.get("name") or "")
-                    for person in (profile.get("cast") or [])[:5]
-                    if isinstance(person, dict) and person.get("name")
+                    for person in (tmdb_data.get("cast") or [])[:5]
                 ]
-                character_names = [
-                    str(person.get("character") or "")
-                    for person in (profile.get("cast") or [])[:5]
-                    if isinstance(person, dict) and person.get("character")
-                ]
-                matched_fields = ",".join(metadata.get("matched_fields") or []) or "none"
-                conflict_fields = ",".join((metadata.get("conflicts") or {}).keys()) or "none"
-                lens_clues = metadata.get("observed_clues") or {}
                 print(
-                    f"[KafiaNet] [{position}/{total}] TMDB_CANDIDATE "
+                    f"[KafiaNet] [{position}/{total}] TMDB_ID_RESULT "
                     f"id={candidate_report.get('tmdb_id')} "
-                    f"title='{safe_log_detail(candidate_report.get('title'), 110)}' "
+                    f"title='{safe_log_detail(candidate_report.get('title'), 120)}' "
                     f"imdb_id={candidate_report.get('imdb_id') or 'none'} "
-                    f"year={profile.get('year') or 'none'} "
-                    f"countries='{safe_log_detail(', '.join(profile.get('countries') or []), 100)}' "
-                    f"director='{safe_log_detail(', '.join(profile.get('directors') or []), 90)}' "
-                    f"cast='{safe_log_detail(', '.join(cast_names), 110)}' "
-                    f"characters='{safe_log_detail(', '.join(character_names), 90)}' "
-                    f"rating={profile.get('rating') if profile.get('rating') is not None else 'none'} "
-                    f"votes={profile.get('rating_votes') if profile.get('rating_votes') is not None else 'none'} "
-                    f"lens_years={','.join(str(value) for value in (lens_clues.get('years') or [])) or 'none'} "
-                    f"lens_countries='{safe_log_detail(', '.join(lens_clues.get('countries') or []), 90)}' "
-                    f"lens_directors='{safe_log_detail(', '.join(lens_clues.get('directors') or []), 90)}' "
-                    f"lens_cast='{safe_log_detail(', '.join(lens_clues.get('cast') or []), 100)}' "
-                    f"lens_characters='{safe_log_detail(', '.join(lens_clues.get('main_characters') or []), 90)}' "
-                    f"lens_ratings='{safe_log_detail(', '.join(str(value.get('value')) for value in (lens_clues.get('ratings') or []) if isinstance(value, dict)), 50)}' "
-                    f"lens_support={candidate_report.get('lens_title_support_count', 0)} "
-                    f"matched={matched_fields} conflicts={conflict_fields} "
-                    f"strong_metadata_matches={metadata.get('strong_match_count', 0)} "
-                    f"metadata_evidence_qualified={metadata.get('evidence_qualified', False)} "
-                    f"supporting_lens_pages={metadata.get('supporting_observation_count', 0)}",
+                    f"year={tmdb_data.get('year') or 'none'} "
+                    f"countries='{safe_log_detail(', '.join(tmdb_data.get('countries') or []), 100)}' "
+                    f"directors='{safe_log_detail(', '.join(tmdb_data.get('directors') or []), 100)}' "
+                    f"cast='{safe_log_detail(', '.join(cast_names), 120)}' "
+                    f"rating={tmdb_data.get('rating') if tmdb_data.get('rating') is not None else 'none'} "
+                    f"posters={tmdb_data.get('poster_count', 0)}",
                     flush=True,
                 )
-                for support in (metadata.get("supporting_observations") or [])[:5]:
-                    print(
-                        f"[KafiaNet] [{position}/{total}] LENS_SUPPORT "
-                        f"candidate={candidate_report.get('tmdb_id')} "
-                        f"title='{safe_log_detail(support.get('result_title'), 100)}' "
-                        f"url='{safe_log_detail(support.get('result_url'), 180)}' "
-                        f"matched={','.join(support.get('matched_fields') or []) or 'none'}",
-                        flush=True,
-                    )
             if self._stop_batch:
                 print(
                     f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status}; "
