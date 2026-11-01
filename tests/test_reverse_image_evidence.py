@@ -115,6 +115,40 @@ class ReverseImageEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["director_hints"], ["Turner Clay"])
         self.assertEqual(evidence["backlinks"][0]["imdb_ids"], ["tt1705134"])
 
+    def test_extracts_lens_metadata_fingerprint_clues(self):
+        evidence = extract_reverse_image_evidence([{
+            "title": "Buladó (2020)",
+            "url": "https://example.com/film/bulado",
+            "source": "https://cdn.example.com/unrelated-poster-1999.jpg",
+            "content": (
+                "Country of origin: Curaçao, Netherlands | Director: Eché Janga | "
+                "Cast: Tiara Richards, Everon Jackson Hooi, Felix de Rooy | "
+                "Main character: Kenza | IMDb rating: 6.5/10"
+            ),
+        }])
+
+        observation = evidence["metadata_observations"][0]
+        self.assertEqual(observation["lens_title"], "Buladó")
+        self.assertEqual(observation["years"], [2020])
+        self.assertEqual(observation["countries"], ["Curaçao, Netherlands"])
+        self.assertEqual(observation["directors"], ["Eché Janga"])
+        self.assertEqual(observation["cast"], [
+            "Tiara Richards", "Everon Jackson Hooi", "Felix de Rooy"
+        ])
+        self.assertIn("Kenza", observation["characters"])
+        self.assertEqual(observation["ratings"], [{"source": "IMDB", "value": 6.5}])
+        # The image URL filename is not treated as a year clue.
+        self.assertNotIn(1999, evidence["year_hints"])
+
+    def test_image_filename_alone_does_not_create_metadata_year(self):
+        evidence = extract_reverse_image_evidence([{
+            "title": "",
+            "url": "https://example.com/result",
+            "source": "https://cdn.example.com/Bulado-2020-poster.jpg",
+        }])
+        self.assertEqual(evidence["year_hints"], [])
+        self.assertEqual(evidence["metadata_observations"][0]["years"], [])
+
     def test_extracts_imdb_id_only_from_imdb_host(self):
         self.assertEqual(
             imdb_id_from_url("https://www.imdb.com/title/tt0133093/"),
