@@ -226,6 +226,56 @@ def _compare_lens_metadata(
     if rating_details:
         (matches if rating_match else conflicts)["rating"] = rating_details
 
+    # Count how those matching facts are distributed across the actual Lens
+    # result pages. This prevents combining unrelated snippets that happened to
+    # share a Lens title into one artificial "fingerprint".
+    observation_support: list[dict[str, Any]] = []
+    seen_observation_sources: set[str] = set()
+    best_single_observation_match_count = 0
+    for index, item in enumerate(relevant):
+        item_years = [
+            int(value) for value in (item.get("years") or []) if str(value).isdigit()
+        ]
+        item_countries = _unique_text([
+            part for value in (item.get("countries") or [])
+            for part in _country_tokens(str(value))
+        ])
+        item_directors = [str(value) for value in (item.get("directors") or [])]
+        item_cast = [str(value) for value in (item.get("cast") or [])]
+        item_characters = [str(value) for value in (item.get("characters") or [])]
+        item_fields: list[str] = []
+        if (
+            years and candidate_year is not None
+            and any(abs(year - int(candidate_year)) <= 1 for year in item_years)
+        ):
+            item_fields.append("year")
+        if item_countries and any(
+            normalize_title(value) == normalize_title(candidate)
+            for value in item_countries for candidate in candidate_countries
+        ):
+            item_fields.append("country")
+        if any(_person_match(hint, candidate_directors) for hint in item_directors):
+            item_fields.append("director")
+        if any(_person_match(hint, candidate_cast) for hint in item_cast):
+            item_fields.append("cast")
+        if any(_person_match(hint, candidate_characters) for hint in item_characters):
+            item_fields.append("main_character")
+        if not item_fields:
+            continue
+        source_url = str(item.get("result_url") or "").strip()
+        source_key = source_url.casefold() or normalize_title(item.get("result_title") or "") or f"row-{index}"
+        if source_key in seen_observation_sources:
+            continue
+        seen_observation_sources.add(source_key)
+        best_single_observation_match_count = max(
+            best_single_observation_match_count, len(item_fields)
+        )
+        observation_support.append({
+            "result_title": str(item.get("result_title") or "")[:160],
+            "result_url": source_url[:350],
+            "matched_fields": item_fields,
+        })
+
     # Rating is deliberately not a decisive identity field. At least two
     # independent hard metadata dimensions must agree for disambiguation.
     strong_matches = [name for name in matched_fields if name in {
@@ -251,6 +301,13 @@ def _compare_lens_metadata(
         "conflicts": conflicts,
         "matched_fields": matched_fields,
         "strong_match_count": len(strong_matches),
+        "supporting_observation_count": len(observation_support),
+        "best_single_observation_match_count": best_single_observation_match_count,
+        "supporting_observations": observation_support[:8],
+        "evidence_qualified": bool(
+            len(strong_matches) >= 2
+            and (best_single_observation_match_count >= 2 or len(observation_support) >= 2)
+        ),
         "score": round(score, 3),
         "rating_is_decisive": False,
     }
