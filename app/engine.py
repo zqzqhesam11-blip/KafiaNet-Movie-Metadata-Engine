@@ -814,6 +814,31 @@ class MetadataEngine:
                         "candidate_ids": [int(selected_id)],
                     }, evidence
             metadata = sole_identity.get("metadata_match") or {}
+            has_official_lens_identity = bool(
+                sole_identity.get("imdb_ids_from_lens")
+                or sole_identity.get("tmdb_ids_from_lens")
+            )
+            if (
+                not has_official_lens_identity
+                and not metadata.get("evidence_qualified")
+            ):
+                return None, {
+                    "status": "review",
+                    "confidence": float(sole_identity.get("title_similarity") or 0.0),
+                    "reason": (
+                        "A Lens title found one TMDB candidate, but Lens did not provide "
+                        "at least two independent matching metadata facts to verify its identity"
+                    ),
+                    "candidate_ids": [int(selected_id)],
+                    "candidate_comparisons": [{
+                        "tmdb_id": int(selected_id),
+                        "title": sole_identity.get("title"),
+                        "imdb_id": sole_identity.get("imdb_id"),
+                        "title_similarity": sole_identity.get("title_similarity"),
+                        "metadata_profile": sole_identity.get("metadata_profile"),
+                        "metadata_match": metadata,
+                    }],
+                }, evidence
             if len(metadata.get("conflicts") or {}) >= 2 and not metadata.get("strong_match_count"):
                 return None, {
                     "status": "review", "confidence": 0.0,
