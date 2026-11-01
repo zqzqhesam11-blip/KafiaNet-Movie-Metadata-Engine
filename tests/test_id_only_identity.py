@@ -323,7 +323,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertIn("director", metadata["matched_fields"])
         self.assertIn("cast", metadata["matched_fields"])
         self.assertIn("main_character", metadata["matched_fields"])
-        self.assertEqual(metadata["best_single_observation_match_count"], 4)
+        self.assertEqual(metadata["best_single_observation_match_count"], 5)
 
     def test_rating_alone_cannot_disambiguate_tmdb_candidates(self):
         engine = self.make_engine()
