@@ -572,6 +572,41 @@ class MetadataEngine:
                 source_ids.get(candidate_id, {}).get("lens_title_queries", set()),
                 key=str.casefold,
             )
+            linked_lens_result_titles = sorted(
+                source_ids.get(candidate_id, {}).get("lens_result_titles", set()),
+                key=str.casefold,
+            )
+            associated_lens_titles = _unique_text(
+                [*linked_lens_titles, *linked_lens_result_titles]
+            )
+            alternative_names = [
+                str(item.get("title") or "")
+                for item in (normalized.get("alternative_titles") or [])
+                if isinstance(item, dict) and item.get("title")
+            ]
+            candidate_names = [
+                str(normalized.get("title") or ""),
+                str(normalized.get("original_title") or ""),
+                *alternative_names,
+            ]
+            details_title_similarity = max(
+                (
+                    title_similarity(lens_title, candidate_name)
+                    for lens_title in linked_lens_titles
+                    for candidate_name in candidate_names
+                ),
+                default=0.0,
+            )
+            title_similarity_score = max(
+                title_search_scores.get(candidate_id, 0.0),
+                details_title_similarity,
+            )
+            metadata_profile = _candidate_metadata_profile(normalized)
+            metadata_match = _compare_lens_metadata(
+                normalized,
+                evidence.get("metadata_observations") or [],
+                associated_lens_titles,
+            )
 
             if tmdb_imdb_id and linked_imdb_ids and (
                 tmdb_imdb_id not in linked_imdb_ids or len(linked_imdb_ids) != 1
@@ -596,7 +631,11 @@ class MetadataEngine:
                 "imdb_ids_from_lens": linked_imdb_ids,
                 "tmdb_ids_from_lens": linked_tmdb_ids,
                 "lens_title_queries": linked_lens_titles,
-                "title_similarity": title_search_scores.get(candidate_id, 0.0),
+                "lens_result_titles": linked_lens_result_titles,
+                "lens_title_support_count": len(linked_lens_titles),
+                "title_similarity": round(title_similarity_score, 4),
+                "metadata_profile": metadata_profile,
+                "metadata_match": metadata_match,
                 "cross_provider_match": bool(
                     int(candidate_id) in [int(value) for value in linked_tmdb_ids]
                     and resolved_imdb_id and resolved_imdb_id in linked_imdb_ids
