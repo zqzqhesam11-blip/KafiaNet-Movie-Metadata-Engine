@@ -37,7 +37,7 @@ def _unique_text(values: list[Any]) -> list[str]:
 def _country_tokens(value: str) -> list[str]:
     return [
         part.strip(" .()")
-        for part in re.split(r"[,;/|&]|\\band\\b", str(value or ""), flags=re.IGNORECASE)
+        for part in re.split(r"[,;/|&]|\band\b", str(value or ""), flags=re.IGNORECASE)
         if part.strip(" .()")
     ]
 
@@ -335,7 +335,12 @@ class MetadataEngine:
             candidates.setdefault(key, candidate)
             links = source_ids.setdefault(
                 key,
-                {"imdb_ids": set(), "tmdb_ids": set(), "lens_title_queries": set()},
+                {
+                    "imdb_ids": set(),
+                    "tmdb_ids": set(),
+                    "lens_title_queries": set(),
+                    "lens_result_titles": set(),
+                },
             )
             if provider == "imdb":
                 links["imdb_ids"].add(str(source_id))
@@ -462,6 +467,7 @@ class MetadataEngine:
                 "imdb_ids": sorted(links["imdb_ids"]),
                 "tmdb_ids": sorted(links["tmdb_ids"], key=int),
                 "lens_title_queries": sorted(links["lens_title_queries"], key=str.casefold),
+                "lens_result_titles": sorted(links["lens_result_titles"], key=str.casefold),
             }
             for candidate_id, links in source_ids.items()
         }
