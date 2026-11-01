@@ -112,7 +112,29 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         with self.assertRaisesRegex(BrightDataAPIError, "BRIGHTDATA_API_KEY"):
             api.search_by_image_url("https://example.com/poster.jpg")
 
-    def test_empty_json_response_reports_http_metadata(self):
+    def test_retries_empty_http_200_response_and_recovers(self):
+        empty = Mock()
+        empty.status_code = 200
+        empty.text = ""
+        empty.headers = {"content-type": "application/json", "content-length": "0"}
+        empty.json.side_effect = ValueError("empty")
+
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = '{"visual_matches":[]}'
+        recovered.headers = {"content-type": "application/json", "content-length": "21"}
+        recovered.json.return_value = {"visual_matches": []}
+
+        api = self.make_client()
+        api.client.post.side_effect = [empty, recovered]
+        with patch("app.google_lens.time.sleep"):
+            self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
+
+        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(api.last_lens_diagnostics["attempts"], 2)
+        self.assertEqual(api.last_lens_diagnostics["status"], "no_matches")
+
+    def test_empty_json_response_retries_then_reports_http_metadata(self):
         response = Mock()
         response.status_code = 200
         response.text = ""
@@ -120,8 +142,12 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         response.json.side_effect = ValueError("empty")
         api = self.make_client()
         api.client.post.return_value = response
-        with self.assertRaisesRegex(BrightDataAPIError, "content-length=0"):
-            api.search_by_image_url("https://example.com/poster.jpg")
+        with patch("app.google_lens.time.sleep"):
+            with self.assertRaisesRegex(BrightDataAPIError, "content-length=0"):
+                api.search_by_image_url("https://example.com/poster.jpg")
+
+        self.assertEqual(api.client.post.call_count, 3)
+        self.assertEqual(api.last_lens_diagnostics["attempts"], 3)
 
     def test_unwraps_json_encoded_brightdata_body(self):
         nested = {
