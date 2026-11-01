@@ -283,6 +283,31 @@ def _compare_lens_metadata(
         item_directors = [str(value) for value in (item.get("directors") or [])]
         item_cast = [str(value) for value in (item.get("cast") or [])]
         item_characters = [str(value) for value in (item.get("characters") or [])]
+        item_text = " ".join((
+            str(item.get("result_title") or ""),
+            str(item.get("content") or ""),
+        ))
+        item_countries = _unique_text([
+            *item_countries,
+            *[
+                value for value in candidate_countries
+                if len(normalize_title(value)) >= 4
+                and not re.fullmatch(r"[A-Z]{2}", value.strip(), flags=re.IGNORECASE)
+                and _phrase_in_lens_text(value, item_text)
+            ],
+        ])
+        item_directors = _unique_text([
+            *item_directors,
+            *[value for value in candidate_directors if _phrase_in_lens_text(value, item_text)],
+        ])
+        item_cast = _unique_text([
+            *item_cast,
+            *[value for value in candidate_cast if _phrase_in_lens_text(value, item_text)],
+        ])
+        item_characters = _unique_text([
+            *item_characters,
+            *[value for value in candidate_characters if _phrase_in_lens_text(value, item_text)],
+        ])
         item_fields: list[str] = []
         if (
             years and candidate_year is not None
