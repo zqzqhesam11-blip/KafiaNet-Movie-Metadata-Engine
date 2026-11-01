@@ -191,6 +191,45 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertIn("both IDs are required", match["reason"])
         self.assertEqual(engine.tmdb.search_movies_calls, 0)
 
+    def test_lens_provider_error_is_preserved_and_text_search_is_skipped(self):
+        engine = self.make_engine()
+        engine._reverse_image_results = lambda _image_url: [{
+            "error": "BrightDataAPIError",
+            "message": "Bright Data service error (HTTP 502): upstream timeout",
+        }]
+
+        record = engine._record_for_folder({
+            "folder": "DO NOT USE THIS FOLDER",
+            "image_path": "Posters/poster.jpg",
+        })
+
+        self.assertEqual(record["status"], "review")
+        latest = record["reverse_image"]["latest_query"]
+        self.assertEqual(latest["status"], "error")
+        self.assertIn("HTTP 502", latest["errors"][0]["message"])
+        self.assertEqual(
+            record["reverse_image"]["evidence"]["official_id_search"]["status"],
+            "skipped_lens_error",
+        )
+
+    def test_official_search_status_is_retained_when_no_official_pages_match(self):
+        engine = self.make_engine()
+        engine._reverse_image_results = lambda _image_url: [{
+            "title": "Buladó",
+            "url": "https://example.com/unrelated-result",
+        }]
+
+        record = engine._record_for_folder({
+            "folder": "FOLDER MUST NOT BE SEARCHED",
+            "image_path": "Posters/poster.jpg",
+        })
+
+        self.assertEqual(record["status"], "review")
+        official_search = record["reverse_image"]["evidence"]["official_id_search"]
+        self.assertEqual(official_search["status"], "no_official_pages")
+        self.assertEqual(official_search["result_count"], 0)
+        self.assertEqual(engine.reverse_image.search_input[0]["title"], "Buladó")
+
     def test_record_persists_both_ids_as_explicit_fields(self):
         engine = self.make_engine()
         rows = [
