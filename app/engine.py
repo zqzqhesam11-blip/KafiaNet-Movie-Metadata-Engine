@@ -640,9 +640,18 @@ class MetadataEngine:
                     1 for item in records
                     if (item.get("reverse_image") or {}).get("results_source") == "previous_saved"
                 ),
-                "reverse_image_rejected_external_ids": sum(
-                    len(((item.get("reverse_image") or {}).get("evidence") or {}).get("rejected_external_ids", []))
+                "reverse_image_official_id_backlinks": sum(
+                    len(((item.get("reverse_image") or {}).get("evidence") or {}).get("imdb_ids", []))
+                    + len(((item.get("reverse_image") or {}).get("evidence") or {}).get("tmdb_ids", []))
                     for item in records
+                ),
+                "reverse_image_resolved_identities": sum(
+                    1 for item in records if item.get("identity")
+                ),
+                "reverse_image_identity_conflicts": sum(
+                    1 for item in records
+                    if "multiple distinct official IMDb/TMDB movie identities"
+                    in str((item.get("match") or {}).get("reason") or "")
                 ),
                 "planned_output_files": [],
                 "planned_image_moves": [],
@@ -896,13 +905,18 @@ class MetadataEngine:
                 1 for record in records
                 if (record.get("reverse_image") or {}).get("results_source") == "previous_saved"
             ),
-            "reverse_image_rejected_external_ids": sum(
-                len(
-                    ((record.get("reverse_image") or {}).get("evidence") or {}).get(
-                        "rejected_external_ids", []
-                    )
-                )
+            "reverse_image_official_id_backlinks": sum(
+                len(((record.get("reverse_image") or {}).get("evidence") or {}).get("imdb_ids", []))
+                + len(((record.get("reverse_image") or {}).get("evidence") or {}).get("tmdb_ids", []))
                 for record in records
+            ),
+            "reverse_image_resolved_identities": sum(
+                1 for record in records if record.get("identity")
+            ),
+            "reverse_image_identity_conflicts": sum(
+                1 for record in records
+                if "multiple distinct official IMDb/TMDB movie identities"
+                in str((record.get("match") or {}).get("reason") or "")
             ),
             "planned_output_files": sorted(files),
             "planned_image_moves": sorted(moves),
@@ -918,7 +932,7 @@ class MetadataEngine:
                 flush=True,
             )
             index_doc = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "updated_utc": datetime.now(timezone.utc).isoformat(),
                 "source_repository": self.settings.posters_repo,
                 "items": sorted(projected, key=lambda row: str(row.get("source_folder", "")).casefold()),
