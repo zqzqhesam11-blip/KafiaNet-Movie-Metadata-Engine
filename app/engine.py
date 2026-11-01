@@ -9,7 +9,7 @@ from app.config import Settings
 from app.github_api import GitHubAPI
 from app.image_evidence import extract_tmdb_movie_ids
 from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
-from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
+from app.tmdb import TMDBClient
 
 
 SCHEMA_VERSION = 3
@@ -407,7 +407,6 @@ class MetadataEngine:
                 "verification": match.get("identity_method"),
                 "folder_name_used": False,
             }
-            record["title_policy_version"] = WORLDWIDE_TITLE_POLICY_VERSION
             record["correction"] = {
                 # Legacy key retained for catalog-reader compatibility; this
                 # is a JSON basename, never a physical folder rename.
