@@ -70,7 +70,8 @@ def _clean_hint(value: str) -> str | None:
     # while dropping a later release-year suffix from common poster filenames.
     parts = value.split()
     parts = [
-        part for index, part in enumerate(parts)
+        part
+        for index, part in enumerate(parts)
         if index == 0 or not re.fullmatch(r"(?:19|20)\d{2}", part)
     ]
     value = " ".join(parts)
@@ -105,7 +106,8 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
     backlinks: list[dict] = []
 
     for result in results or []:
-        if not isinstance(result, dict):
+        if not isinstance(result, dict) or result.get("error"):
+            # Provider failures are diagnostics, not image matches or backlinks.
             continue
 
         title = _clean_hint(str(result.get("title") or ""))

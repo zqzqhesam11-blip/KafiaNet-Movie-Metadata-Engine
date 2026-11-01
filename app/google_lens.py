@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
@@ -74,21 +75,33 @@ class BrightDataGoogleLensClient:
         return str(body or "")[:300]
 
     @staticmethod
-    def _http_error(status: int, detail: str) -> str:
-        messages = {
-            400: "Bright Data rejected the Google Lens request; verify the poster URL and SERP zone",
-            401: "Bright Data authentication failed; verify BRIGHTDATA_API_KEY in Hostless",
-            402: "Bright Data reports no available free/API credits; do not add funds or enable a paid plan",
-            403: "Bright Data denied this request; verify the SERP zone is active and permitted",
-            429: "Bright Data request limit reached; stop processing and check the dashboard quota",
-        }
-        message = messages.get(status, "Bright Data service error; the image lookup did not return a usable response")
-        suffix = f": {detail}" if detail else ""
-        return f"{message} (HTTP {status}){suffix}"[:600]
+    def _payload_shape(payload: Any) -> str:
+        """Describe JSON keys and value types without logging URLs or response contents."""
+        if not isinstance(payload, dict):
+            return f"root_type={type(payload).__name__}"
+        parts: list[str] = []
+        for key, value in list(payload.items())[:16]:
+            if isinstance(value, dict):
+                nested_keys = ",".join(str(item) for item in list(value.keys())[:8])
+                parts.append(f"{key}=object[{nested_keys}]")
+            elif isinstance(value, list):
+                parts.append(f"{key}=array[{len(value)}]")
+            else:
+                parts.append(f"{key}={type(value).__name__}")
+        return "top_level=" + ";".join(parts)
 
     @staticmethod
     def _rows_from_payload(payload: Any, depth: int = 0) -> list[dict[str, Any]] | None:
-        if depth > 5:
+        """Handle Lens arrays and Bright Data's occasional JSON/body wrappers."""
+        if depth > 6:
+            return None
+        if isinstance(payload, str):
+            text = payload.strip()
+            if text.startswith(("{", "[")):
+                try:
+                    return BrightDataGoogleLensClient._rows_from_payload(json.loads(text), depth + 1)
+                except (TypeError, ValueError):
+                    return None
             return None
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)] if all(
@@ -97,16 +110,23 @@ class BrightDataGoogleLensClient:
         if not isinstance(payload, dict):
             return None
 
-        for key in ("visual_matches", "exact_matches", "lens_results"):
+        # Google Lens normally returns visual_matches. Bright Data's parsed image
+        # response can also expose the equivalent ranked items under images.
+        for key in ("visual_matches", "exact_matches", "lens_results", "images", "similar_images"):
             value = payload.get(key)
             if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
+                return [item for item in value if isinstance(item, dict)] if all(
+                    isinstance(item, dict) for item in value
+                ) else None
 
-        for key in ("data", "result", "results", "response"):
+        # Handle structured wrappers and JSON-encoded body fields. results is
+        # a fallback for provider variants whose result list is generic.
+        for key in (
+            "data", "result", "results", "response", "body", "content",
+            "raw", "output", "payload", "lens",
+        ):
             value = payload.get(key)
-            if isinstance(value, list) and all(isinstance(item, dict) for item in value):
-                return value
-            if isinstance(value, dict):
+            if isinstance(value, (dict, list, str)):
                 rows = BrightDataGoogleLensClient._rows_from_payload(value, depth + 1)
                 if rows is not None:
                     return rows
@@ -131,16 +151,16 @@ class BrightDataGoogleLensClient:
         for item in rows[:MAX_NORMALIZED_RESULTS]:
             title = str(item.get("title") or item.get("name") or "").strip()[:300]
             page_url = cls._first_url(item, ("link", "url", "page_url", "website", "source_url"))
-            image_url = cls._first_url(item, ("image_url", "original", "image", "source", "thumbnail", "thumbnail_url"))
-            source_value = item.get("source")
-            if not image_url and isinstance(source_value, str):
-                parsed_source = urlparse(source_value.strip())
-                if parsed_source.scheme in {"http", "https"} and parsed_source.netloc:
-                    image_url = source_value.strip()[:1000]
+            # Bright Data's image schema uses original_image for the full-size
+            # image and image for its preview; keep the full-size URL first.
+            image_url = cls._first_url(
+                item,
+                ("original_image", "image_url", "original", "source", "image", "thumbnail", "thumbnail_url"),
+            )
             if not page_url and image_url:
                 page_url = image_url
             description = str(
-                item.get("description") or item.get("snippet") or item.get("text") or ""
+                item.get("description") or item.get("snippet") or item.get("text") or item.get("content") or ""
             ).strip()[:700]
             if not title and not page_url and not image_url:
                 continue
@@ -150,7 +170,7 @@ class BrightDataGoogleLensClient:
                 "source": image_url,
                 "content": description,
                 "provider": "google_lens_brightdata",
-                "position": item.get("position") or item.get("rank"),
+                "position": item.get("position") or item.get("global_rank") or item.get("rank"),
             })
         return normalized
 
@@ -189,6 +209,20 @@ class BrightDataGoogleLensClient:
         rows = self._rows_from_payload(payload)
         if rows is None:
             raise BrightDataAPIError(
-                "Bright Data returned JSON, but no recognized Google Lens visual_matches array was present"
+                "Bright Data returned JSON, but no recognized Google Lens result list was present; "
+                + self._payload_shape(payload)
             )
         return self._normalize_matches(rows)
+
+    @staticmethod
+    def _http_error(status: int, detail: str) -> str:
+        messages = {
+            400: "Bright Data rejected the Google Lens request; verify the poster URL and SERP zone",
+            401: "Bright Data authentication failed; verify BRIGHTDATA_API_KEY in Hostless",
+            402: "Bright Data reports no available free/API credits; do not add funds or enable a paid plan",
+            403: "Bright Data denied this request; verify the SERP zone is active and permitted",
+            429: "Bright Data request limit reached; stop processing and check the dashboard quota",
+        }
+        message = messages.get(status, "Bright Data service error; the image lookup did not return a usable response")
+        suffix = f": {detail}" if detail else ""
+        return f"{message} (HTTP {status}){suffix}"[:600]
