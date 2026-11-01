@@ -199,6 +199,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(set(match["candidate_ids"]), {5001, 5002})
         self.assertEqual(evidence["tmdb_title_search"]["status"], "matched")
         self.assertEqual(len(evidence["tmdb_title_search"]["qualified_candidate_ids"]), 2)
+        self.assertEqual(len(match["candidate_comparisons"]), 2)
 
     def test_lens_metadata_fingerprint_selects_candidate_when_titles_are_ambiguous(self):
         engine = self.make_engine()
@@ -258,6 +259,8 @@ class IdOnlyIdentityTests(unittest.TestCase):
             item for item in evidence["candidate_identities"] if item["tmdb_id"] == 5001
         )
         self.assertGreaterEqual(selected["metadata_match"]["strong_match_count"], 4)
+        self.assertTrue(selected["metadata_match"]["evidence_qualified"])
+        self.assertEqual(selected["metadata_match"]["best_single_observation_match_count"], 5)
         self.assertIn("year", selected["metadata_match"]["matched_fields"])
         self.assertIn("country", selected["metadata_match"]["matched_fields"])
         self.assertIn("director", selected["metadata_match"]["matched_fields"])
