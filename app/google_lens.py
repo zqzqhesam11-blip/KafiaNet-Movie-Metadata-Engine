@@ -138,6 +138,11 @@ class BrightDataGoogleLensClient:
                 work.append((index, candidate))
 
         if not work:
+            self.last_lens_diagnostics.update({
+                "google_goto_candidates": 0,
+                "google_goto_resolved": 0,
+                "google_goto_failed": 0,
+            })
             return prepared
 
         with ThreadPoolExecutor(max_workers=MAX_GOTO_RESOLUTION_WORKERS) as executor:
@@ -148,11 +153,25 @@ class BrightDataGoogleLensClient:
 
         destinations: dict[int, list[str]] = {}
         errors: dict[int, list[str]] = {}
-        for (index, _original), (destination, error) in zip(work, resolved):
+        goto_candidates = goto_resolved = goto_failed = 0
+        for (index, original), (destination, error) in zip(work, resolved):
+            is_goto = self._is_google_goto_url(original)
+            if is_goto:
+                goto_candidates += 1
+                if destination and not self._is_google_goto_url(destination):
+                    goto_resolved += 1
+                elif error or not destination:
+                    goto_failed += 1
             if destination:
                 destinations.setdefault(index, []).append(destination)
             if error:
                 errors.setdefault(index, []).append(error)
+
+        self.last_lens_diagnostics.update({
+            "google_goto_candidates": goto_candidates,
+            "google_goto_resolved": goto_resolved,
+            "google_goto_failed": goto_failed,
+        })
 
         for index, item in enumerate(prepared):
             unique_destinations = list(dict.fromkeys(destinations.get(index, [])))
@@ -209,6 +228,70 @@ class BrightDataGoogleLensClient:
             else:
                 parts.append(f"{key}={type(value).__name__}")
         return "top_level=" + ";".join(parts)
+
+    @staticmethod
+    def _raw_result_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """Summarize provider field names and URL paths without exposing query tokens."""
+        field_names: set[str] = set()
+        field_types: dict[str, set[str]] = {}
+        path_counts: dict[str, int] = {}
+        url_fields = {
+            "link", "url", "page_url", "website", "source_url", "landing_page",
+            "result_url", "destination_url", "target_url", "href", "imgrefurl",
+            "source", "original_image", "image_url", "image", "thumbnail",
+            "thumbnail_url",
+        }
+
+        def collect_strings(value: Any):
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, list):
+                for child in value[:20]:
+                    yield from collect_strings(child)
+            elif isinstance(value, dict):
+                for name in ("url", "link", "href", "src", "target", "original_url"):
+                    if name in value:
+                        yield from collect_strings(value[name])
+
+        for row in rows[:MAX_NORMALIZED_RESULTS]:
+            if not isinstance(row, dict):
+                continue
+            for key, value in row.items():
+                name = str(key)
+                field_names.add(name)
+                value_type = (
+                    "object" if isinstance(value, dict)
+                    else "array" if isinstance(value, list)
+                    else "null" if value is None
+                    else type(value).__name__
+                )
+                field_types.setdefault(name, set()).add(value_type)
+                if name.casefold() not in url_fields:
+                    continue
+                for candidate in collect_strings(value):
+                    try:
+                        parsed = urlparse(candidate.strip())
+                    except ValueError:
+                        continue
+                    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                        continue
+                    host = (parsed.hostname or "").casefold().rstrip(".")
+                    path = parsed.path.rstrip("/") or "/"
+                    label = f"{host}{path}"
+                    path_counts[label] = path_counts.get(label, 0) + 1
+
+        top_paths = dict(
+            sorted(path_counts.items(), key=lambda item: (-item[1], item[0]))[:12]
+        )
+        compact_types = {
+            key: "/".join(sorted(types))
+            for key, types in sorted(field_types.items())[:30]
+        }
+        return {
+            "raw_result_fields": sorted(field_names)[:40],
+            "raw_result_field_types": compact_types,
+            "raw_link_paths": top_paths,
+        }
 
     @staticmethod
     def _rows_from_payload(payload: Any, depth: int = 0) -> list[dict[str, Any]] | None:
@@ -523,6 +606,7 @@ class BrightDataGoogleLensClient:
             })
             raise BrightDataAPIError(message)
 
+        self.last_lens_diagnostics.update(self._raw_result_diagnostics(rows))
         normalized = self._normalize_matches(rows)
         self.last_lens_diagnostics.update({
             "status": "ok" if normalized else "no_matches",
