@@ -266,6 +266,90 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertIn("director", selected["metadata_match"]["matched_fields"])
         self.assertIn("main_character", selected["metadata_match"]["matched_fields"])
 
+    def test_unlabelled_lens_snippet_names_match_tmdb_metadata(self):
+        engine = self.make_engine()
+        matching = movie_details(5001, "tt0005001", "The Thing")
+        matching["release_date"] = "2020-06-01"
+        matching["production_countries"] = [
+            {"iso_3166_1": "NL", "name": "Netherlands"}
+        ]
+        matching["origin_country"] = ["NL"]
+        matching["credits"] = {
+            "cast": [{
+                "id": 1, "name": "Tiara Richards", "character": "Kenza", "order": 0
+            }],
+            "crew": [{
+                "id": 2, "name": "Eché Janga", "job": "Director", "department": "Directing"
+            }],
+        }
+        competing = movie_details(5002, "tt0005002", "The Thing")
+        competing["release_date"] = "1997-01-01"
+        competing["production_countries"] = [
+            {"iso_3166_1": "US", "name": "United States"}
+        ]
+        competing["origin_country"] = ["US"]
+        competing["credits"] = {
+            "cast": [{
+                "id": 3, "name": "Another Actor", "character": "Other Role", "order": 0
+            }],
+            "crew": [{
+                "id": 4, "name": "Different Director", "job": "Director", "department": "Directing"
+            }],
+        }
+        engine.tmdb.records[5001] = matching
+        engine.tmdb.records[5002] = competing
+        engine.tmdb.search_overrides["The Thing"] = [
+            {"id": 5001, "title": "The Thing", "original_title": "The Thing"},
+            {"id": 5002, "title": "The Thing", "original_title": "The Thing"},
+        ]
+
+        candidate, match, evidence = engine._find_movie([{
+            "title": "The Thing (2020)",
+            "url": "https://example.com/lens-result",
+            "content": (
+                "The 2020 film from the Netherlands is directed by Eché Janga. "
+                "Kenza is played by Tiara Richards."
+            ),
+        }])
+
+        self.assertEqual(candidate["id"], 5001)
+        self.assertEqual(match["status"], "ready")
+        selected = next(
+            item for item in evidence["candidate_identities"] if item["tmdb_id"] == 5001
+        )
+        metadata = selected["metadata_match"]
+        self.assertTrue(metadata["evidence_qualified"])
+        self.assertIn("country", metadata["matched_fields"])
+        self.assertIn("director", metadata["matched_fields"])
+        self.assertIn("cast", metadata["matched_fields"])
+        self.assertIn("main_character", metadata["matched_fields"])
+        self.assertEqual(metadata["best_single_observation_match_count"], 4)
+
+    def test_rating_alone_cannot_disambiguate_tmdb_candidates(self):
+        engine = self.make_engine()
+        for tmdb_id, imdb_id, rating in (
+            (5001, "tt0005001", 6.5),
+            (5002, "tt0005002", 6.5),
+        ):
+            details = movie_details(tmdb_id, imdb_id, "The Thing")
+            details["vote_average"] = rating
+            details["vote_count"] = 100
+            engine.tmdb.records[tmdb_id] = details
+        engine.tmdb.search_overrides["The Thing"] = [
+            {"id": 5001, "title": "The Thing", "original_title": "The Thing"},
+            {"id": 5002, "title": "The Thing", "original_title": "The Thing"},
+        ]
+
+        candidate, match, _ = engine._find_movie([{
+            "title": "The Thing",
+            "url": "https://example.com/lens-result",
+            "content": "IMDb rating: 6.5/10",
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(match["candidate_ids"], [5001, 5002])
+
     def test_ambiguous_title_without_lens_metadata_clues_reports_candidate_profiles(self):
         engine = self.make_engine()
         engine.tmdb.records[5001] = movie_details(5001, "tt0005001", "The Thing")
