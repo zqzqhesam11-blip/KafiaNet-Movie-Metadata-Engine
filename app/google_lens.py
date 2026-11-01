@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlencode, urljoin, urlparse
@@ -12,6 +14,9 @@ BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 GOOGLE_LENS_URL = "https://lens.google.com/uploadbyurl"
 MAX_NORMALIZED_RESULTS = 80
 MAX_GOTO_RESOLUTION_WORKERS = 8
+MAX_TRANSIENT_RETRIES = 2
+TRANSIENT_HTTP_STATUSES = {500, 502, 503, 504}
+MAX_OFFICIAL_SEARCH_TITLES = 3
 
 
 class BrightDataAPIError(RuntimeError):
@@ -46,8 +51,8 @@ class BrightDataGoogleLensClient:
             timeout=max(15.0, float(timeout)),
         )
         # Google Lens /goto links are opaque tokens. Resolve them with an
-        # unauthenticated, no-follow client and read only the Location header.
-        # Never send the Bright Data API key to Google.
+        # unauthenticated client; never send the Bright Data API key to Google.
+        # First inspect Location, then use one bounded redirect-following fallback.
         self.redirect_client = httpx.Client(
             headers={
                 "User-Agent": "Mozilla/5.0 (compatible; KafiaNetMetadata/1.0)",
@@ -81,29 +86,55 @@ class BrightDataGoogleLensClient:
         try:
             response = self.redirect_client.get(value)
             location = str(response.headers.get("location") or "").strip()
-            if not location:
-                return "", f"Google /goto returned HTTP {response.status_code} without Location"
-            destination = urljoin(value, location)
-            parsed = urlparse(destination)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                return "", "Google /goto returned an invalid destination URL"
-            return destination, None
+            if location:
+                destination = urljoin(value, location)
+                parsed = urlparse(destination)
+                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                    return "", "Google /goto returned an invalid destination URL"
+                return destination, None
+
+            # A bounded fallback for Google edges that omit Location but still
+            # expose the final page when redirects are followed.
+            followed = self.redirect_client.get(value, follow_redirects=True)
+            final_url = str(getattr(followed, "url", "") or "").strip()
+            parsed = urlparse(final_url)
+            if (
+                parsed.scheme in {"http", "https"}
+                and parsed.netloc
+                and not self._is_google_goto_url(final_url)
+            ):
+                return final_url, None
+            return "", (
+                f"Google /goto returned HTTP {response.status_code} without a usable "
+                "Location or followed destination"
+            )
         except httpx.HTTPError as exc:
             return "", f"Google /goto resolution failed ({type(exc).__name__})"
 
     def resolve_result_urls(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Resolve every Google /goto result link without following the destination.
-
-        The destination URL is captured from Google's Location header. Other
-        results retain their original direct URL and require no extra request.
-        """
+        """Resolve all URL candidates while preserving directly available official links."""
         prepared = [dict(item) for item in (results or []) if isinstance(item, dict)]
-        work = [
-            (index, str(item.get("url") or "").strip())
-            for index, item in enumerate(prepared)
-            if str(item.get("url") or "").strip()
-            and not str(item.get("resolved_url") or "").strip()
-        ]
+        work: list[tuple[int, str]] = []
+        for index, item in enumerate(prepared):
+            candidates = item.get("url_candidates")
+            if not isinstance(candidates, list):
+                candidates = []
+            original_url = str(item.get("url") or "").strip()
+            if original_url and original_url not in candidates:
+                candidates = [original_url, *candidates]
+            candidates = list(dict.fromkeys(
+                str(value).strip()
+                for value in candidates
+                if isinstance(value, str) and str(value).strip()
+            ))
+            item["url_candidates"] = candidates
+            if str(item.get("resolved_url") or "").strip() and not item.get("resolved_urls"):
+                item["resolved_urls"] = [str(item["resolved_url"]).strip()]
+            if item.get("resolved_urls"):
+                continue
+            for candidate in candidates:
+                work.append((index, candidate))
+
         if not work:
             return prepared
 
@@ -113,12 +144,25 @@ class BrightDataGoogleLensClient:
                 work,
             ))
 
-        for (index, original), (destination, error) in zip(work, resolved):
-            prepared[index]["resolved_url"] = destination
+        destinations: dict[int, list[str]] = {}
+        errors: dict[int, list[str]] = {}
+        for (index, _original), (destination, error) in zip(work, resolved):
+            if destination:
+                destinations.setdefault(index, []).append(destination)
             if error:
-                prepared[index]["url_resolution_error"] = error
+                errors.setdefault(index, []).append(error)
+
+        for index, item in enumerate(prepared):
+            unique_destinations = list(dict.fromkeys(destinations.get(index, [])))
+            item["resolved_urls"] = unique_destinations
+            item["resolved_url"] = unique_destinations[0] if unique_destinations else ""
+            item_errors = errors.get(index, [])
+            if item_errors:
+                item["url_resolution_error"] = item_errors[0]
+                item["url_resolution_errors"] = item_errors[:10]
             else:
-                prepared[index].pop("url_resolution_error", None)
+                item.pop("url_resolution_error", None)
+                item.pop("url_resolution_errors", None)
         return prepared
 
     @staticmethod
@@ -186,7 +230,7 @@ class BrightDataGoogleLensClient:
 
         # Google Lens normally returns visual_matches. Bright Data's parsed image
         # response can also expose the equivalent ranked items under images.
-        for key in ("visual_matches", "exact_matches", "lens_results", "images", "similar_images"):
+        for key in ("visual_matches", "exact_matches", "lens_results", "images", "similar_images", "organic"):
             value = payload.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)] if all(
@@ -220,11 +264,38 @@ class BrightDataGoogleLensClient:
         return ""
 
     @classmethod
+    def _all_urls(cls, item: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+        """Collect all distinct page URLs exposed by a search result."""
+        values: list[str] = []
+        seen: set[str] = set()
+        for key in keys:
+            value = item.get(key)
+            candidates = value if isinstance(value, list) else [value]
+            for candidate_value in candidates:
+                if isinstance(candidate_value, dict):
+                    candidate_value = (
+                        candidate_value.get("url")
+                        or candidate_value.get("link")
+                        or candidate_value.get("src")
+                    )
+                if not isinstance(candidate_value, str):
+                    continue
+                candidate = candidate_value.strip()
+                parsed = urlparse(candidate)
+                if parsed.scheme in {"http", "https"} and parsed.netloc and candidate not in seen:
+                    seen.add(candidate)
+                    values.append(candidate[:1000])
+        return values
+
+    @classmethod
     def _normalize_matches(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         for item in rows[:MAX_NORMALIZED_RESULTS]:
             title = str(item.get("title") or item.get("name") or "").strip()[:300]
-            page_url = cls._first_url(item, ("link", "url", "page_url", "website", "source_url"))
+            page_urls = cls._all_urls(
+                item, ("link", "url", "page_url", "website", "source_url", "landing_page")
+            )
+            page_url = page_urls[0] if page_urls else ""
             # Bright Data's image schema uses original_image for the full-size
             # image and image for its preview; keep the full-size URL first.
             image_url = cls._first_url(
@@ -241,6 +312,7 @@ class BrightDataGoogleLensClient:
             normalized.append({
                 "title": title,
                 "url": page_url,
+                "url_candidates": page_urls or ([page_url] if page_url else []),
                 "source": image_url,
                 "content": description,
                 "provider": "google_lens_brightdata",
@@ -248,18 +320,182 @@ class BrightDataGoogleLensClient:
             })
         return normalized
 
+    @staticmethod
+    def _official_movie_url(value: str) -> bool:
+        try:
+            parsed = urlparse(str(value or "").strip())
+            host = (parsed.hostname or "").casefold().rstrip(".")
+        except ValueError:
+            return False
+        if host == "imdb.com" or host.endswith(".imdb.com"):
+            return bool(re.search(r"/title/tt\d{5,12}(?:/|$)", parsed.path, flags=re.I))
+        if host == "themoviedb.org" or host.endswith(".themoviedb.org"):
+            return bool(re.match(r"^/movie/\d+(?:[-/]|$)", parsed.path, flags=re.I))
+        return False
+
+    @staticmethod
+    def _lens_title_for_query(value: str) -> str:
+        title = str(value or "").strip()
+        title = re.sub(r"\s*(?:[-|–]\s*)?(?:IMDb|TMDB)\s*$", "", title, flags=re.I)
+        title = re.sub(
+            r"\s*[-|–]\s*(?:Netflix|Wikipedia|Rotten Tomatoes)\b.*$",
+            "",
+            title,
+            flags=re.I,
+        )
+        title = " ".join(title.split())
+        if not title or len(title) > 120 or len(title.split()) > 16:
+            return ""
+        if not any(character.isalpha() for character in title):
+            return ""
+        return title
+
+    @staticmethod
+    def _safe_json(response: httpx.Response) -> Any:
+        try:
+            return response.json()
+        except (ValueError, TypeError):
+            return None
+
+    def search_official_id_pages(self, lens_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Search Google for official IMDb/TMDB pages using Lens result title hints only.
+
+        Folder names and image filenames are never passed into this method.
+        Search snippets are diagnostics; only official IMDb/TMDB URLs are returned
+        to the existing identifier resolution and cross-provider verification.
+        """
+        titles: list[str] = []
+        seen: set[str] = set()
+        for item in lens_results or []:
+            if not isinstance(item, dict) or item.get("error"):
+                continue
+            title = self._lens_title_for_query(item.get("title") or "")
+            key = title.casefold()
+            if title and key not in seen:
+                seen.add(key)
+                titles.append(title)
+            if len(titles) >= MAX_OFFICIAL_SEARCH_TITLES:
+                break
+        if not titles:
+            return []
+
+        title_terms = " OR ".join(f'"{title}"' for title in titles)
+        query = (
+            f'({title_terms}) (IMDb OR TMDB) '
+            '(site:imdb.com/title OR site:themoviedb.org/movie)'
+        )
+        search_url = "https://www.google.com/search?" + urlencode({
+            "q": query,
+            "hl": "en",
+            "gl": "US",
+            "brd_json": "1",
+        })
+
+        response = None
+        for attempt in range(MAX_TRANSIENT_RETRIES + 1):
+            try:
+                response = self.client.post(
+                    BRIGHTDATA_REQUEST_URL,
+                    json={"zone": self.zone, "url": search_url, "format": "raw"},
+                )
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                if attempt >= MAX_TRANSIENT_RETRIES:
+                    raise BrightDataAPIError(
+                        f"Bright Data official IMDb/TMDB search failed after {attempt + 1} "
+                        f"attempt(s) ({type(exc).__name__}): {str(exc)[:200]}"
+                    ) from exc
+                time.sleep(min(2 ** attempt, 2))
+                continue
+
+            if response.status_code in TRANSIENT_HTTP_STATUSES and attempt < MAX_TRANSIENT_RETRIES:
+                time.sleep(min(2 ** attempt, 2))
+                continue
+            break
+
+        if response is None:
+            raise BrightDataAPIError("Bright Data official IMDb/TMDB search ended without a response")
+        if response.status_code < 200 or response.status_code >= 300:
+            detail = self._error_detail(self._safe_json(response), getattr(response, "text", "") or "")
+            message = self._http_error(response.status_code, detail)
+            if response.status_code in {402, 429}:
+                raise BrightDataQuotaError(response.status_code, message)
+            raise BrightDataAPIError(message)
+
+        payload = self._safe_json(response)
+        if payload is None:
+            raise BrightDataAPIError("Google official IMDb/TMDB search returned an empty or non-JSON response")
+        if isinstance(payload, dict) and "status_code" in payload and "body" in payload:
+            try:
+                inner_status = int(payload.get("status_code") or 0)
+            except (TypeError, ValueError):
+                inner_status = 0
+            if inner_status and not 200 <= inner_status < 300:
+                detail = self._error_detail(payload.get("body"), str(payload.get("body") or ""))
+                message = self._http_error(inner_status, detail)
+                if inner_status in {402, 429}:
+                    raise BrightDataQuotaError(inner_status, message)
+                raise BrightDataAPIError(message)
+            inner_body = payload.get("body")
+            if isinstance(inner_body, str):
+                try:
+                    payload = json.loads(inner_body)
+                except ValueError as exc:
+                    raise BrightDataAPIError("Google official IMDb/TMDB search returned an invalid JSON body") from exc
+            elif isinstance(inner_body, dict):
+                payload = inner_body
+
+        rows = self._rows_from_payload(payload)
+        if rows is None:
+            raise BrightDataAPIError(
+                "Google official IMDb/TMDB search returned no organic result list; "
+                + self._payload_shape(payload)
+            )
+
+        normalized: list[dict[str, Any]] = []
+        for item in rows[:MAX_NORMALIZED_RESULTS]:
+            page_url = self._first_url(item, ("link", "url", "page_url"))
+            if not page_url or not self._official_movie_url(page_url):
+                continue
+            normalized.append({
+                "title": str(item.get("title") or "")[:300],
+                "url": page_url,
+                "resolved_url": page_url,
+                "resolved_urls": [page_url],
+                "url_candidates": [page_url],
+                "source": "",
+                "content": str(item.get("description") or item.get("snippet") or "")[:500],
+                "provider": "google_official_id_search",
+                "search_query": query[:700],
+                "position": item.get("position") or item.get("rank"),
+            })
+        return normalized
+
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
         """Search a public poster URL; one SERP API request per poster, no automatic retry."""
         target_url = self._lens_request_url(image_url)
-        try:
-            response = self.client.post(
-                BRIGHTDATA_REQUEST_URL,
-                json={"zone": self.zone, "url": target_url, "format": "json"},
-            )
-        except httpx.HTTPError as exc:
-            raise BrightDataAPIError(
-                f"Bright Data network error ({type(exc).__name__}): {str(exc)[:250]}"
-            ) from exc
+        response = None
+        for attempt in range(MAX_TRANSIENT_RETRIES + 1):
+            try:
+                response = self.client.post(
+                    BRIGHTDATA_REQUEST_URL,
+                    json={"zone": self.zone, "url": target_url, "format": "raw"},
+                )
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                if attempt >= MAX_TRANSIENT_RETRIES:
+                    raise BrightDataAPIError(
+                        f"Bright Data network error after {attempt + 1} attempt(s) "
+                        f"({type(exc).__name__}): {str(exc)[:250]}"
+                    ) from exc
+                time.sleep(min(2 ** attempt, 2))
+                continue
+
+            if response.status_code in TRANSIENT_HTTP_STATUSES and attempt < MAX_TRANSIENT_RETRIES:
+                time.sleep(min(2 ** attempt, 2))
+                continue
+            break
+
+        if response is None:
+            raise BrightDataAPIError("Bright Data request ended without a response")
 
         body = response.text or ""
         try:
@@ -278,7 +514,7 @@ class BrightDataGoogleLensClient:
             raise BrightDataAPIError(
                 "Bright Data returned an empty or non-JSON response "
                 f"(HTTP {response.status_code}, content-type={content_type}, "
-                f"content-length={content_length}); request uses format=json. "
+                f"content-length={content_length}); request uses format=raw. "
                 "Verify the SERP API zone configuration and Bright Data request delivery."
             )
         if isinstance(payload, dict) and "status_code" in payload and "body" in payload:
