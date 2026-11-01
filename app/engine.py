@@ -765,13 +765,21 @@ class MetadataEngine:
         selected_candidate = self._details_cache[int(selected_id)]
         selected_imdb_id = selected_identity["imdb_id"]
         used_title_search = bool(selected_identity["lens_title_queries"])
-        identity_source = (
-            "google_lens_title_to_tmdb_search"
-            if used_title_search and not (
-                selected_identity["imdb_ids_from_lens"] or selected_identity["tmdb_ids_from_lens"]
-            )
-            else "google_lens_official_imdb_tmdb_urls"
+        has_official_lens_ids = bool(
+            selected_identity["imdb_ids_from_lens"] or selected_identity["tmdb_ids_from_lens"]
         )
+        if metadata_selected:
+            identity_source = (
+                "google_lens_metadata_fingerprint_official_ids"
+                if has_official_lens_ids
+                else "google_lens_metadata_fingerprint_tmdb_search"
+            )
+        else:
+            identity_source = (
+                "google_lens_title_to_tmdb_search"
+                if used_title_search and not has_official_lens_ids
+                else "google_lens_official_imdb_tmdb_urls"
+            )
         evidence["resolved_identity"] = {
             "tmdb_id": selected_identity["tmdb_id"],
             "imdb_id": selected_imdb_id,
@@ -779,7 +787,10 @@ class MetadataEngine:
             "imdb_ids_from_lens": selected_identity["imdb_ids_from_lens"],
             "tmdb_ids_from_lens": selected_identity["tmdb_ids_from_lens"],
             "lens_title_queries": selected_identity["lens_title_queries"],
+            "lens_result_titles": selected_identity["lens_result_titles"],
             "title_similarity": selected_identity["title_similarity"],
+            "metadata_profile": selected_identity["metadata_profile"],
+            "metadata_match": selected_identity["metadata_match"],
             "cross_provider_match": selected_identity["cross_provider_match"],
             "folder_name_used": False,
             "image_filename_used": False,
@@ -788,15 +799,17 @@ class MetadataEngine:
         return selected_candidate, {
             "status": "ready",
             "confidence": (
-                selected_identity["title_similarity"]
-                if used_title_search and not (
-                    selected_identity["imdb_ids_from_lens"] or selected_identity["tmdb_ids_from_lens"]
-                )
+                0.9
+                if metadata_selected
+                else selected_identity["title_similarity"]
+                if used_title_search and not has_official_lens_ids
                 else 1.0
             ),
             "identity_source": identity_source,
             "identity_method": (
-                "matching_tmdb_and_imdb_backlinks"
+                "lens_metadata_fingerprint_unique_candidate"
+                if metadata_selected
+                else "matching_tmdb_and_imdb_backlinks"
                 if selected_identity["cross_provider_match"]
                 else "lens_title_tmdb_search_unique"
                 if used_title_search
@@ -807,7 +820,9 @@ class MetadataEngine:
             "title_match_required": used_title_search,
             "folder_name_used_for_matching": False,
             "reason": (
-                "Google Lens image result title uniquely matched a TMDB movie; complete TMDB details and its IMDb external ID were verified"
+                "Lens title plus at least two independent Lens-observed metadata fields uniquely identified this TMDB candidate; full details and IMDb external ID were verified"
+                if metadata_selected
+                else "Google Lens image result title uniquely matched a TMDB movie; complete TMDB details and its IMDb external ID were verified"
                 if used_title_search
                 else "Official IMDb/TMDB movie URL resolved through TMDB and the IMDb identifier was verified"
             ),
