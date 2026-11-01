@@ -7,381 +7,18 @@ from typing import Any
 
 from app.config import Settings
 from app.github_api import GitHubAPI
-from app.image_evidence import extract_reverse_image_evidence
+from app.image_evidence import extract_tmdb_movie_ids
 from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
-from app.matching import normalize_title, title_similarity
-from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
+from app.tmdb import TMDBClient
 
 
 SCHEMA_VERSION = 3
-MAX_OFFICIAL_ID_LOOKUPS = 80
+MAX_LENS_TMDB_ID_CANDIDATES = 10
 
 
 def safe_segment(value: str) -> str:
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" .")
     return (value or "untitled")[:140]
-
-
-def _unique_text(values: list[Any]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        item = " ".join(str(value or "").split()).strip()
-        key = normalize_title(item)
-        if item and key and key not in seen:
-            seen.add(key)
-            result.append(item)
-    return result
-
-
-def _country_tokens(value: str) -> list[str]:
-    return [
-        part.strip(" .()")
-        for part in re.split(r"[,;/|&]|\band\b", str(value or ""), flags=re.IGNORECASE)
-        if part.strip(" .()")
-    ]
-
-
-def _phrase_in_lens_text(phrase: str, text: str) -> bool:
-    """True only when a normalized TMDB fact is actually written in Lens evidence."""
-    key = normalize_title(phrase)
-    haystack = normalize_title(text)
-    if not key or not haystack:
-        return False
-    return f" {key} " in f" {haystack} "
-
-
-def _person_match(hint: str, candidates: list[str]) -> bool:
-    hint_key = normalize_title(hint)
-    if not hint_key:
-        return False
-    for candidate in candidates:
-        candidate_key = normalize_title(candidate)
-        if not candidate_key:
-            continue
-        if hint_key == candidate_key:
-            return True
-        if min(len(hint_key), len(candidate_key)) >= 6 and title_similarity(hint, candidate) >= 0.92:
-            return True
-    return False
-
-
-def _candidate_metadata_profile(normalized: dict[str, Any]) -> dict[str, Any]:
-    country_values: list[str] = []
-    for item in normalized.get("production_countries") or []:
-        if isinstance(item, dict):
-            country_values.extend([
-                str(item.get("name") or ""),
-                str(item.get("iso_3166_1") or ""),
-            ])
-    for item in normalized.get("origin_country") or []:
-        if isinstance(item, str):
-            country_values.append(item)
-        elif isinstance(item, dict):
-            country_values.extend([str(item.get("name") or ""), str(item.get("iso_3166_1") or "")])
-
-    directors = [
-        str(person.get("name") or "")
-        for person in (normalized.get("directors") or [])
-        if isinstance(person, dict) and person.get("name")
-    ]
-    cast = [
-        {
-            "name": str(person.get("name") or ""),
-            "character": str(person.get("character") or ""),
-        }
-        for person in (normalized.get("cast") or [])[:12]
-        if isinstance(person, dict) and (person.get("name") or person.get("character"))
-    ]
-    return {
-        "year": normalized.get("year"),
-        "countries": _unique_text(country_values),
-        "directors": _unique_text(directors),
-        "cast": cast,
-        "rating": normalized.get("vote_average"),
-        "rating_votes": normalized.get("vote_count"),
-    }
-
-
-def _compare_lens_metadata(
-    normalized: dict[str, Any],
-    observations: list[dict[str, Any]],
-    associated_lens_titles: list[str],
-) -> dict[str, Any]:
-    """Compare explicit facts in Lens result text with a candidate's TMDB facts.
-
-    Unknown fields are neutral. A TMDB value is never treated as Lens evidence
-    by itself; a clue must first be present in a Lens result title/snippet.
-    """
-    allowed_titles = {
-        normalize_title(value) for value in associated_lens_titles if normalize_title(value)
-    }
-    relevant = [
-        item for item in observations
-        if isinstance(item, dict)
-        and (
-            normalize_title(item.get("lens_title") or "") in allowed_titles
-            or any(
-                _phrase_in_lens_text(query, str(item.get("lens_title") or ""))
-                for query in allowed_titles
-            )
-        )
-    ]
-    years = list(dict.fromkeys(
-        int(value)
-        for item in relevant for value in (item.get("years") or [])
-        if str(value).isdigit()
-    ))
-    countries = _unique_text([
-        value for item in relevant for value in (item.get("countries") or [])
-    ])
-    directors = _unique_text([
-        value for item in relevant for value in (item.get("directors") or [])
-    ])
-    cast_hints = _unique_text([
-        value for item in relevant for value in (item.get("cast") or [])
-    ])
-    character_hints = _unique_text([
-        value for item in relevant for value in (item.get("characters") or [])
-    ])
-
-    # Lens snippets are often prose, not structured "Director:"/"Cast:" fields.
-    # Accept a TMDB candidate fact as Lens evidence only when that exact name
-    # (or country name) occurs in the corresponding Lens result title/snippet.
-    lens_texts = [
-        " ".join((str(item.get("result_title") or ""), str(item.get("content") or "")))
-        for item in relevant
-    ]
-    ratings: list[dict[str, Any]] = []
-    for item in relevant:
-        for rating in item.get("ratings") or []:
-            if isinstance(rating, dict):
-                try:
-                    value = float(rating.get("value"))
-                except (TypeError, ValueError):
-                    continue
-                ratings.append({
-                    "source": str(rating.get("source") or "UNSPECIFIED").upper(),
-                    "value": value,
-                })
-
-    profile = _candidate_metadata_profile(normalized)
-    candidate_year = profile.get("year")
-    candidate_countries = profile["countries"]
-    candidate_directors = profile["directors"]
-    candidate_cast = [item["name"] for item in profile["cast"] if item.get("name")]
-    candidate_characters = [item["character"] for item in profile["cast"] if item.get("character")]
-
-    snippet_countries = [
-        value for value in candidate_countries
-        if len(normalize_title(value)) >= 4
-        and not re.fullmatch(r"[A-Z]{2}", value.strip(), flags=re.IGNORECASE)
-        and any(_phrase_in_lens_text(value, text) for text in lens_texts)
-    ]
-    snippet_directors = [
-        value for value in candidate_directors
-        if any(_phrase_in_lens_text(value, text) for text in lens_texts)
-    ]
-    snippet_cast = [
-        value for value in candidate_cast
-        if any(_phrase_in_lens_text(value, text) for text in lens_texts)
-    ]
-    snippet_characters = [
-        value for value in candidate_characters
-        if any(_phrase_in_lens_text(value, text) for text in lens_texts)
-    ]
-    countries = _unique_text([*countries, *snippet_countries])
-    directors = _unique_text([*directors, *snippet_directors])
-    cast_hints = _unique_text([*cast_hints, *snippet_cast])
-    character_hints = _unique_text([*character_hints, *snippet_characters])
-
-    matches: dict[str, Any] = {}
-    conflicts: dict[str, Any] = {}
-    matched_fields: list[str] = []
-
-    def record_field(name: str, clue_values: list[Any], candidate_values: list[Any], matched: bool) -> None:
-        if not clue_values:
-            return
-        details = {
-            "lens_values": clue_values[:12],
-            "tmdb_values": candidate_values[:12],
-            "matched": bool(matched),
-        }
-        if matched:
-            matches[name] = details
-            matched_fields.append(name)
-        elif candidate_values:
-            conflicts[name] = details
-
-    if years and candidate_year is not None:
-        record_field("year", years, [candidate_year], any(year == int(candidate_year) for year in years))
-
-    country_parts = _unique_text([
-        part for country in countries for part in _country_tokens(country)
-    ])
-    country_match = any(
-        normalize_title(part) == normalize_title(candidate)
-        for part in country_parts for candidate in candidate_countries
-    )
-    record_field("country", country_parts, candidate_countries, country_match)
-
-    director_match = any(
-        _person_match(hint, candidate_directors)
-        for hint in directors
-    )
-    record_field("director", directors, candidate_directors, director_match)
-
-    cast_match = any(
-        _person_match(hint, candidate_cast)
-        for hint in cast_hints
-    )
-    record_field("cast", cast_hints, candidate_cast, cast_match)
-
-    character_match = any(
-        _person_match(hint, candidate_characters)
-        for hint in character_hints
-    )
-    record_field("main_character", character_hints, candidate_characters, character_match)
-
-    rating = profile.get("rating")
-    rating_match = False
-    rating_details: dict[str, Any] | None = None
-    if ratings and rating is not None:
-        try:
-            candidate_rating = float(rating)
-        except (TypeError, ValueError):
-            candidate_rating = None
-        if candidate_rating is not None:
-            deltas = [
-                {
-                    **item,
-                    "delta": round(abs(float(item["value"]) - candidate_rating), 2),
-                }
-                for item in ratings
-            ]
-            best = min(deltas, key=lambda item: item["delta"])
-            tolerance = 1.25 if best["source"] == "IMDB" else 0.9
-            rating_match = best["delta"] <= tolerance
-            rating_details = {
-                "lens_values": ratings[:8],
-                "tmdb_value": candidate_rating,
-                "delta": best["delta"],
-                "matched": rating_match,
-                "note": "supporting signal only; ratings vary by provider and time",
-            }
-    if rating_details:
-        (matches if rating_match else conflicts)["rating"] = rating_details
-
-    # Count how those matching facts are distributed across the actual Lens
-    # result pages. This prevents combining unrelated snippets that happened to
-    # share a Lens title into one artificial "fingerprint".
-    observation_support: list[dict[str, Any]] = []
-    seen_observation_sources: set[str] = set()
-    best_single_observation_match_count = 0
-    for index, item in enumerate(relevant):
-        item_years = [
-            int(value) for value in (item.get("years") or []) if str(value).isdigit()
-        ]
-        item_countries = _unique_text([
-            part for value in (item.get("countries") or [])
-            for part in _country_tokens(str(value))
-        ])
-        item_directors = [str(value) for value in (item.get("directors") or [])]
-        item_cast = [str(value) for value in (item.get("cast") or [])]
-        item_characters = [str(value) for value in (item.get("characters") or [])]
-        item_text = " ".join((
-            str(item.get("result_title") or ""),
-            str(item.get("content") or ""),
-        ))
-        item_countries = _unique_text([
-            *item_countries,
-            *[
-                value for value in candidate_countries
-                if len(normalize_title(value)) >= 4
-                and not re.fullmatch(r"[A-Z]{2}", value.strip(), flags=re.IGNORECASE)
-                and _phrase_in_lens_text(value, item_text)
-            ],
-        ])
-        item_directors = _unique_text([
-            *item_directors,
-            *[value for value in candidate_directors if _phrase_in_lens_text(value, item_text)],
-        ])
-        item_cast = _unique_text([
-            *item_cast,
-            *[value for value in candidate_cast if _phrase_in_lens_text(value, item_text)],
-        ])
-        item_characters = _unique_text([
-            *item_characters,
-            *[value for value in candidate_characters if _phrase_in_lens_text(value, item_text)],
-        ])
-        item_fields: list[str] = []
-        if (
-            years and candidate_year is not None
-            and any(year == int(candidate_year) for year in item_years)
-        ):
-            item_fields.append("year")
-        if item_countries and any(
-            normalize_title(value) == normalize_title(candidate)
-            for value in item_countries for candidate in candidate_countries
-        ):
-            item_fields.append("country")
-        if any(_person_match(hint, candidate_directors) for hint in item_directors):
-            item_fields.append("director")
-        if any(_person_match(hint, candidate_cast) for hint in item_cast):
-            item_fields.append("cast")
-        if any(_person_match(hint, candidate_characters) for hint in item_characters):
-            item_fields.append("main_character")
-        if not item_fields:
-            continue
-        source_url = str(item.get("result_url") or "").strip()
-        source_key = source_url.casefold() or normalize_title(item.get("result_title") or "") or f"row-{index}"
-        if source_key in seen_observation_sources:
-            continue
-        seen_observation_sources.add(source_key)
-        best_single_observation_match_count = max(
-            best_single_observation_match_count, len(item_fields)
-        )
-        observation_support.append({
-            "result_title": str(item.get("result_title") or "")[:160],
-            "result_url": source_url[:350],
-            "matched_fields": item_fields,
-        })
-
-    # Rating is deliberately not a decisive identity field. At least two
-    # independent hard metadata dimensions must agree for disambiguation.
-    strong_matches = [name for name in matched_fields if name in {
-        "year", "country", "director", "cast", "main_character"
-    }]
-    score_weights = {
-        "year": 2.0, "country": 1.5, "director": 2.0,
-        "cast": 1.5, "main_character": 2.0, "rating": 0.25,
-    }
-    score = sum(score_weights.get(name, 0.0) for name in matches)
-    return {
-        "lens_titles_used": _unique_text(associated_lens_titles),
-        "lens_observations_used": len(relevant),
-        "observed_clues": {
-            "years": years,
-            "countries": countries,
-            "directors": directors,
-            "cast": cast_hints,
-            "main_characters": character_hints,
-            "ratings": ratings,
-        },
-        "matches": matches,
-        "conflicts": conflicts,
-        "matched_fields": matched_fields,
-        "strong_match_count": len(strong_matches),
-        "supporting_observation_count": len(observation_support),
-        "best_single_observation_match_count": best_single_observation_match_count,
-        "supporting_observations": observation_support[:8],
-        "evidence_qualified": bool(
-            len(strong_matches) >= 2
-            and (best_single_observation_match_count >= 2 or len(observation_support) >= 2)
-        ),
-        "score": round(score, 3),
-        "rating_is_decisive": False,
-    }
 
 
 class MetadataEngine:
@@ -435,552 +72,196 @@ class MetadataEngine:
         self,
         reverse_image_results: list[dict[str, Any]],
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
-        """Identify a movie from Lens image matches, then resolve it through TMDB.
+        """Resolve the poster only from a TMDB movie ID returned by Google Lens.
 
-        Official IMDb/TMDB links in Lens are the strongest evidence. If Lens
-        returns no official ID links, bounded Lens result titles may be searched
-        in TMDB. Explicit metadata in the associated Lens result title/snippet is
-        compared with TMDB year, country, director, cast, character and rating.
-        Folder names, folder years and poster filenames never identify a movie.
+        No Lens title, snippet, country, year, cast, IMDb link, image URL,
+        poster filename or source-folder name is used to identify the movie.
+        Lens must return an official themoviedb.org/movie/<numeric-id> URL.
+        TMDB then supplies the canonical movie data and artwork.
         """
-        evidence = extract_reverse_image_evidence(reverse_image_results)
         reverse_image_failed = any(
             isinstance(item, dict) and item.get("error")
-            for item in reverse_image_results
+            for item in (reverse_image_results or [])
         )
-        candidates: dict[str, dict[str, Any]] = {}
-        source_ids: dict[str, dict[str, set[str]]] = {}
-        title_search_scores: dict[str, float] = {}
-        resolution_errors: list[dict[str, str]] = []
-        unresolved_imdb_ids: list[str] = []
-        unresolved_tmdb_ids: list[int] = []
-
-        def add_candidate(candidate: dict[str, Any], provider: str, source_id: str) -> None:
-            candidate_id = candidate.get("id")
-            try:
-                key = str(int(candidate_id))
-            except (TypeError, ValueError):
-                return
-            candidates.setdefault(key, candidate)
-            links = source_ids.setdefault(
-                key,
-                {
-                    "imdb_ids": set(),
-                    "tmdb_ids": set(),
-                    "lens_title_queries": set(),
-                    "lens_result_titles": set(),
-                },
-            )
-            if provider == "imdb":
-                links["imdb_ids"].add(str(source_id))
-            elif provider == "tmdb":
-                links["tmdb_ids"].add(str(source_id))
-            elif provider == "lens_title":
-                links["lens_title_queries"].add(str(source_id))
-
-        # Resolve official IMDb URLs before considering title-based fallback.
-        for imdb_id in list(dict.fromkeys(evidence.get("imdb_ids") or []))[:MAX_OFFICIAL_ID_LOOKUPS]:
-            try:
-                found = self.tmdb.find_by_imdb_id(imdb_id)
-                if not found:
-                    unresolved_imdb_ids.append(imdb_id)
-                for candidate in found:
-                    add_candidate(candidate, "imdb", imdb_id)
-            except Exception as exc:
-                resolution_errors.append({
-                    "provider": "imdb", "id": imdb_id,
-                    "error": type(exc).__name__, "message": str(exc)[:250],
-                })
-
-        # Resolve official TMDB movie URLs to their complete canonical records.
-        for tmdb_id in list(dict.fromkeys(evidence.get("tmdb_ids") or []))[:MAX_OFFICIAL_ID_LOOKUPS]:
-            try:
-                details = self.tmdb.movie_details(int(tmdb_id))
-                self._details_cache[int(tmdb_id)] = details
-                add_candidate(details, "tmdb", str(int(tmdb_id)))
-            except Exception as exc:
-                unresolved_tmdb_ids.append(int(tmdb_id))
-                resolution_errors.append({
-                    "provider": "tmdb", "id": str(tmdb_id),
-                    "error": type(exc).__name__, "message": str(exc)[:250],
-                })
-
-        # Preserve which Lens result title carried each official ID backlink.
-        # This lets the same metadata fingerprint validate ID-based candidates too.
-        for candidate_id, links in source_ids.items():
-            for backlink in evidence.get("backlinks") or []:
-                backlink_tmdb_ids = {
-                    str(value) for value in (backlink.get("tmdb_ids") or [])
-                }
-                backlink_imdb_ids = {
-                    str(value).lower() for value in (backlink.get("imdb_ids") or [])
-                }
-                if (
-                    str(candidate_id) in backlink_tmdb_ids
-                    or bool(backlink_imdb_ids & {str(value).lower() for value in links["imdb_ids"]})
-                ):
-                    result_title = str(backlink.get("lens_title") or "").strip()
-                    if result_title:
-                        links["lens_result_titles"].add(result_title)
-
-        # If Lens did not expose an official ID URL, search TMDB using only the
-        # Lens result titles. This is not a second Google search. Lens descriptions
-        # and snippets may supply comparison clues, but are never TMDB query strings.
-        # The catalog folder name, poster filename and image URL are never used.
-        initial_title_search_status = (
-            "skipped_official_ids_present"
-            if evidence.get("imdb_ids") or evidence.get("tmdb_ids")
-            else "skipped_lens_error"
-            if reverse_image_failed
-            else "skipped_no_usable_lens_titles"
-        )
-        tmdb_title_search: dict[str, Any] = {
-            "status": initial_title_search_status,
-            "queries": [],
-            "result_count": 0,
-            "qualified_candidate_ids": [],
-            "match_threshold": float(getattr(self.settings, "match_accept_score", 0.94)),
+        lens_tmdb_ids = extract_tmdb_movie_ids(reverse_image_results)
+        tmdb_id_lookup = {
+            "status": "no_tmdb_id" if not lens_tmdb_ids else "resolving",
+            "tmdb_ids": list(lens_tmdb_ids),
+            "details_resolved": 0,
             "errors": [],
             "folder_name_used": False,
             "image_filename_used": False,
         }
-        if not evidence.get("imdb_ids") and not evidence.get("tmdb_ids") and not reverse_image_failed:
-            lens_queries = list(dict.fromkeys(evidence.get("lens_title_queries") or []))[:5]
-            tmdb_title_search["status"] = "skipped_no_usable_lens_titles"
-            if lens_queries:
-                threshold = float(getattr(self.settings, "match_accept_score", 0.94))
-                tmdb_title_search["status"] = "searching"
-                query_reports: list[dict[str, Any]] = []
-                for lens_title in lens_queries:
-                    try:
-                        search_results = self.tmdb.search_movies(lens_title)
-                    except Exception as exc:
-                        error = {
-                            "query": lens_title[:160],
-                            "type": type(exc).__name__,
-                            "message": str(exc)[:250],
-                        }
-                        tmdb_title_search["errors"].append(error)
-                        query_reports.append({
-                            "query": lens_title[:160], "result_count": 0,
-                            "qualified_candidate_ids": [], "error": error["type"],
-                        })
-                        continue
-
-                    qualified_ids: list[int] = []
-                    tmdb_title_search["result_count"] += len(search_results or [])
-                    for search_candidate in (search_results or [])[:40]:
-                        names = (
-                            str(search_candidate.get("title") or ""),
-                            str(search_candidate.get("original_title") or ""),
-                        )
-                        similarity = max(
-                            (title_similarity(lens_title, name) for name in names),
-                            default=0.0,
-                        )
-                        if similarity < threshold:
-                            continue
-                        try:
-                            candidate_id = int(search_candidate.get("id"))
-                        except (TypeError, ValueError):
-                            continue
-                        add_candidate(search_candidate, "lens_title", lens_title)
-                        title_search_scores[str(candidate_id)] = max(
-                            title_search_scores.get(str(candidate_id), 0.0),
-                            similarity,
-                        )
-                        if candidate_id not in qualified_ids:
-                            qualified_ids.append(candidate_id)
-                    query_reports.append({
-                        "query": lens_title[:160],
-                        "result_count": len(search_results or []),
-                        "qualified_candidate_ids": qualified_ids,
-                        "error": None,
-                    })
-
-                tmdb_title_search["queries"] = query_reports
-                tmdb_title_search["qualified_candidate_ids"] = sorted(
-                    int(value) for value in title_search_scores
-                )
-                if tmdb_title_search["qualified_candidate_ids"]:
-                    tmdb_title_search["status"] = "matched"
-                elif tmdb_title_search["errors"]:
-                    tmdb_title_search["status"] = "error"
-                else:
-                    tmdb_title_search["status"] = "no_confident_match"
-
-        evidence["tmdb_title_search"] = tmdb_title_search
-        evidence["resolved_sources"] = {
-            candidate_id: {
-                "imdb_ids": sorted(links["imdb_ids"]),
-                "tmdb_ids": sorted(links["tmdb_ids"], key=int),
-                "lens_title_queries": sorted(links["lens_title_queries"], key=str.casefold),
-                "lens_result_titles": sorted(links["lens_result_titles"], key=str.casefold),
-            }
-            for candidate_id, links in source_ids.items()
-        }
-        evidence["id_resolution"] = {
-            "strategy": (
-                "official_imdb_tmdb_urls"
-                if evidence.get("imdb_ids") or evidence.get("tmdb_ids")
-                else "lens_title_to_tmdb_search"
-            ),
-            "folder_name_used": False,
-            "image_filename_used": False,
-            "lens_title_hints_used_for_tmdb_search": bool(tmdb_title_search["queries"]),
-            "imdb_ids_seen": list(dict.fromkeys(evidence.get("imdb_ids") or [])),
-            "tmdb_ids_seen": list(dict.fromkeys(evidence.get("tmdb_ids") or [])),
-            "unresolved_imdb_ids": unresolved_imdb_ids,
-            "unresolved_tmdb_ids": unresolved_tmdb_ids,
-            "errors": resolution_errors,
+        evidence: dict[str, Any] = {
+            "strategy": "google_lens_tmdb_movie_id_only",
+            "tmdb_ids": list(lens_tmdb_ids),
+            "tmdb_id_lookup": tmdb_id_lookup,
+            "id_resolution": {
+                "strategy": "official_tmdb_movie_url_only",
+                "tmdb_ids_seen": list(lens_tmdb_ids),
+                "unresolved_tmdb_ids": [],
+                "folder_name_used": False,
+                "image_filename_used": False,
+                "errors": [],
+            },
+            "candidate_identities": [],
         }
 
         if reverse_image_failed:
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "Google Lens image search failed; TMDB search was not attempted without Lens evidence",
-            }, evidence
-
-        if not evidence.get("imdb_ids") and not evidence.get("tmdb_ids") and not candidates:
-            reason = (
-                "Lens returned no usable movie title for TMDB lookup"
-                if not evidence.get("lens_title_queries")
-                else "No Lens title produced a sufficiently close TMDB movie-title match"
-            )
-            if tmdb_title_search["errors"]:
-                reason += "; TMDB title search returned provider errors"
-            return None, {
-                "status": "review",
-                "confidence": 0.0,
-                "reason": reason + "; folder names and image filenames were not used",
+                "reason": "Google Lens image lookup failed; no TMDB identity was guessed",
                 "candidate_ids": [],
             }, evidence
 
-        if resolution_errors:
+        if not lens_tmdb_ids:
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "At least one official IMDb/TMDB identifier could not be verified; refusing an incomplete identity decision",
-                "candidate_ids": sorted(candidates, key=int),
-                "resolution_errors": resolution_errors,
-            }, evidence
-
-        if not candidates:
-            return None, {
-                "status": "review",
-                "confidence": 0.0,
-                "reason": "Official IMDb/TMDB links were found, but none resolved to a TMDB movie record",
+                "reason": (
+                    "Google Lens did not return an official TMDB movie URL containing "
+                    "a numeric movie ID; title and country searches are disabled"
+                ),
                 "candidate_ids": [],
             }, evidence
 
-        identities: dict[str, dict[str, Any]] = {}
-        identity_mismatches: list[dict[str, Any]] = []
+        if len(lens_tmdb_ids) > MAX_LENS_TMDB_ID_CANDIDATES:
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": (
+                    f"Google Lens returned {len(lens_tmdb_ids)} different TMDB movie IDs; "
+                    f"the safe lookup limit is {MAX_LENS_TMDB_ID_CANDIDATES}"
+                ),
+                "candidate_ids": lens_tmdb_ids,
+            }, evidence
+
+        resolved: dict[int, dict[str, Any]] = {}
         details_errors: list[dict[str, str]] = []
-        for candidate_id in sorted(candidates, key=int):
-            details = self._details_cache.get(int(candidate_id))
-            if details is None:
-                try:
-                    details = self.tmdb.movie_details(int(candidate_id))
-                    self._details_cache[int(candidate_id)] = details
-                except Exception as exc:
-                    details_errors.append({
-                        "tmdb_id": candidate_id,
-                        "error": type(exc).__name__,
-                        "message": str(exc)[:250],
-                    })
-                    continue
-
-            normalized = TMDBClient.normalize_details(details)
-            external_ids = normalized.get("external_ids") or {}
-            tmdb_imdb_id = str(external_ids.get("imdb_id") or "").strip().lower() or None
-            linked_imdb_ids = sorted(source_ids.get(candidate_id, {}).get("imdb_ids", set()))
-            linked_tmdb_ids = sorted(
-                source_ids.get(candidate_id, {}).get("tmdb_ids", set()), key=int
-            )
-            linked_lens_titles = sorted(
-                source_ids.get(candidate_id, {}).get("lens_title_queries", set()),
-                key=str.casefold,
-            )
-            linked_lens_result_titles = sorted(
-                source_ids.get(candidate_id, {}).get("lens_result_titles", set()),
-                key=str.casefold,
-            )
-            associated_lens_titles = _unique_text(
-                [*linked_lens_titles, *linked_lens_result_titles]
-            )
-            alternative_names = [
-                str(item.get("title") or "")
-                for item in (normalized.get("alternative_titles") or [])
-                if isinstance(item, dict) and item.get("title")
-            ]
-            candidate_names = [
-                str(normalized.get("title") or ""),
-                str(normalized.get("original_title") or ""),
-                *alternative_names,
-            ]
-            details_title_similarity = max(
-                (
-                    title_similarity(lens_title, candidate_name)
-                    for lens_title in linked_lens_titles
-                    for candidate_name in candidate_names
-                ),
-                default=0.0,
-            )
-            title_similarity_score = max(
-                title_search_scores.get(candidate_id, 0.0),
-                details_title_similarity,
-            )
-            metadata_profile = _candidate_metadata_profile(normalized)
-            metadata_match = _compare_lens_metadata(
-                normalized,
-                evidence.get("metadata_observations") or [],
-                associated_lens_titles,
-            )
-
-            if tmdb_imdb_id and linked_imdb_ids and (
-                tmdb_imdb_id not in linked_imdb_ids or len(linked_imdb_ids) != 1
-            ):
-                identity_mismatches.append({
-                    "tmdb_id": int(candidate_id),
-                    "tmdb_imdb_id": tmdb_imdb_id,
-                    "linked_imdb_ids": linked_imdb_ids,
-                    "reason": "TMDB external_ids.imdb_id does not uniquely match the IMDb backlink IDs",
+        for tmdb_id in lens_tmdb_ids:
+            try:
+                details = self._details_cache.get(int(tmdb_id))
+                if details is None:
+                    details = self.tmdb.movie_details(int(tmdb_id))
+                    self._details_cache[int(tmdb_id)] = details
+                if int(details.get("id") or 0) != int(tmdb_id):
+                    raise ValueError("TMDB returned a movie record with a different ID")
+                resolved[int(tmdb_id)] = details
+            except Exception as exc:
+                details_errors.append({
+                    "tmdb_id": str(tmdb_id),
+                    "error": type(exc).__name__,
+                    "message": str(exc)[:250],
                 })
-                continue
 
-            resolved_imdb_id = tmdb_imdb_id or (
-                linked_imdb_ids[0] if len(linked_imdb_ids) == 1 else None
-            )
-            identities[candidate_id] = {
-                "tmdb_id": int(candidate_id),
-                "imdb_id": resolved_imdb_id,
-                "title": normalized.get("title") or candidates[candidate_id].get("title"),
-                "original_title": normalized.get("original_title") or candidates[candidate_id].get("original_title"),
-                "year": normalized.get("year"),
-                "imdb_ids_from_lens": linked_imdb_ids,
-                "tmdb_ids_from_lens": linked_tmdb_ids,
-                "lens_title_queries": linked_lens_titles,
-                "lens_result_titles": linked_lens_result_titles,
-                "lens_title_support_count": len(linked_lens_titles),
-                "title_similarity": round(title_similarity_score, 4),
-                "metadata_profile": metadata_profile,
-                "metadata_match": metadata_match,
-                "cross_provider_match": bool(
-                    int(candidate_id) in [int(value) for value in linked_tmdb_ids]
-                    and resolved_imdb_id and resolved_imdb_id in linked_imdb_ids
-                ),
-            }
-
-        evidence["candidate_identities"] = list(identities.values())
-        if details_errors or identity_mismatches:
-            return None, {
-                "status": "review",
-                "confidence": 0.0,
-                "reason": "TMDB details could not fully validate all official IMDb/TMDB backlinks or title-search candidates",
-                "candidate_ids": sorted(candidates, key=int),
-                "details_errors": details_errors,
-                "identity_mismatches": identity_mismatches,
-            }, evidence
-
-        if not identities:
-            return None, {
-                "status": "review",
-                "confidence": 0.0,
-                "reason": "No candidate passed TMDB metadata and IMDb-ID validation",
-                "candidate_ids": sorted(candidates, key=int),
-            }, evidence
-
-        cross_provider = [
-            candidate_id for candidate_id, identity in identities.items()
-            if identity["cross_provider_match"]
+        evidence["id_resolution"]["errors"] = details_errors
+        evidence["id_resolution"]["unresolved_tmdb_ids"] = [
+            int(row["tmdb_id"]) for row in details_errors
         ]
-        metadata_selected = False
-        if len(identities) == 1:
-            selected_id = next(iter(identities))
-            sole_identity = identities[selected_id]
-            if not sole_identity.get("imdb_id"):
-                return None, {
-                    "status": "review", "confidence": 0.0,
-                    "reason": "The TMDB result has no verified IMDb external ID; both IDs are required for READY",
-                    "candidate_ids": [int(selected_id)],
-                }, evidence
-            if unresolved_imdb_ids and not sole_identity["cross_provider_match"]:
-                return None, {
-                    "status": "review", "confidence": 0.0,
-                    "reason": "Some official IMDb links remain unresolved and the candidate lacks matching IMDb+TMDB backlink corroboration",
-                    "candidate_ids": [int(selected_id)],
-                }, evidence
-            if not (evidence.get("imdb_ids") or evidence.get("tmdb_ids")):
-                score = sole_identity["title_similarity"]
-                if score < float(getattr(self.settings, "match_accept_score", 0.94)):
-                    return None, {
-                        "status": "review", "confidence": score,
-                        "reason": "The TMDB result did not meet the configured Lens-title similarity threshold",
-                        "candidate_ids": [int(selected_id)],
-                    }, evidence
-            metadata = sole_identity.get("metadata_match") or {}
-            has_official_lens_identity = bool(
-                sole_identity.get("imdb_ids_from_lens")
-                or sole_identity.get("tmdb_ids_from_lens")
-            )
-            if (
-                not has_official_lens_identity
-                and not metadata.get("evidence_qualified")
-            ):
-                return None, {
-                    "status": "review",
-                    "confidence": float(sole_identity.get("title_similarity") or 0.0),
-                    "reason": (
-                        "A Lens title found one TMDB candidate, but Lens did not provide "
-                        "at least two independent matching metadata facts to verify its identity"
-                    ),
-                    "candidate_ids": [int(selected_id)],
-                    "candidate_comparisons": [{
-                        "tmdb_id": int(selected_id),
-                        "title": sole_identity.get("title"),
-                        "imdb_id": sole_identity.get("imdb_id"),
-                        "title_similarity": sole_identity.get("title_similarity"),
-                        "metadata_profile": sole_identity.get("metadata_profile"),
-                        "metadata_match": metadata,
-                    }],
-                }, evidence
-            if len(metadata.get("conflicts") or {}) >= 2 and not metadata.get("strong_match_count"):
-                return None, {
-                    "status": "review", "confidence": 0.0,
-                    "reason": "The only title candidate conflicts with multiple explicit metadata clues from its Lens result",
-                    "candidate_ids": [int(selected_id)],
-                    "metadata_conflicts": metadata.get("conflicts") or {},
-                }, evidence
-        elif len(cross_provider) == 1:
-            selected_id = cross_provider[0]
-        else:
-            ranked = sorted(
-                identities.items(),
-                key=lambda pair: (
-                    int((pair[1].get("metadata_match") or {}).get("strong_match_count") or 0),
-                    float((pair[1].get("metadata_match") or {}).get("score") or 0.0),
-                    int(pair[1].get("lens_title_support_count") or 0),
-                    float(pair[1].get("title_similarity") or 0.0),
-                ),
-                reverse=True,
-            )
-            best_id, best_identity = ranked[0]
-            best_metadata = best_identity.get("metadata_match") or {}
-            second_metadata = ranked[1][1].get("metadata_match") or {}
-            best_strong_count = int(best_metadata.get("strong_match_count") or 0)
-            best_score = float(best_metadata.get("score") or 0.0)
-            second_score = float(second_metadata.get("score") or 0.0)
-
-            # A title-only tie is not resolved by TMDB's metadata profile.
-            # Require at least two independent Lens-observed dimensions, and
-            # a clear score margin over every competing candidate.
-            if (
-                best_strong_count >= 2
-                and bool(best_metadata.get("evidence_qualified"))
-                and (
-                    int(second_metadata.get("strong_match_count") or 0) < 2
-                    or best_score - second_score >= 1.5
-                )
-            ):
-                selected_id = best_id
-                metadata_selected = True
-            else:
-                return None, {
-                    "status": "review",
-                    "confidence": 0.0,
-                    "reason": (
-                        "Multiple TMDB candidates remain; Lens evidence did not provide "
-                        "two or more matching metadata dimensions with a unique winner"
-                    ),
-                    "candidate_ids": sorted(int(value) for value in identities),
-                    "cross_provider_candidate_ids": sorted(int(value) for value in cross_provider),
-                    "candidate_comparisons": [
-                        {
-                            "tmdb_id": int(candidate_id),
-                            "title": identity.get("title"),
-                            "imdb_id": identity.get("imdb_id"),
-                            "title_similarity": identity.get("title_similarity"),
-                            "lens_title_support_count": identity.get("lens_title_support_count"),
-                            "metadata_profile": identity.get("metadata_profile"),
-                            "metadata_match": identity.get("metadata_match"),
-                        }
-                        for candidate_id, identity in ranked
-                    ],
-                }, evidence
-
-        if not identities[selected_id].get("imdb_id"):
+        evidence["tmdb_id_lookup"]["details_resolved"] = len(resolved)
+        evidence["tmdb_id_lookup"]["errors"] = details_errors
+        evidence["tmdb_id_lookup"]["status"] = "error" if details_errors else "resolved"
+        if details_errors:
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "The selected TMDB candidate has no verified IMDb external ID",
-                "candidate_ids": [int(selected_id)],
+                "reason": "One or more TMDB movie IDs returned by Lens could not be verified through TMDB",
+                "candidate_ids": sorted(resolved),
+                "details_errors": details_errors,
             }, evidence
 
-        selected_identity = identities[selected_id]
-        selected_candidate = self._details_cache[int(selected_id)]
-        selected_imdb_id = selected_identity["imdb_id"]
-        used_title_search = bool(selected_identity["lens_title_queries"])
-        has_official_lens_ids = bool(
-            selected_identity["imdb_ids_from_lens"] or selected_identity["tmdb_ids_from_lens"]
-        )
-        if metadata_selected:
-            identity_source = (
-                "google_lens_metadata_fingerprint_official_ids"
-                if has_official_lens_ids
-                else "google_lens_metadata_fingerprint_tmdb_search"
-            )
-        else:
-            identity_source = (
-                "google_lens_title_to_tmdb_search"
-                if used_title_search and not has_official_lens_ids
-                else "google_lens_official_imdb_tmdb_urls"
-            )
+        identities: list[dict[str, Any]] = []
+        for tmdb_id, details in sorted(resolved.items()):
+            normalized = TMDBClient.normalize_details(details)
+            imdb_id = str(
+                (normalized.get("external_ids") or {}).get("imdb_id") or ""
+            ).strip().lower() or None
+            countries = [
+                str(item.get("name") or item.get("iso_3166_1") or "")
+                for item in (normalized.get("production_countries") or [])
+                if isinstance(item, dict) and (item.get("name") or item.get("iso_3166_1"))
+            ]
+            directors = [
+                str(item.get("name") or "")
+                for item in (normalized.get("directors") or [])
+                if isinstance(item, dict) and item.get("name")
+            ]
+            cast = [
+                {
+                    "name": str(item.get("name") or ""),
+                    "character": str(item.get("character") or ""),
+                }
+                for item in (normalized.get("cast") or [])[:8]
+                if isinstance(item, dict)
+            ]
+            tmdb_summary = {
+                "year": normalized.get("year"),
+                "countries": countries,
+                "directors": directors,
+                "cast": cast,
+                "rating": normalized.get("vote_average"),
+                "rating_votes": normalized.get("vote_count"),
+                "poster_count": len(normalized.get("posters") or []),
+            }
+            identity = {
+                "tmdb_id": tmdb_id,
+                "imdb_id": imdb_id,
+                "title": normalized.get("title"),
+                "original_title": normalized.get("original_title"),
+                "year": normalized.get("year"),
+                "tmdb_data": tmdb_summary,
+            }
+            identities.append(identity)
+
+        evidence["candidate_identities"] = identities
+
+        # Multiple distinct official TMDB IDs are conflicting image results.
+        # Fetch and show their TMDB profiles, but never choose one using text.
+        if len(identities) != 1:
+            evidence["tmdb_id_lookup"]["status"] = "ambiguous_multiple_tmdb_ids"
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": (
+                    "Google Lens returned multiple different official TMDB movie IDs; "
+                    "the image identity is ambiguous"
+                ),
+                "candidate_ids": sorted(resolved),
+                "candidate_comparisons": [
+                    {
+                        "tmdb_id": row["tmdb_id"],
+                        "title": row["title"],
+                        "imdb_id": row["imdb_id"],
+                        "tmdb_data": row["tmdb_data"],
+                    }
+                    for row in identities
+                ],
+            }, evidence
+
+        selected = identities[0]
+        selected_id = int(selected["tmdb_id"])
+        selected_candidate = resolved[selected_id]
+        identity_source = "google_lens_official_tmdb_movie_id"
         evidence["resolved_identity"] = {
-            "tmdb_id": selected_identity["tmdb_id"],
-            "imdb_id": selected_imdb_id,
+            "tmdb_id": selected_id,
+            "imdb_id": selected["imdb_id"],
             "source": identity_source,
-            "imdb_ids_from_lens": selected_identity["imdb_ids_from_lens"],
-            "tmdb_ids_from_lens": selected_identity["tmdb_ids_from_lens"],
-            "lens_title_queries": selected_identity["lens_title_queries"],
-            "lens_result_titles": selected_identity["lens_result_titles"],
-            "title_similarity": selected_identity["title_similarity"],
-            "metadata_profile": selected_identity["metadata_profile"],
-            "metadata_match": selected_identity["metadata_match"],
-            "cross_provider_match": selected_identity["cross_provider_match"],
+            "verification": "tmdb_movie_details_id_equals_lens_movie_id",
             "folder_name_used": False,
             "image_filename_used": False,
         }
-
         return selected_candidate, {
             "status": "ready",
-            "confidence": (
-                0.9
-                if metadata_selected
-                else selected_identity["title_similarity"]
-                if used_title_search and not has_official_lens_ids
-                else 1.0
-            ),
+            "confidence": 1.0,
             "identity_source": identity_source,
-            "identity_method": (
-                "lens_metadata_fingerprint_unique_candidate"
-                if metadata_selected
-                else "matching_tmdb_and_imdb_backlinks"
-                if selected_identity["cross_provider_match"]
-                else "lens_title_tmdb_search_unique"
-                if used_title_search
-                else "single_unambiguous_official_movie_id"
-            ),
-            "tmdb_id": selected_identity["tmdb_id"],
-            "imdb_id": selected_imdb_id,
-            "title_match_required": used_title_search,
+            "identity_method": "lens_tmdb_movie_id_lookup",
+            "tmdb_id": selected_id,
+            "imdb_id": selected["imdb_id"],
             "folder_name_used_for_matching": False,
             "reason": (
-                "Lens title plus at least two independent Lens-observed metadata fields uniquely identified this TMDB candidate; full details and IMDb external ID were verified"
-                if metadata_selected
-                else "Google Lens image result title uniquely matched a TMDB movie; complete TMDB details and its IMDb external ID were verified"
-                if used_title_search
-                else "Official IMDb/TMDB movie URL resolved through TMDB and the IMDb identifier was verified"
+                "Google Lens returned one official TMDB movie ID; TMDB confirmed "
+                "the same ID and supplied the movie record"
             ),
         }, evidence
 
@@ -1081,7 +362,16 @@ class MetadataEngine:
                 details = self.tmdb.movie_details(tmdb_id)
                 self._details_cache[tmdb_id] = details
             normalized = self.tmdb.normalize_details(details)
-            title_selection = self.tmdb.select_worldwide_title(normalized)
+            # Use the title returned by the verified TMDB movie record as-is.
+            # Do not infer or select a title from Lens text, countries or market counts.
+            canonical_title = (
+                str(normalized.get("title") or normalized.get("original_title") or "").strip()
+                or f"TMDB Movie {tmdb_id}"
+            )
+            title_selection = {
+                "title": canonical_title,
+                "source": "tmdb_movie_details",
+            }
 
             external_ids = normalized.setdefault("external_ids", {})
             imdb_id = (
@@ -1093,11 +383,6 @@ class MetadataEngine:
             if imdb_id:
                 external_ids["imdb_id"] = imdb_id
 
-            canonical_title = (
-                title_selection.get("title")
-                or normalized.get("title")
-                or f"TMDB Movie {tmdb_id}"
-            )
             canonical_year = normalized.get("year")
             canonical_folder_name = (
                 f"{canonical_title} ({canonical_year})" if canonical_year else canonical_title
@@ -1115,7 +400,6 @@ class MetadataEngine:
                 "verification": match.get("identity_method"),
                 "folder_name_used": False,
             }
-            record["title_policy_version"] = WORLDWIDE_TITLE_POLICY_VERSION
             record["correction"] = {
                 # Legacy key retained for catalog-reader compatibility; this
                 # is a JSON basename, never a physical folder rename.
@@ -1261,8 +545,9 @@ class MetadataEngine:
             candidate_text = ",".join(str(value) for value in candidate_ids[:4]) or "none"
             identity_evidence = reverse_image_info.get("evidence") or {}
             unresolved_ids = identity_evidence.get("id_resolution") or {}
-            unresolved_imdb = ",".join(str(value) for value in (unresolved_ids.get("unresolved_imdb_ids") or [])[:3]) or "none"
-            unresolved_tmdb = ",".join(str(value) for value in (unresolved_ids.get("unresolved_tmdb_ids") or [])[:3]) or "none"
+            unresolved_tmdb = ",".join(
+                str(value) for value in (unresolved_ids.get("unresolved_tmdb_ids") or [])[:10]
+            ) or "none"
             lens_diag = (reverse_image_info.get("latest_query") or {}).get("diagnostics") or {}
             lens_error_items = (reverse_image_info.get("latest_query") or {}).get("errors") or []
 
@@ -1279,6 +564,7 @@ class MetadataEngine:
                 lens_error = safe_log_detail(
                     f"{first_error.get('type', 'ProviderError')}: {first_error.get('message') or first_error.get('error')}"
                 )
+            tmdb_lookup = identity_evidence.get("tmdb_id_lookup") or {}
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
@@ -1288,95 +574,34 @@ class MetadataEngine:
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
                 f"lens_error='{lens_error}' "
-                f"tmdb_title_search={(identity_evidence.get('tmdb_title_search') or {}).get('status', 'unknown')} "
-                f"tmdb_search_queries={len((identity_evidence.get('tmdb_title_search') or {}).get('queries') or [])} "
-                f"tmdb_search_matches={len((identity_evidence.get('tmdb_title_search') or {}).get('qualified_candidate_ids') or [])} "
+                f"tmdb_id_lookup={tmdb_lookup.get('status', 'unknown')} "
+                f"tmdb_ids={','.join(str(value) for value in (tmdb_lookup.get('tmdb_ids') or [])[:10]) or 'none'} "
+                f"tmdb_details_resolved={tmdb_lookup.get('details_resolved', 0)} "
+                f'tmdb_details_errors={len(tmdb_lookup.get("errors") or [])} '
                 f'reason="{reason}" candidates={candidate_text} '
-                f"unresolved_imdb_ids={unresolved_imdb} unresolved_tmdb_ids={unresolved_tmdb}",
+                f"unresolved_tmdb_ids={unresolved_tmdb}",
                 flush=True,
             )
 
-            title_search_report = identity_evidence.get("tmdb_title_search") or {}
-            for query_report in (title_search_report.get("queries") or [])[:8]:
-                print(
-                    f"[KafiaNet] [{position}/{total}] LENS_TITLE "
-                    f"query='{safe_log_detail(query_report.get('query'), 120)}' "
-                    f"tmdb_candidate_ids={','.join(str(value) for value in (query_report.get('qualified_candidate_ids') or [])[:10]) or 'none'}",
-                    flush=True,
-                )
-
-            for lens_result in (identity_evidence.get("backlinks") or [])[:12]:
-                lens_metadata = lens_result.get("metadata_clues") or {}
-                lens_page = (
-                    lens_result.get("resolved_url")
-                    or (lens_result.get("resolved_urls") or [None])[0]
-                    or lens_result.get("url")
-                )
-                print(
-                    f"[KafiaNet] [{position}/{total}] LENS_RESULT "
-                    f"title='{safe_log_detail(lens_result.get('title'), 130)}' "
-                    f"snippet='{safe_log_detail(lens_result.get('content'), 360)}' "
-                    f"year_clues={','.join(str(value) for value in (lens_metadata.get('years') or [])) or 'none'} "
-                    f"country_clues='{safe_log_detail(', '.join(lens_metadata.get('countries') or []), 90)}' "
-                    f"director_clues='{safe_log_detail(', '.join(lens_metadata.get('directors') or []), 90)}' "
-                    f"cast_clues='{safe_log_detail(', '.join(lens_metadata.get('cast') or []), 110)}' "
-                    f"character_clues='{safe_log_detail(', '.join(lens_metadata.get('characters') or []), 90)}' "
-                    f"rating_clues='{safe_log_detail(', '.join(str(value.get('value')) for value in (lens_metadata.get('ratings') or []) if isinstance(value, dict)), 60)}' "
-                    f"url='{safe_log_detail(lens_page, 180)}' "
-                    f"url_error='{safe_log_detail(lens_result.get('url_resolution_error'), 120)}'",
-                    flush=True,
-                )
-
-            for candidate_report in (identity_evidence.get("candidate_identities") or [])[:12]:
-                profile = candidate_report.get("metadata_profile") or {}
-                metadata = candidate_report.get("metadata_match") or {}
+            for candidate_report in (identity_evidence.get("candidate_identities") or [])[:10]:
+                tmdb_data = candidate_report.get("tmdb_data") or {}
                 cast_names = [
                     str(person.get("name") or "")
-                    for person in (profile.get("cast") or [])[:5]
-                    if isinstance(person, dict) and person.get("name")
+                    for person in (tmdb_data.get("cast") or [])[:5]
                 ]
-                character_names = [
-                    str(person.get("character") or "")
-                    for person in (profile.get("cast") or [])[:5]
-                    if isinstance(person, dict) and person.get("character")
-                ]
-                matched_fields = ",".join(metadata.get("matched_fields") or []) or "none"
-                conflict_fields = ",".join((metadata.get("conflicts") or {}).keys()) or "none"
-                lens_clues = metadata.get("observed_clues") or {}
                 print(
-                    f"[KafiaNet] [{position}/{total}] TMDB_CANDIDATE "
+                    f"[KafiaNet] [{position}/{total}] TMDB_ID_RESULT "
                     f"id={candidate_report.get('tmdb_id')} "
-                    f"title='{safe_log_detail(candidate_report.get('title'), 110)}' "
+                    f"title='{safe_log_detail(candidate_report.get('title'), 120)}' "
                     f"imdb_id={candidate_report.get('imdb_id') or 'none'} "
-                    f"year={profile.get('year') or 'none'} "
-                    f"countries='{safe_log_detail(', '.join(profile.get('countries') or []), 100)}' "
-                    f"director='{safe_log_detail(', '.join(profile.get('directors') or []), 90)}' "
-                    f"cast='{safe_log_detail(', '.join(cast_names), 110)}' "
-                    f"characters='{safe_log_detail(', '.join(character_names), 90)}' "
-                    f"rating={profile.get('rating') if profile.get('rating') is not None else 'none'} "
-                    f"votes={profile.get('rating_votes') if profile.get('rating_votes') is not None else 'none'} "
-                    f"lens_years={','.join(str(value) for value in (lens_clues.get('years') or [])) or 'none'} "
-                    f"lens_countries='{safe_log_detail(', '.join(lens_clues.get('countries') or []), 90)}' "
-                    f"lens_directors='{safe_log_detail(', '.join(lens_clues.get('directors') or []), 90)}' "
-                    f"lens_cast='{safe_log_detail(', '.join(lens_clues.get('cast') or []), 100)}' "
-                    f"lens_characters='{safe_log_detail(', '.join(lens_clues.get('main_characters') or []), 90)}' "
-                    f"lens_ratings='{safe_log_detail(', '.join(str(value.get('value')) for value in (lens_clues.get('ratings') or []) if isinstance(value, dict)), 50)}' "
-                    f"lens_support={candidate_report.get('lens_title_support_count', 0)} "
-                    f"matched={matched_fields} conflicts={conflict_fields} "
-                    f"strong_metadata_matches={metadata.get('strong_match_count', 0)} "
-                    f"metadata_evidence_qualified={metadata.get('evidence_qualified', False)} "
-                    f"supporting_lens_pages={metadata.get('supporting_observation_count', 0)}",
+                    f"year={tmdb_data.get('year') or 'none'} "
+                    f"countries='{safe_log_detail(', '.join(tmdb_data.get('countries') or []), 100)}' "
+                    f"directors='{safe_log_detail(', '.join(tmdb_data.get('directors') or []), 100)}' "
+                    f"cast='{safe_log_detail(', '.join(cast_names), 120)}' "
+                    f"rating={tmdb_data.get('rating') if tmdb_data.get('rating') is not None else 'none'} "
+                    f"posters={tmdb_data.get('poster_count', 0)}",
                     flush=True,
                 )
-                for support in (metadata.get("supporting_observations") or [])[:5]:
-                    print(
-                        f"[KafiaNet] [{position}/{total}] LENS_SUPPORT "
-                        f"candidate={candidate_report.get('tmdb_id')} "
-                        f"title='{safe_log_detail(support.get('result_title'), 100)}' "
-                        f"url='{safe_log_detail(support.get('result_url'), 180)}' "
-                        f"matched={','.join(support.get('matched_fields') or []) or 'none'}",
-                        flush=True,
-                    )
             if self._stop_batch:
                 print(
                     f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status}; "

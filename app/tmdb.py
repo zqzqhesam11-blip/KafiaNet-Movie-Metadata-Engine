@@ -3,13 +3,9 @@ from __future__ import annotations
 from typing import Any
 import httpx
 
-from app.matching import normalize_title
 
 
-WORLDWIDE_TITLE_POLICY_VERSION = 1
-WORLDWIDE_TITLE_MIN_MARKETS = 3
-MAX_SEARCH_QUERY_CHARS = 160
-MAX_SEARCH_QUERY_WORDS = 22
+TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p"
 
 
 class TMDBClient:
@@ -32,128 +28,28 @@ class TMDBClient:
         response.raise_for_status()
         return response.json()
 
-    def search_movies(self, title: str, year: int | None = None) -> list[dict[str, Any]]:
-        # Defensive boundary: never send a full article/caption or malformed
-        # unbounded value to TMDB as a movie-title query.
-        query = " ".join(str(title or "").split())
-        if (
-            not query
-            or len(query) > MAX_SEARCH_QUERY_CHARS
-            or len(query.split()) > MAX_SEARCH_QUERY_WORDS
-        ):
-            return []
-
-        params: dict[str, Any] = {
-            "query": query,
-            "include_adult": "false",
-            "language": self.language,
-        }
-        if year:
-            params["year"] = year
-        data = self._get("/search/movie", params)
-        return list(data.get("results") or [])
-
-    def find_by_imdb_id(self, imdb_id: str) -> list[dict[str, Any]]:
-        """Resolve a trusted IMDb identifier to TMDB movie records."""
-        imdb_id = imdb_id.strip().lower()
-        if not imdb_id.startswith("tt") or not imdb_id[2:].isdigit():
-            return []
-        data = self._get(
-            f"/find/{imdb_id}",
-            {
-                "external_source": "imdb_id",
-                "language": self.language,
-            },
-        )
-        return list(data.get("movie_results") or [])
-
     def movie_details(self, tmdb_id: int) -> dict[str, Any]:
         return self._get(
             f"/movie/{tmdb_id}",
             {
                 "language": self.language,
                 "append_to_response": (
-                    "alternative_titles,credits,release_dates,external_ids,keywords"
+                    "alternative_titles,credits,release_dates,external_ids,keywords,images"
+                ),
+                "include_image_language": (
+                    f"{self.language.split('-', 1)[0]},null" if self.language else "null"
                 ),
             },
         )
 
     @staticmethod
-    def select_worldwide_title(movie: dict[str, Any]) -> dict[str, Any]:
-        """
-        Select a conservatively supported public title without preferring a language.
-
-        TMDB does not expose title popularity by audience. Its alternative-title
-        records are country-scoped, so a title only overrides the configured-language
-        primary title when the same normalized title is listed in at least three
-        distinct country markets. Ties and weak evidence keep the primary title.
-        """
-        primary = str(movie.get("title") or movie.get("original_title") or "").strip()
-        primary_key = normalize_title(primary)
-        groups: dict[str, dict[str, Any]] = {}
-
-        for item in movie.get("alternative_titles") or []:
-            if not isinstance(item, dict):
-                continue
-            title = str(item.get("title") or "").strip()
-            country = str(item.get("country") or "").strip().upper()
-            if not title or not country:
-                continue
-
-            title_type = str(item.get("type") or "").casefold()
-            if any(marker in title_type for marker in ("working title", "internal title", "temporary title")):
-                continue
-
-            key = normalize_title(title)
-            if not key or key == primary_key:
-                continue
-
-            group = groups.setdefault(
-                key,
-                {"countries": set(), "spellings": {}, "first_seen": len(groups)},
-            )
-            group["countries"].add(country)
-            group["spellings"][title] = group["spellings"].get(title, 0) + 1
-
-        candidates: list[tuple[int, str, dict[str, Any]]] = []
-        for key, group in groups.items():
-            market_count = len(group["countries"])
-            if market_count < WORLDWIDE_TITLE_MIN_MARKETS:
-                continue
-            spelling = sorted(
-                group["spellings"].items(),
-                key=lambda pair: (-pair[1], len(pair[0]), pair[0].casefold()),
-            )[0][0]
-            candidates.append((market_count, key, {**group, "title": spelling}))
-
-        if not candidates:
-            return {
-                "title": primary,
-                "source": "tmdb_primary_title",
-                "market_count": 0,
-                "markets": [],
-                "policy_version": WORLDWIDE_TITLE_POLICY_VERSION,
-            }
-
-        best_count = max(row[0] for row in candidates)
-        winners = [row for row in candidates if row[0] == best_count]
-        if len(winners) != 1:
-            return {
-                "title": primary,
-                "source": "tmdb_primary_title_ambiguous_alternatives",
-                "market_count": 0,
-                "markets": [],
-                "policy_version": WORLDWIDE_TITLE_POLICY_VERSION,
-            }
-
-        market_count, _, group = winners[0]
-        return {
-            "title": group["title"],
-            "source": "tmdb_alternative_title_multi_market",
-            "market_count": market_count,
-            "markets": sorted(group["countries"]),
-            "policy_version": WORLDWIDE_TITLE_POLICY_VERSION,
-        }
+    def image_url(file_path: str | None, size: str = "w500") -> str | None:
+        path = str(file_path or "").strip()
+        if not path.startswith("/") or "\n" in path or "\r" in path:
+            return None
+        allowed_sizes = {"w92", "w154", "w185", "w342", "w500", "w780", "original"}
+        selected_size = size if size in allowed_sizes else "w500"
+        return f"{TMDB_IMAGE_BASE_URL}/{selected_size}{path}"
 
     @staticmethod
     def normalize_details(details: dict[str, Any]) -> dict[str, Any]:
@@ -209,6 +105,33 @@ class TMDBClient:
 
         collection = details.get("belongs_to_collection")
         keywords = (details.get("keywords") or {}).get("keywords") or []
+        image_payload = details.get("images") or {}
+        poster_rows = [
+            item for item in (image_payload.get("posters") or [])
+            if isinstance(item, dict) and TMDBClient.image_url(item.get("file_path"))
+        ]
+        poster_rows.sort(
+            key=lambda item: (
+                str(item.get("iso_639_1") or "") != str(details.get("original_language") or ""),
+                -float(item.get("vote_average") or 0),
+                -int(item.get("vote_count") or 0),
+                -int(item.get("width") or 0),
+            )
+        )
+        posters = [
+            {
+                "file_path": item.get("file_path"),
+                "url": TMDBClient.image_url(item.get("file_path"), "w500"),
+                "original_url": TMDBClient.image_url(item.get("file_path"), "original"),
+                "language": item.get("iso_639_1"),
+                "width": item.get("width"),
+                "height": item.get("height"),
+                "vote_average": item.get("vote_average"),
+                "vote_count": item.get("vote_count"),
+            }
+            for item in poster_rows[:40]
+        ]
+        primary_poster = TMDBClient.image_url(details.get("poster_path"), "w500")
 
         return {
             "tmdb_id": details.get("id"),
@@ -232,7 +155,10 @@ class TMDBClient:
             "tagline": details.get("tagline"),
             "homepage": details.get("homepage"),
             "poster_path": details.get("poster_path"),
+            "poster_url": primary_poster,
+            "posters": posters,
             "backdrop_path": details.get("backdrop_path"),
+            "backdrop_url": TMDBClient.image_url(details.get("backdrop_path"), "w780"),
             "popularity": details.get("popularity"),
             "vote_average": details.get("vote_average"),
             "vote_count": details.get("vote_count"),
