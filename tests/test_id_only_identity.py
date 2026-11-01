@@ -32,6 +32,8 @@ class FakeTMDB:
             "tt0095467": [{"id": 31056, "title": "Another wrong cached title"}],
         }
         self.search_movies_calls = 0
+        self.search_movies_queries = []
+        self.search_overrides = {}
 
     def find_by_imdb_id(self, imdb_id: str):
         return self.imdb_map.get(imdb_id, [])
@@ -47,9 +49,17 @@ class FakeTMDB:
     def select_worldwide_title(details: dict):
         return TMDBClient.select_worldwide_title(details)
 
-    def search_movies(self, *args, **kwargs):
+    def search_movies(self, title: str, year=None):
         self.search_movies_calls += 1
-        raise AssertionError("TMDB title search must never be used")
+        self.search_movies_queries.append(title)
+        if title in self.search_overrides:
+            return self.search_overrides[title]
+        key = title.casefold()
+        if key == "a short film about killing":
+            return [{"id": 10754, "title": "A Short Film About Killing", "original_title": "Krótki film o zabijaniu"}]
+        if key == "a short film about love":
+            return [{"id": 31056, "title": "A Short Film About Love", "original_title": "Krótki film o miłości"}]
+        return []
 
 
 class FakeGitHub:
@@ -58,16 +68,8 @@ class FakeGitHub:
 
 
 class FakeResolver:
-    def __init__(self):
-        self.search_rows = []
-        self.search_input = []
-
     def resolve_result_urls(self, rows):
         return rows
-
-    def search_official_id_pages(self, rows):
-        self.search_input = list(rows)
-        return list(self.search_rows)
 
 
 class IdOnlyIdentityTests(unittest.TestCase):
@@ -158,20 +160,60 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(set(match["candidate_ids"]), {10754, 31056})
         self.assertEqual(engine.tmdb.search_movies_calls, 0)
 
-    def test_no_official_ids_means_review_even_when_folder_and_caption_match(self):
+    def test_lens_result_title_searches_tmdb_without_using_folder_or_image_filename(self):
         engine = self.make_engine()
         rows = [{
-            "title": "A Short Film About Killing",
+            "title": "A Short Film About Killing (1988) - IMDb",
             "url": "https://example.com/a-short-film-about-killing",
-            "source": "https://example.com/tt0095468-poster.jpg",
+            "source": "https://example.com/UNRELATED-IMAGE-NAME-poster.jpg",
+        }]
+
+        candidate, match, evidence = engine._find_movie(rows)
+
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 10754)
+        self.assertEqual(match["imdb_id"], "tt0095468")
+        self.assertEqual(engine.tmdb.search_movies_queries, ["A Short Film About Killing"])
+        self.assertEqual(evidence["tmdb_title_search"]["status"], "matched")
+        self.assertFalse(evidence["tmdb_title_search"]["folder_name_used"])
+        self.assertFalse(evidence["tmdb_title_search"]["image_filename_used"])
+        self.assertFalse(match["folder_name_used_for_matching"])
+
+    def test_multiple_close_tmdb_candidates_remain_in_review(self):
+        engine = self.make_engine()
+        engine.tmdb.records[5001] = movie_details(5001, "tt0005001", "The Thing")
+        engine.tmdb.records[5002] = movie_details(5002, "tt0005002", "The Thing")
+        engine.tmdb.search_overrides["The Thing"] = [
+            {"id": 5001, "title": "The Thing", "original_title": "The Thing"},
+            {"id": 5002, "title": "The Thing", "original_title": "The Thing"},
+        ]
+
+        candidate, match, evidence = engine._find_movie([{
+            "title": "The Thing - IMDb",
+            "url": "https://example.com/lens-result",
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(set(match["candidate_ids"]), {5001, 5002})
+        self.assertEqual(evidence["tmdb_title_search"]["status"], "matched")
+        self.assertEqual(len(evidence["tmdb_title_search"]["qualified_candidate_ids"]), 2)
+
+    def test_image_filename_alone_never_becomes_a_tmdb_search_query(self):
+        engine = self.make_engine()
+        rows = [{
+            "title": "",
+            "url": "https://example.com/unrelated-page",
+            "source": "https://cdn.example.com/A-Short-Film-About-Killing-poster.jpg",
         }]
 
         candidate, match, evidence = engine._find_movie(rows)
 
         self.assertIsNone(candidate)
         self.assertEqual(match["status"], "review")
-        self.assertIn("No official IMDb/TMDB movie URL", match["reason"])
         self.assertEqual(engine.tmdb.search_movies_calls, 0)
+        self.assertEqual(evidence["tmdb_title_search"]["queries"], [])
 
     def test_single_tmdb_candidate_without_verified_imdb_id_stays_in_review(self):
         engine = self.make_engine()
@@ -191,7 +233,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertIn("both IDs are required", match["reason"])
         self.assertEqual(engine.tmdb.search_movies_calls, 0)
 
-    def test_lens_provider_error_is_preserved_and_text_search_is_skipped(self):
+    def test_lens_provider_error_is_preserved_and_tmdb_search_is_skipped(self):
         engine = self.make_engine()
         engine._reverse_image_results = lambda _image_url: [{
             "error": "BrightDataAPIError",
@@ -208,27 +250,10 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(latest["status"], "error")
         self.assertIn("HTTP 502", latest["errors"][0]["message"])
         self.assertEqual(
-            record["reverse_image"]["evidence"]["official_id_search"]["status"],
+            record["reverse_image"]["evidence"]["tmdb_title_search"]["status"],
             "skipped_lens_error",
         )
-
-    def test_official_search_status_is_retained_when_no_official_pages_match(self):
-        engine = self.make_engine()
-        engine._reverse_image_results = lambda _image_url: [{
-            "title": "Buladó",
-            "url": "https://example.com/unrelated-result",
-        }]
-
-        record = engine._record_for_folder({
-            "folder": "FOLDER MUST NOT BE SEARCHED",
-            "image_path": "Posters/poster.jpg",
-        })
-
-        self.assertEqual(record["status"], "review")
-        official_search = record["reverse_image"]["evidence"]["official_id_search"]
-        self.assertEqual(official_search["status"], "no_official_pages")
-        self.assertEqual(official_search["result_count"], 0)
-        self.assertEqual(engine.reverse_image.search_input[0]["title"], "Buladó")
+        self.assertEqual(engine.tmdb.search_movies_calls, 0)
 
     def test_record_persists_both_ids_as_explicit_fields(self):
         engine = self.make_engine()
@@ -259,49 +284,11 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(record["identity"]["tmdb_id"], 10754)
         self.assertEqual(record["identity"]["imdb_id"], "tt0095468")
         self.assertFalse(record["original"]["folder_name_used_for_matching"])
-        self.assertEqual(engine.tmdb.search_movies_calls, 0)
-
-    def test_google_official_id_search_results_can_resolve_image_match_without_folder_name(self):
-        engine = self.make_engine()
-        engine.reverse_image.search_rows = [
-            {
-                "title": "Official IMDb result",
-                "url": "https://www.imdb.com/title/tt0095468/",
-                "resolved_url": "https://www.imdb.com/title/tt0095468/",
-                "resolved_urls": ["https://www.imdb.com/title/tt0095468/"],
-                "provider": "google_official_id_search",
-            },
-            {
-                "title": "Official TMDB result",
-                "url": "https://www.themoviedb.org/movie/10754",
-                "resolved_url": "https://www.themoviedb.org/movie/10754",
-                "resolved_urls": ["https://www.themoviedb.org/movie/10754"],
-                "provider": "google_official_id_search",
-            },
-        ]
-        engine._reverse_image_results = lambda _image_url: [{
-            "title": "Lens title hint from the poster image",
-            "url": "https://example.com/non-official-result",
-        }]
-
-        record = engine._record_for_folder({
-            "folder": "DO NOT USE THIS FOLDER NAME FOR SEARCH",
-            "image_path": "Posters/poster.jpg",
-        })
-
-        self.assertEqual(record["status"], "ready")
-        self.assertEqual(record["tmdb_id"], 10754)
-        self.assertEqual(record["imdb_id"], "tt0095468")
         self.assertEqual(
-            engine.reverse_image.search_input[0]["title"],
-            "Lens title hint from the poster image",
+            record["reverse_image"]["evidence"]["tmdb_title_search"]["status"],
+            "skipped_official_ids_present",
         )
         self.assertEqual(engine.tmdb.search_movies_calls, 0)
-        self.assertEqual(
-            record["reverse_image"]["evidence"]["official_id_search"]["status"],
-            "ok",
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

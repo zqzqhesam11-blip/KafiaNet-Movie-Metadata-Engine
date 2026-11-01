@@ -57,6 +57,30 @@ class ReverseImageEvidenceTests(unittest.TestCase):
         ])
         self.assertEqual(evidence["title_hints"], ["1917"])
 
+    def test_only_lens_result_title_is_used_for_tmdb_search(self):
+        evidence = extract_reverse_image_evidence([{
+            "title": "A Short Film About Killing (1988) - IMDb",
+            "url": "https://example.com/result",
+            "source": "https://cdn.example.com/UNRELATED-IMAGE-NAME-poster.jpg",
+        }])
+
+        self.assertEqual(
+            evidence["lens_title_queries"],
+            ["A Short Film About Killing"],
+        )
+        self.assertNotIn(
+            "unrelated image name",
+            [item.casefold() for item in evidence["lens_title_queries"]],
+        )
+
+    def test_image_filename_does_not_become_a_lens_title_query(self):
+        evidence = extract_reverse_image_evidence([{
+            "title": "",
+            "url": "https://example.com/result",
+            "source": "https://cdn.example.com/A-Short-Film-About-Killing-poster.jpg",
+        }])
+        self.assertEqual(evidence["lens_title_queries"], [])
+
     def test_ignores_generic_image_names(self):
         evidence = extract_reverse_image_evidence([
             {"title": "poster.jpg", "url": "https://example.com", "source": ""}
