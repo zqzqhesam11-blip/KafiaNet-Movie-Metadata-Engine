@@ -223,13 +223,6 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
         destination_url = destination_urls[0] if destination_urls else ""
 
         source = str(result.get("source") or "")
-        try:
-            basename = PurePosixPath(urlparse(source).path).name
-        except ValueError:
-            basename = ""
-        source_hint = _clean_hint(basename)
-        if source_hint and source_hint.casefold() not in {item.casefold() for item in hints}:
-            hints.append(source_hint)
 
         raw_title = str(result.get("title") or "")
         raw_content = str(result.get("content") or "")
@@ -243,7 +236,14 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
         result_characters: list[str] = []
         result_ratings: list[dict] = []
 
-        for year_match in YEAR_HINT_RE.findall(raw_text):
+        # A year in the Lens result title is a clue. In result content, accept
+        # only explicitly labelled film/release years to avoid article publish dates.
+        content_years = re.findall(
+            r"\\b(?:release year|film year|year released|release date)\\s*[:=–-]?\\s*((?:19|20)\\d{2})",
+            raw_content,
+            flags=re.IGNORECASE,
+        )
+        for year_match in [*YEAR_HINT_RE.findall(raw_title), *content_years]:
             year_value = int(year_match)
             if 1888 <= year_value <= 2035 and year_value not in result_years:
                 result_years.append(year_value)
