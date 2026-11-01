@@ -146,7 +146,7 @@ def _compare_lens_metadata(
         " ".join((str(item.get("result_title") or ""), str(item.get("content") or "")))
         for item in relevant
     ]
-        ratings: list[dict[str, Any]] = []
+    ratings: list[dict[str, Any]] = []
     for item in relevant:
         for rating in item.get("ratings") or []:
             if isinstance(rating, dict):
