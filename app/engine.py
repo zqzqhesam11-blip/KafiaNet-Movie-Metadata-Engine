@@ -140,8 +140,15 @@ class MetadataEngine:
         # If Lens did not expose an official ID URL, search TMDB using only the
         # Lens result titles. This is not a second Google search and never uses
         # the catalog folder name, the poster filename, the image URL or snippets.
+        initial_title_search_status = (
+            "skipped_official_ids_present"
+            if evidence.get("imdb_ids") or evidence.get("tmdb_ids")
+            else "skipped_lens_error"
+            if reverse_image_failed
+            else "skipped_no_usable_lens_titles"
+        )
         tmdb_title_search: dict[str, Any] = {
-            "status": "skipped_official_ids_present",
+            "status": initial_title_search_status,
             "queries": [],
             "result_count": 0,
             "qualified_candidate_ids": [],
