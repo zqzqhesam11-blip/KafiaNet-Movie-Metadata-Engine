@@ -50,7 +50,7 @@ class PreviousGoogleLensEvidenceTests(unittest.TestCase):
         self.assertEqual(record["reverse_image"]["results"], previous)
         self.assertEqual(record["reverse_image"]["results_source"], "previous_saved")
         self.assertEqual(record["reverse_image"]["latest_query"]["status"], "no_matches")
-        self.assertEqual(engine._find_movie.call_args.args[2], previous)
+        self.assertEqual(engine._find_movie.call_args.args[0], previous)
 
     def test_reuses_saved_results_when_live_search_is_unresponsive(self):
         previous = [{

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePosixPath
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 IMDB_ID_RE = re.compile(r"\b(tt\d{5,12})\b", re.IGNORECASE)
@@ -11,7 +11,7 @@ TMDB_MOVIE_RE = re.compile(r"^/movie/(\d+)(?:[-/]|$)", re.IGNORECASE)
 # image/movie titles. Keep hints bounded before they can reach the TMDB API.
 MAX_TITLE_HINT_CHARS = 160
 MAX_TITLE_HINT_WORDS = 22
-MAX_BACKLINKS = 12
+MAX_BACKLINKS = 80
 YEAR_HINT_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 COUNTRY_RE = re.compile(
     r"\b(?:country(?: of origin)?|production country|production countries)\s*[:=–-]\s*([^|;\n<>]{2,60})",
@@ -95,8 +95,37 @@ def _clean_hint(value: str) -> str | None:
     return hint if len(hint) >= 3 else None
 
 
+def _resolved_destination_url(result: dict) -> str:
+    """Return the final destination exposed by the redirect resolver.
+
+    Google /goto tokens are opaque. They must be resolved over HTTP before
+    this parser runs; this helper only unwraps Google's older readable /url?q=
+    wrapper when a provider or redirect returns one.
+    """
+    candidate = str(result.get("resolved_url") or result.get("url") or "").strip()
+    for _ in range(2):
+        try:
+            parsed = urlparse(candidate)
+        except ValueError:
+            return ""
+        host = (parsed.hostname or "").casefold().rstrip(".")
+        if host == "google.com" or host.endswith(".google.com"):
+            if parsed.path.rstrip("/") == "/url":
+                query = parse_qs(parsed.query)
+                nested = next(iter(query.get("q") or query.get("url") or []), "")
+                if nested:
+                    candidate = unquote(nested).strip()
+                    continue
+        return candidate
+    return candidate
+
+
 def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
-    """Extract conservative title hints and trusted external movie IDs from reverse-image backlinks."""
+    """Extract official IMDb/TMDB IDs from resolved Lens result destination URLs.
+
+    Search-result captions and image filenames are retained only as diagnostic
+    hints. They are never used as a movie identity or as a TMDB search query.
+    """
     hints: list[str] = []
     imdb_ids: list[str] = []
     tmdb_ids: list[int] = []
@@ -114,23 +143,21 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
         if title and title.casefold() not in {item.casefold() for item in hints}:
             hints.append(title)
 
+        destination_url = _resolved_destination_url(result)
         linked_imdb_ids: list[str] = []
         linked_tmdb_ids: list[int] = []
-        for field in ("url", "source"):
-            url = str(result.get(field) or "")
-            imdb_id = imdb_id_from_url(url)
+        if destination_url:
+            imdb_id = imdb_id_from_url(destination_url)
             if imdb_id:
                 if imdb_id not in imdb_ids:
                     imdb_ids.append(imdb_id)
-                if imdb_id not in linked_imdb_ids:
-                    linked_imdb_ids.append(imdb_id)
+                linked_imdb_ids.append(imdb_id)
 
-            tmdb_id = tmdb_movie_id_from_url(url)
+            tmdb_id = tmdb_movie_id_from_url(destination_url)
             if tmdb_id:
                 if tmdb_id not in tmdb_ids:
                     tmdb_ids.append(tmdb_id)
-                if tmdb_id not in linked_tmdb_ids:
-                    linked_tmdb_ids.append(tmdb_id)
+                linked_tmdb_ids.append(tmdb_id)
 
         source = str(result.get("source") or "")
         try:
@@ -149,11 +176,11 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
             if 1888 <= year_value <= 2035 and year_value not in year_hints:
                 year_hints.append(year_value)
         for country_match in COUNTRY_RE.findall(raw_content):
-            value = country_match.strip(" .,:")
+            value = country_match.strip(" .,")
             if value and value.casefold() not in {item.casefold() for item in country_hints}:
                 country_hints.append(value)
         for director_match in DIRECTOR_RE.findall(raw_content):
-            value = director_match.strip(" .,:")
+            value = director_match.strip(" .,")
             if value and value.casefold() not in {item.casefold() for item in director_hints}:
                 director_hints.append(value)
 
@@ -161,6 +188,8 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
             backlinks.append({
                 "title": raw_title[:180],
                 "url": str(result.get("url") or "")[:500],
+                "resolved_url": destination_url[:1000],
+                "url_resolution_error": str(result.get("url_resolution_error") or "")[:200],
                 "source": source[:500],
                 "content": raw_content[:500],
                 "imdb_ids": linked_imdb_ids,
@@ -168,11 +197,11 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
             })
 
     return {
-        "title_hints": hints[:8],
-        "imdb_ids": imdb_ids[:8],
-        "tmdb_ids": tmdb_ids[:8],
-        "year_hints": year_hints[:12],
-        "country_hints": country_hints[:8],
-        "director_hints": director_hints[:8],
+        "title_hints": hints[:80],
+        "imdb_ids": imdb_ids[:80],
+        "tmdb_ids": tmdb_ids[:80],
+        "year_hints": year_hints[:80],
+        "country_hints": country_hints[:80],
+        "director_hints": director_hints[:80],
         "backlinks": backlinks,
     }

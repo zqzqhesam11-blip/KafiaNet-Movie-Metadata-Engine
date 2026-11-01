@@ -111,5 +111,47 @@ class ReverseImageEvidenceTests(unittest.TestCase):
         )
 
 
+    def test_extracts_ids_from_resolved_destinations_not_captions(self):
+        evidence = extract_reverse_image_evidence([
+            {
+                "title": "Completely unrelated caption 2001",
+                "url": "https://lens.google.com/goto?url=CAESopaque",
+                "resolved_url": "https://www.imdb.com/title/tt0095468/",
+            },
+            {
+                "title": "Another unrelated title 1990",
+                "url": "https://lens.google.com/goto?url=CAESopaque2",
+                "resolved_url": "https://www.themoviedb.org/movie/10754-a-short-film-about-killing",
+            },
+        ])
+
+        self.assertEqual(evidence["imdb_ids"], ["tt0095468"])
+        self.assertEqual(evidence["tmdb_ids"], [10754])
+        self.assertEqual(evidence["backlinks"][0]["resolved_url"], "https://www.imdb.com/title/tt0095468/")
+
+    def test_opaque_goto_token_is_not_guessed_or_decoded_as_an_id(self):
+        evidence = extract_reverse_image_evidence([{
+            "title": "A Short Film About Killing",
+            "url": "https://lens.google.com/goto?url=CAESopaque-token",
+            "source": "https://cdn.example.com/tt0095468-poster.jpg",
+        }])
+
+        self.assertEqual(evidence["imdb_ids"], [])
+        self.assertEqual(evidence["tmdb_ids"], [])
+
+    def test_extracts_all_official_ids_across_many_backlinks(self):
+        results = []
+        for index in range(1, 13):
+            results.append({
+                "title": f"Result {index}",
+                "url": f"https://www.imdb.com/title/tt{9000000 + index}/",
+            })
+        evidence = extract_reverse_image_evidence(results)
+
+        self.assertEqual(len(evidence["imdb_ids"]), 12)
+        self.assertEqual(evidence["imdb_ids"][0], "tt9000001")
+        self.assertEqual(evidence["imdb_ids"][-1], "tt9000012")
+
+
 if __name__ == "__main__":
     unittest.main()

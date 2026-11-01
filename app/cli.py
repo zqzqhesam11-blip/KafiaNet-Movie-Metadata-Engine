@@ -20,7 +20,9 @@ def format_summary(result: dict[str, Any]) -> str:
             f"reverse_image_unresponsive={result.get('reverse_image_unresponsive', 0)} "
             f"no_matches={result.get('reverse_image_no_matches', 0)} "
             f"reused_saved_evidence={result.get('reverse_image_previous_evidence_reused', 0)} "
-            f"rejected_external_ids={result.get('reverse_image_rejected_external_ids', 0)}"
+            f"official_id_backlinks={result.get('reverse_image_official_id_backlinks', 0)} "
+            f"resolved_identities={result.get('reverse_image_resolved_identities', 0)} "
+            f"identity_conflicts={result.get('reverse_image_identity_conflicts', 0)}"
         ),
     ]
     if mode == "DRY_RUN":
