@@ -434,3 +434,22 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
         ],
         "backlinks": backlinks,
     }
+
+
+def extract_tmdb_movie_ids(results: list[dict]) -> list[int]:
+    """Read only numeric movie IDs from official TMDB result destinations.
+
+    Lens titles, snippets, IMDb links, image URLs and filenames are not identity
+    inputs. A result must resolve to an official themoviedb.org/movie/<id> URL.
+    """
+    movie_ids: list[int] = []
+    seen: set[int] = set()
+    for result in results or []:
+        if not isinstance(result, dict) or result.get("error"):
+            continue
+        for destination in _resolved_destination_urls(result):
+            movie_id = tmdb_movie_id_from_url(destination)
+            if movie_id is not None and movie_id not in seen:
+                seen.add(movie_id)
+                movie_ids.append(movie_id)
+    return movie_ids
