@@ -14,7 +14,7 @@ from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
 
 
 SCHEMA_VERSION = 3
-MAX_OFFICIAL_ID_LOOKUPS = 80
+MAX_LENS_TMDB_ID_CANDIDATES = 10
 
 
 def safe_segment(value: str) -> str:
@@ -447,7 +447,7 @@ class MetadataEngine:
             for item in (reverse_image_results or [])
         )
         lens_tmdb_ids = extract_tmdb_movie_ids(reverse_image_results)
-        title_search = {
+        tmdb_id_lookup = {
             "status": "not_used_id_only",
             "queries": [],
             "result_count": 0,
@@ -463,7 +463,7 @@ class MetadataEngine:
             "lens_title_queries": [],
             "metadata_observations": [],
             "backlinks": [],
-            "tmdb_title_search": title_search,
+            "tmdb_id_lookup": tmdb_id_lookup,
             "id_resolution": {
                 "strategy": "official_tmdb_movie_url_only",
                 "tmdb_ids_seen": list(lens_tmdb_ids),
@@ -495,6 +495,17 @@ class MetadataEngine:
                     "a numeric movie ID; title and country searches are disabled"
                 ),
                 "candidate_ids": [],
+            }, evidence
+
+        if len(lens_tmdb_ids) > MAX_LENS_TMDB_ID_CANDIDATES:
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": (
+                    f"Google Lens returned {len(lens_tmdb_ids)} different TMDB movie IDs; "
+                    f"the safe lookup limit is {MAX_LENS_TMDB_ID_CANDIDATES}"
+                ),
+                "candidate_ids": lens_tmdb_ids,
             }, evidence
 
         resolved: dict[int, dict[str, Any]] = {}
@@ -912,15 +923,15 @@ class MetadataEngine:
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
                 f"lens_error='{lens_error}' "
-                f"tmdb_title_search={(identity_evidence.get('tmdb_title_search') or {}).get('status', 'unknown')} "
-                f"tmdb_search_queries={len((identity_evidence.get('tmdb_title_search') or {}).get('queries') or [])} "
-                f"tmdb_search_matches={len((identity_evidence.get('tmdb_title_search') or {}).get('qualified_candidate_ids') or [])} "
+                f"tmdb_id_lookup={(identity_evidence.get('tmdb_id_lookup') or {}).get('status', 'unknown')} "
+                f"tmdb_id_queries={len((identity_evidence.get('tmdb_id_lookup') or {}).get('queries') or [])} "
+                f"tmdb_id_matches={len((identity_evidence.get('tmdb_id_lookup') or {}).get('qualified_candidate_ids') or [])} "
                 f'reason="{reason}" candidates={candidate_text} '
                 f"unresolved_imdb_ids={unresolved_imdb} unresolved_tmdb_ids={unresolved_tmdb}",
                 flush=True,
             )
 
-            title_search_report = identity_evidence.get("tmdb_title_search") or {}
+            title_search_report = identity_evidence.get("tmdb_id_lookup") or {}
             for query_report in (title_search_report.get("queries") or [])[:8]:
                 print(
                     f"[KafiaNet] [{position}/{total}] LENS_TITLE "
