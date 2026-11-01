@@ -160,7 +160,7 @@ class MetadataEngine:
                 "status": "review",
                 "confidence": 0.0,
                 "reason": (
-                    "No official IMDb/TMDB movie URL was found in Google Lens results; "
+                    "No official IMDb/TMDB movie URL was found in Google Lens or the supplemental official-ID search results; "
                     "folder names, Lens captions, and image filenames are not used for identification"
                 ),
                 "candidate_ids": [],
@@ -355,6 +355,9 @@ class MetadataEngine:
             else "ok" if latest_reverse_image_results
             else "no_matches"
         )
+        lens_diagnostics = (
+            getattr(self.reverse_image, "last_lens_diagnostics", {}) or {}
+        ) if self.reverse_image else {}
 
         # A temporary empty/unresponsive Google Lens response must not erase useful
         # reverse-image evidence already stored for this exact poster.
@@ -392,20 +395,29 @@ class MetadataEngine:
         # only from Lens result titles (never from the poster folder or filename).
         # Search snippets are stored as diagnostics; only official IMDb/TMDB
         # destination URLs enter the existing ID resolution and cross-check.
-        official_id_search: dict[str, Any] = {
-            "status": "skipped",
-            "result_count": 0,
-            "error": None,
-        }
         official_search = getattr(self.reverse_image, "search_official_id_pages", None)
-        if (
-            callable(official_search)
-            and reverse_image_results
-            and not any(
-                isinstance(result, dict) and result.get("error")
-                for result in reverse_image_results
-            )
+        if not callable(official_search):
+            official_id_search: dict[str, Any] = {
+                "status": "unsupported",
+                "result_count": 0,
+                "error": "Reverse-image client does not expose official-ID search",
+            }
+        elif not reverse_image_results:
+            official_id_search = {
+                "status": "skipped_no_lens_results",
+                "result_count": 0,
+                "error": None,
+            }
+        elif any(
+            isinstance(result, dict) and result.get("error")
+            for result in reverse_image_results
         ):
+            official_id_search = {
+                "status": "skipped_lens_error",
+                "result_count": 0,
+                "error": "Lens results contain a provider error; no title hints are trusted from the failed request",
+            }
+        else:
             try:
                 official_results = official_search(reverse_image_results)
                 if official_results:
@@ -432,9 +444,28 @@ class MetadataEngine:
                     "error": f"{type(exc).__name__}: {str(exc)[:250]}",
                 }
 
+        official_search_diagnostics = (
+            getattr(self.reverse_image, "last_official_search_diagnostics", {}) or {}
+        ) if self.reverse_image else {}
+        for key in (
+            "title_count", "titles", "query", "organic_result_count",
+            "official_page_count", "http_status", "attempts", "payload_shape",
+        ):
+            if key in official_search_diagnostics:
+                official_id_search[key] = official_search_diagnostics[key]
+        if official_search_diagnostics.get("error") and not official_id_search.get("error"):
+            official_id_search["error"] = official_search_diagnostics["error"]
+        if official_search_diagnostics.get("status") in {
+            "skipped_no_usable_lens_titles", "invalid_response",
+            "empty_body", "invalid_body", "unparsed_response", "http_error",
+        } and official_id_search["status"] not in {"quota_error", "error"}:
+            official_id_search["status"] = official_search_diagnostics["status"]
+
+
         candidate, match, reverse_image_evidence = self._find_movie(reverse_image_results)
         reverse_image_evidence["results_source"] = reverse_image_results_source
         reverse_image_evidence["official_id_search"] = official_id_search
+        reverse_image_evidence["lens_diagnostics"] = lens_diagnostics
 
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -459,6 +490,7 @@ class MetadataEngine:
                 "latest_query": {
                     "status": latest_query_status,
                     "errors": latest_errors,
+                    "diagnostics": lens_diagnostics,
                 },
                 "evidence": reverse_image_evidence,
             },
@@ -653,11 +685,41 @@ class MetadataEngine:
             unresolved_ids = identity_evidence.get("id_resolution") or {}
             unresolved_imdb = ",".join(str(value) for value in (unresolved_ids.get("unresolved_imdb_ids") or [])[:3]) or "none"
             unresolved_tmdb = ",".join(str(value) for value in (unresolved_ids.get("unresolved_tmdb_ids") or [])[:3]) or "none"
+            official_search_info = identity_evidence.get("official_id_search") or {}
+            lens_diag = (reverse_image_info.get("latest_query") or {}).get("diagnostics") or {}
+            lens_error_items = (reverse_image_info.get("latest_query") or {}).get("errors") or []
+
+            def safe_log_detail(value: Any, limit: int = 170) -> str:
+                detail = " ".join(str(value or "").replace('"', "'").replace("\\r", " ").replace("\\n", " ").split())
+                secret = str(getattr(self.settings, "brightdata_api_key", "") or "")
+                if secret:
+                    detail = detail.replace(secret, "[REDACTED]")
+                return detail[:limit] or "none"
+
+            lens_error = "none"
+            if lens_error_items:
+                first_error = lens_error_items[0]
+                lens_error = safe_log_detail(
+                    f"{first_error.get('type', 'ProviderError')}: {first_error.get('message') or first_error.get('error')}"
+                )
+            search_error = safe_log_detail(official_search_info.get("error"))
+            search_query = safe_log_detail(official_search_info.get("query"), 120)
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
                 f"imdb_id={imdb_id if imdb_id is not None else 'none'} "
                 f"reverse_image={latest_query_status} evidence={reverse_image_source} "
+                f"lens_http={lens_diag.get('http_status', 'none')} "
+                f"lens_attempts={lens_diag.get('attempts', 'none')} "
+                f"lens_results={lens_diag.get('result_count', 'none')} "
+                f"lens_error='{lens_error}' "
+                f"official_search={official_search_info.get('status', 'unknown')} "
+                f"search_titles={official_search_info.get('title_count', 'none')} "
+                f"search_organic={official_search_info.get('organic_result_count', 'none')} "
+                f"search_official_urls={official_search_info.get('official_page_count', official_search_info.get('result_count', 'none'))} "
+                f"search_http={official_search_info.get('http_status', 'none')} "
+                f"search_attempts={official_search_info.get('attempts', 'none')} "
+                f"search_query='{search_query}' search_error='{search_error}' "
                 f'reason="{reason}" candidates={candidate_text} '
                 f"unresolved_imdb_ids={unresolved_imdb} unresolved_tmdb_ids={unresolved_tmdb}",
                 flush=True,
