@@ -70,7 +70,7 @@ def _clean_hint(value: str) -> str | None:
     # Remove bracketed release-year labels before punctuation is normalized,
     # while preserving numeric movie titles such as "1917" and "2001".
     value = re.sub(
-        r"(?<!\\w)[\\[(（](?:19|20)\\d{2}[\\])）](?!\\w)",
+        r"(?<!\w)[\[(（](?:19|20)\d{2}[\])）](?!\w)",
         " ",
         value,
     )
