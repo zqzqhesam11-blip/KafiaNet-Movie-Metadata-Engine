@@ -1299,6 +1299,28 @@ class MetadataEngine:
                     flush=True,
                 )
 
+            for lens_result in (identity_evidence.get("backlinks") or [])[:12]:
+                lens_metadata = lens_result.get("metadata_clues") or {}
+                lens_page = (
+                    lens_result.get("resolved_url")
+                    or (lens_result.get("resolved_urls") or [None])[0]
+                    or lens_result.get("url")
+                )
+                print(
+                    f"[KafiaNet] [{position}/{total}] LENS_RESULT "
+                    f"title='{safe_log_detail(lens_result.get('title'), 130)}' "
+                    f"snippet='{safe_log_detail(lens_result.get('content'), 360)}' "
+                    f"year_clues={','.join(str(value) for value in (lens_metadata.get('years') or [])) or 'none'} "
+                    f"country_clues='{safe_log_detail(', '.join(lens_metadata.get('countries') or []), 90)}' "
+                    f"director_clues='{safe_log_detail(', '.join(lens_metadata.get('directors') or []), 90)}' "
+                    f"cast_clues='{safe_log_detail(', '.join(lens_metadata.get('cast') or []), 110)}' "
+                    f"character_clues='{safe_log_detail(', '.join(lens_metadata.get('characters') or []), 90)}' "
+                    f"rating_clues='{safe_log_detail(', '.join(str(value.get('value')) for value in (lens_metadata.get('ratings') or []) if isinstance(value, dict)), 60)}' "
+                    f"url='{safe_log_detail(lens_page, 180)}' "
+                    f"url_error='{safe_log_detail(lens_result.get('url_resolution_error'), 120)}'",
+                    flush=True,
+                )
+
             for candidate_report in (identity_evidence.get("candidate_identities") or [])[:12]:
                 profile = candidate_report.get("metadata_profile") or {}
                 metadata = candidate_report.get("metadata_match") or {}
