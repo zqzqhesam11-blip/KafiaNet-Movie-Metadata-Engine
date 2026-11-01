@@ -184,6 +184,86 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
         self.assertEqual(api.client.post.call_count, 2)
 
+    def test_retries_inner_502_envelope_for_lens(self):
+        failed = Mock()
+        failed.status_code = 200
+        failed.text = '{"status_code":502,"body":"upstream gateway"}'
+        failed.json.return_value = {"status_code": 502, "body": "upstream gateway"}
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = '{"visual_matches":[]}'
+        recovered.json.return_value = {"visual_matches": []}
+        api = self.make_client()
+        api.client.post.side_effect = [failed, recovered]
+
+        with patch("app.google_lens.time.sleep"):
+            self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
+
+        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(api.last_lens_diagnostics["attempts"], 2)
+        self.assertEqual(api.last_lens_diagnostics["status"], "no_matches")
+
+    def test_retries_inner_503_envelope_for_official_id_search(self):
+        failed = Mock()
+        failed.status_code = 200
+        failed.text = '{"status_code":503,"body":"temporarily unavailable"}'
+        failed.json.return_value = {"status_code": 503, "body": "temporarily unavailable"}
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = '{"organic":[{"title":"Movie - IMDb","link":"https://www.imdb.com/title/tt1234567/"}]}'
+        recovered.json.return_value = {
+            "organic": [{
+                "title": "Movie - IMDb",
+                "link": "https://www.imdb.com/title/tt1234567/",
+            }]
+        }
+        api = self.make_client()
+        api.client.post.side_effect = [failed, recovered]
+
+        with patch("app.google_lens.time.sleep"):
+            rows = api.search_official_id_pages([{"title": "Movie from Lens"}])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(api.last_official_search_diagnostics["attempts"], 2)
+        self.assertEqual(api.last_official_search_diagnostics["official_page_count"], 1)
+
+    def test_retries_remote_protocol_errors(self):
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = '{"visual_matches":[]}'
+        recovered.json.return_value = {"visual_matches": []}
+        api = self.make_client()
+        api.client.post.side_effect = [
+            httpx.RemoteProtocolError("peer closed connection"),
+            recovered,
+        ]
+
+        with patch("app.google_lens.time.sleep"):
+            self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
+        self.assertEqual(api.client.post.call_count, 2)
+
+    def test_official_search_does_not_require_brand_keywords_in_page_text(self):
+        api = self.make_client({"organic": []})
+        api.search_official_id_pages([{"title": "Buladó"}])
+        request_url = api.client.post.call_args.kwargs["json"]["url"]
+        decoded = __import__("urllib.parse", fromlist=["unquote"]).unquote(request_url)
+        self.assertIn('"Buladó"', decoded)
+        self.assertIn("site:imdb.com/title", decoded)
+        self.assertIn("site:themoviedb.org/movie", decoded)
+        self.assertNotIn("(IMDb OR TMDB)", decoded)
+
+    def test_accepts_google_organic_results_alias(self):
+        api = self.make_client({
+            "organic_results": [{
+                "title": "Movie on TMDB",
+                "link": "https://www.themoviedb.org/movie/123456",
+            }]
+        })
+        rows = api.search_official_id_pages([{"title": "Movie"}])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["url"], "https://www.themoviedb.org/movie/123456")
+
     def test_non_json_response_is_not_mistaken_for_no_matches(self):
         response = Mock()
         response.status_code = 200
@@ -277,8 +357,8 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(rows[1]["url"], "https://www.themoviedb.org/movie/10754")
         self.assertEqual(rows[0]["provider"], "google_official_id_search")
         request_url = api.client.post.call_args.kwargs["json"]["url"]
-        self.assertIn("IMDb", request_url)
-        self.assertIn("TMDB", request_url)
+        decoded_query = __import__("urllib.parse", fromlist=["unquote"]).unquote(request_url)
+        self.assertNotIn("(IMDb OR TMDB)", decoded_query)
         self.assertIn("site%3Aimdb.com%2Ftitle", request_url)
         self.assertIn("site%3Athemoviedb.org%2Fmovie", request_url)
         self.assertEqual(api.client.post.call_args.kwargs["json"]["format"], "raw")

@@ -62,6 +62,8 @@ class BrightDataGoogleLensClient:
             timeout=12.0,
             follow_redirects=False,
         )
+        self.last_lens_diagnostics: dict[str, Any] = {}
+        self.last_official_search_diagnostics: dict[str, Any] = {}
 
     def close(self) -> None:
         self.client.close()
@@ -230,7 +232,11 @@ class BrightDataGoogleLensClient:
 
         # Google Lens normally returns visual_matches. Bright Data's parsed image
         # response can also expose the equivalent ranked items under images.
-        for key in ("visual_matches", "exact_matches", "lens_results", "images", "similar_images", "organic"):
+        for key in (
+            "visual_matches", "exact_matches", "lens_results", "images",
+            "similar_images", "organic", "organic_results", "web_results",
+            "search_results",
+        ):
             value = payload.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)] if all(
@@ -357,12 +363,68 @@ class BrightDataGoogleLensClient:
         except (ValueError, TypeError):
             return None
 
-    def search_official_id_pages(self, lens_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Search Google for official IMDb/TMDB pages using Lens result title hints only.
+    def _post_serp_with_retries(
+        self,
+        target_url: str,
+        stage: str,
+    ) -> tuple[httpx.Response, Any, int, int]:
+        """POST one SERP request and retry transport or outer/inner transient failures.
 
+        Bright Data can return an HTTP-200 API envelope whose body carries the
+        actual upstream HTTP status. Retry that status too; otherwise a wrapped
+        Google 502 is incorrectly treated as a permanent per-film failure.
+        """
+        for attempt in range(MAX_TRANSIENT_RETRIES + 1):
+            try:
+                response = self.client.post(
+                    BRIGHTDATA_REQUEST_URL,
+                    json={"zone": self.zone, "url": target_url, "format": "raw"},
+                )
+            except httpx.TransportError as exc:
+                if attempt >= MAX_TRANSIENT_RETRIES:
+                    raise BrightDataAPIError(
+                        f"Bright Data {stage} transport failure after {attempt + 1} "
+                        f"attempt(s) ({type(exc).__name__}): {str(exc)[:220]}"
+                    ) from exc
+                time.sleep(min(2 ** attempt, 2))
+                continue
+
+            payload = self._safe_json(response)
+            try:
+                effective_status = int(response.status_code)
+            except (TypeError, ValueError):
+                effective_status = 0
+
+            if (
+                200 <= effective_status < 300
+                and isinstance(payload, dict)
+                and "status_code" in payload
+                and "body" in payload
+            ):
+                try:
+                    inner_status = int(payload.get("status_code") or 0)
+                except (TypeError, ValueError):
+                    inner_status = 0
+                if inner_status:
+                    effective_status = inner_status
+
+            if effective_status in TRANSIENT_HTTP_STATUSES and attempt < MAX_TRANSIENT_RETRIES:
+                time.sleep(min(2 ** attempt, 2))
+                continue
+
+            return response, payload, effective_status, attempt + 1
+
+        raise BrightDataAPIError(
+            f"Bright Data {stage} ended without a response after {MAX_TRANSIENT_RETRIES + 1} attempts"
+        )
+
+    def search_official_id_pages(self, lens_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Search official IMDb/TMDB movie paths using bounded Lens title hints only.
+
+        The official-domain restriction is the identity filter. Do not add an
+        extra IMDb/TMDB keyword requirement: it can suppress valid movie pages
+        whose indexed title/snippet does not contain those brand words.
         Folder names and image filenames are never passed into this method.
-        Search snippets are diagnostics; only official IMDb/TMDB URLs are returned
-        to the existing identifier resolution and cross-provider verification.
         """
         titles: list[str] = []
         seen: set[str] = set()
@@ -376,12 +438,22 @@ class BrightDataGoogleLensClient:
                 titles.append(title)
             if len(titles) >= MAX_OFFICIAL_SEARCH_TITLES:
                 break
+
         if not titles:
+            self.last_official_search_diagnostics = {
+                "status": "skipped_no_usable_lens_titles",
+                "title_count": 0,
+                "titles": [],
+                "query": "",
+                "organic_result_count": 0,
+                "official_page_count": 0,
+                "error": None,
+            }
             return []
 
         title_terms = " OR ".join(f'"{title}"' for title in titles)
         query = (
-            f'({title_terms}) (IMDb OR TMDB) '
+            f'({title_terms}) '
             '(site:imdb.com/title OR site:themoviedb.org/movie)'
         )
         search_url = "https://www.google.com/search?" + urlencode({
@@ -390,66 +462,93 @@ class BrightDataGoogleLensClient:
             "gl": "US",
             "brd_json": "1",
         })
+        self.last_official_search_diagnostics = {
+            "status": "requesting",
+            "title_count": len(titles),
+            "titles": titles[:MAX_OFFICIAL_SEARCH_TITLES],
+            "query": query[:700],
+            "organic_result_count": 0,
+            "official_page_count": 0,
+            "error": None,
+        }
 
-        response = None
-        for attempt in range(MAX_TRANSIENT_RETRIES + 1):
-            try:
-                response = self.client.post(
-                    BRIGHTDATA_REQUEST_URL,
-                    json={"zone": self.zone, "url": search_url, "format": "raw"},
-                )
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                if attempt >= MAX_TRANSIENT_RETRIES:
-                    raise BrightDataAPIError(
-                        f"Bright Data official IMDb/TMDB search failed after {attempt + 1} "
-                        f"attempt(s) ({type(exc).__name__}): {str(exc)[:200]}"
-                    ) from exc
-                time.sleep(min(2 ** attempt, 2))
-                continue
+        try:
+            response, payload, effective_status, attempts = self._post_serp_with_retries(
+                search_url,
+                "official IMDb/TMDB search",
+            )
+        except BrightDataAPIError as exc:
+            self.last_official_search_diagnostics.update({
+                "status": "error",
+                "error": f"{type(exc).__name__}: {str(exc)[:250]}",
+            })
+            raise
 
-            if response.status_code in TRANSIENT_HTTP_STATUSES and attempt < MAX_TRANSIENT_RETRIES:
-                time.sleep(min(2 ** attempt, 2))
-                continue
-            break
-
-        if response is None:
-            raise BrightDataAPIError("Bright Data official IMDb/TMDB search ended without a response")
-        if response.status_code < 200 or response.status_code >= 300:
-            detail = self._error_detail(self._safe_json(response), getattr(response, "text", "") or "")
-            message = self._http_error(response.status_code, detail)
-            if response.status_code in {402, 429}:
-                raise BrightDataQuotaError(response.status_code, message)
+        self.last_official_search_diagnostics.update({
+            "http_status": effective_status,
+            "attempts": attempts,
+        })
+        if effective_status < 200 or effective_status >= 300:
+            error_payload = payload.get("body") if (
+                isinstance(payload, dict) and "status_code" in payload and "body" in payload
+            ) else payload
+            detail = self._error_detail(
+                error_payload,
+                str(error_payload or getattr(response, "text", "") or ""),
+            )
+            message = self._http_error(effective_status, detail)
+            self.last_official_search_diagnostics.update({
+                "status": "quota_error" if effective_status in {402, 429} else "http_error",
+                "error": message,
+            })
+            if effective_status in {402, 429}:
+                raise BrightDataQuotaError(effective_status, message)
             raise BrightDataAPIError(message)
 
-        payload = self._safe_json(response)
         if payload is None:
-            raise BrightDataAPIError("Google official IMDb/TMDB search returned an empty or non-JSON response")
+            headers = getattr(response, "headers", {}) or {}
+            content_type = headers.get("content-type", "unknown") if hasattr(headers, "get") else "unknown"
+            content_length = headers.get("content-length", "unknown") if hasattr(headers, "get") else "unknown"
+            message = (
+                "Google official IMDb/TMDB search returned an empty or non-JSON response "
+                f"(HTTP {effective_status}, content-type={content_type}, "
+                f"content-length={content_length})"
+            )
+            self.last_official_search_diagnostics.update({"status": "invalid_response", "error": message})
+            raise BrightDataAPIError(message)
+
         if isinstance(payload, dict) and "status_code" in payload and "body" in payload:
-            try:
-                inner_status = int(payload.get("status_code") or 0)
-            except (TypeError, ValueError):
-                inner_status = 0
-            if inner_status and not 200 <= inner_status < 300:
-                detail = self._error_detail(payload.get("body"), str(payload.get("body") or ""))
-                message = self._http_error(inner_status, detail)
-                if inner_status in {402, 429}:
-                    raise BrightDataQuotaError(inner_status, message)
-                raise BrightDataAPIError(message)
             inner_body = payload.get("body")
+            if not str(inner_body or "").strip():
+                message = (
+                    "Bright Data API envelope was received but the official IMDb/TMDB "
+                    f"search body is empty (inner HTTP {effective_status})"
+                )
+                self.last_official_search_diagnostics.update({"status": "empty_body", "error": message})
+                raise BrightDataAPIError(message)
             if isinstance(inner_body, str):
                 try:
                     payload = json.loads(inner_body)
                 except ValueError as exc:
-                    raise BrightDataAPIError("Google official IMDb/TMDB search returned an invalid JSON body") from exc
+                    message = (
+                        "Google official IMDb/TMDB search returned a non-JSON API-envelope body "
+                        f"(inner HTTP {effective_status})"
+                    )
+                    self.last_official_search_diagnostics.update({"status": "invalid_body", "error": message})
+                    raise BrightDataAPIError(message) from exc
             elif isinstance(inner_body, dict):
                 payload = inner_body
 
         rows = self._rows_from_payload(payload)
         if rows is None:
-            raise BrightDataAPIError(
-                "Google official IMDb/TMDB search returned no organic result list; "
-                + self._payload_shape(payload)
-            )
+            shape = self._payload_shape(payload)
+            message = "Google official IMDb/TMDB search returned no organic result list; " + shape
+            self.last_official_search_diagnostics.update({
+                "status": "unparsed_response",
+                "payload_shape": shape,
+                "error": message,
+            })
+            raise BrightDataAPIError(message)
 
         normalized: list[dict[str, Any]] = []
         for item in rows[:MAX_NORMALIZED_RESULTS]:
@@ -468,89 +567,114 @@ class BrightDataGoogleLensClient:
                 "search_query": query[:700],
                 "position": item.get("position") or item.get("rank"),
             })
+
+        self.last_official_search_diagnostics.update({
+            "status": "ok" if normalized else "no_official_pages",
+            "organic_result_count": len(rows),
+            "official_page_count": len(normalized),
+            "error": None,
+        })
         return normalized
 
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
-        """Search a public poster URL; one SERP API request per poster, no automatic retry."""
+        """Search one public poster URL with bounded retries for transient provider failures."""
         target_url = self._lens_request_url(image_url)
-        response = None
-        for attempt in range(MAX_TRANSIENT_RETRIES + 1):
-            try:
-                response = self.client.post(
-                    BRIGHTDATA_REQUEST_URL,
-                    json={"zone": self.zone, "url": target_url, "format": "raw"},
-                )
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                if attempt >= MAX_TRANSIENT_RETRIES:
-                    raise BrightDataAPIError(
-                        f"Bright Data network error after {attempt + 1} attempt(s) "
-                        f"({type(exc).__name__}): {str(exc)[:250]}"
-                    ) from exc
-                time.sleep(min(2 ** attempt, 2))
-                continue
-
-            if response.status_code in TRANSIENT_HTTP_STATUSES and attempt < MAX_TRANSIENT_RETRIES:
-                time.sleep(min(2 ** attempt, 2))
-                continue
-            break
-
-        if response is None:
-            raise BrightDataAPIError("Bright Data request ended without a response")
-
-        body = response.text or ""
+        self.last_lens_diagnostics = {
+            "status": "requesting",
+            "http_status": None,
+            "attempts": 0,
+            "result_count": 0,
+            "error": None,
+        }
         try:
-            payload = response.json()
-        except ValueError:
-            payload = None
-        if response.status_code < 200 or response.status_code >= 300:
-            message = self._http_error(response.status_code, self._error_detail(payload, body))
-            if response.status_code in {402, 429}:
-                raise BrightDataQuotaError(response.status_code, message)
+            response, payload, effective_status, attempts = self._post_serp_with_retries(
+                target_url,
+                "Google Lens image search",
+            )
+        except BrightDataAPIError as exc:
+            self.last_lens_diagnostics.update({
+                "status": "error",
+                "attempts": MAX_TRANSIENT_RETRIES + 1,
+                "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            })
+            raise
+
+        body = getattr(response, "text", "") or ""
+        self.last_lens_diagnostics.update({
+            "http_status": effective_status,
+            "attempts": attempts,
+        })
+        if effective_status < 200 or effective_status >= 300:
+            error_payload = payload.get("body") if (
+                isinstance(payload, dict) and "status_code" in payload and "body" in payload
+            ) else payload
+            message = self._http_error(
+                effective_status,
+                self._error_detail(error_payload, str(error_payload or body)),
+            )
+            self.last_lens_diagnostics.update({
+                "status": "quota_error" if effective_status in {402, 429} else "http_error",
+                "error": message,
+            })
+            if effective_status in {402, 429}:
+                raise BrightDataQuotaError(effective_status, message)
             raise BrightDataAPIError(message)
+
         if payload is None:
             headers = getattr(response, "headers", {}) or {}
             content_type = headers.get("content-type", "unknown") if hasattr(headers, "get") else "unknown"
             content_length = headers.get("content-length", "unknown") if hasattr(headers, "get") else "unknown"
-            raise BrightDataAPIError(
+            message = (
                 "Bright Data returned an empty or non-JSON response "
-                f"(HTTP {response.status_code}, content-type={content_type}, "
-                f"content-length={content_length}); request uses format=raw. "
-                "Verify the SERP API zone configuration and Bright Data request delivery."
+                f"(HTTP {effective_status}, content-type={content_type}, "
+                f"content-length={content_length}); request uses format=raw and brd_json=1"
             )
+            self.last_lens_diagnostics.update({"status": "invalid_response", "error": message})
+            raise BrightDataAPIError(message)
+
         if isinstance(payload, dict) and "status_code" in payload and "body" in payload:
-            try:
-                inner_status = int(payload.get("status_code") or 0)
-            except (TypeError, ValueError):
-                inner_status = 0
             inner_body = payload.get("body")
-            if inner_status and not 200 <= inner_status < 300:
-                detail = self._error_detail(inner_body if isinstance(inner_body, dict) else None,
-                                            inner_body if isinstance(inner_body, str) else "")
-                message = self._http_error(inner_status, detail)
-                if inner_status in {402, 429}:
-                    raise BrightDataQuotaError(inner_status, message)
-                raise BrightDataAPIError(message)
             if not str(inner_body or "").strip():
-                raise BrightDataAPIError(
+                message = (
                     "Bright Data API envelope was received but its body is empty "
-                    f"(inner HTTP {inner_status or 'unknown'}); no Google Lens results were delivered"
+                    f"(inner HTTP {effective_status}); no Google Lens results were delivered"
                 )
+                self.last_lens_diagnostics.update({"status": "empty_body", "error": message})
+                raise BrightDataAPIError(message)
+
         if isinstance(payload, dict) and any(payload.get(key) for key in ("error", "errors")):
             detail = self._error_detail(payload)
-            raise BrightDataAPIError(f"Bright Data returned an API error: {detail or 'unknown provider error'}")
+            message = f"Bright Data returned an API error: {detail or 'unknown provider error'}"
+            self.last_lens_diagnostics.update({"status": "provider_error", "error": message})
+            raise BrightDataAPIError(message)
 
         rows = self._rows_from_payload(payload)
         if rows is None:
-            raise BrightDataAPIError(
+            shape = self._payload_shape(payload)
+            message = (
                 "Bright Data returned JSON, but no recognized Google Lens result list was present; "
-                + self._payload_shape(payload)
+                + shape
             )
-        return self._normalize_matches(rows)
+            self.last_lens_diagnostics.update({
+                "status": "unparsed_response",
+                "payload_shape": shape,
+                "error": message,
+            })
+            raise BrightDataAPIError(message)
+
+        normalized = self._normalize_matches(rows)
+        self.last_lens_diagnostics.update({
+            "status": "ok" if normalized else "no_matches",
+            "raw_result_count": len(rows),
+            "result_count": len(normalized),
+            "error": None,
+        })
+        return normalized
 
     @staticmethod
     def _http_error(status: int, detail: str) -> str:
         messages = {
-            400: "Bright Data rejected the Google Lens request; verify the poster URL and SERP zone",
+            400: "Bright Data rejected the SERP request; verify the request URL and SERP zone",
             401: "Bright Data authentication failed; verify BRIGHTDATA_API_KEY in Hostless",
             402: "Bright Data reports no available free/API credits; do not add funds or enable a paid plan",
             403: "Bright Data denied this request; verify the SERP zone is active and permitted",
