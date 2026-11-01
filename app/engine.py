@@ -376,6 +376,24 @@ class MetadataEngine:
                     "error": type(exc).__name__, "message": str(exc)[:250],
                 })
 
+        # Preserve which Lens result title carried each official ID backlink.
+        # This lets the same metadata fingerprint validate ID-based candidates too.
+        for candidate_id, links in source_ids.items():
+            for backlink in evidence.get("backlinks") or []:
+                backlink_tmdb_ids = {
+                    str(value) for value in (backlink.get("tmdb_ids") or [])
+                }
+                backlink_imdb_ids = {
+                    str(value).lower() for value in (backlink.get("imdb_ids") or [])
+                }
+                if (
+                    str(candidate_id) in backlink_tmdb_ids
+                    or bool(backlink_imdb_ids & {str(value).lower() for value in links["imdb_ids"]})
+                ):
+                    result_title = str(backlink.get("lens_title") or "").strip()
+                    if result_title:
+                        links["lens_result_titles"].add(result_title)
+
         # If Lens did not expose an official ID URL, search TMDB using only the
         # Lens result titles. This is not a second Google search and never uses
         # the catalog folder name, the poster filename, the image URL or snippets.
