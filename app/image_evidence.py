@@ -127,16 +127,22 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
             continue
-        raw_values = result.get("resolved_urls") or []
-        if not raw_values:
-            raw_values = [
-                value for value in (
-                    result.get("resolved_url"),
-                    result.get("url"),
-                    *(result.get("url_candidates") or []),
-                )
-                if isinstance(value, str) and value.strip()
-            ]
+        raw_values = []
+        raw_values.extend(
+            value for value in (result.get("resolved_urls") or [])
+            if isinstance(value, str) and value.strip()
+        )
+        raw_values.extend(
+            value for value in (
+                result.get("resolved_url"),
+                result.get("url"),
+                *(result.get("url_candidates") or []),
+            )
+            if isinstance(value, str) and value.strip()
+        )
+        # Count each distinct URL once even when the same link appears in both
+        # the primary url field and url_candidates.
+        raw_values = list(dict.fromkeys(raw_values))
         for raw_value in raw_values:
             if not isinstance(raw_value, str) or not raw_value.strip():
                 continue
