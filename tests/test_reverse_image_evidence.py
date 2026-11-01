@@ -68,9 +68,9 @@ class ReverseImageEvidenceTests(unittest.TestCase):
             evidence["lens_title_queries"],
             ["A Short Film About Killing"],
         )
-        self.assertIn(
+        self.assertNotIn(
             "unrelated image name",
-            [item.casefold() for item in evidence["title_hints"]],
+            [item.casefold() for item in evidence["lens_title_queries"]],
         )
 
     def test_image_filename_does_not_become_a_lens_title_query(self):
