@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import Mock
 
@@ -51,6 +52,42 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertIn("brd_json=1", target)
         self.assertIn("brd_lens=visual_matches", target)
         self.assertIn("raw.githubusercontent.com", target)
+
+    def test_accepts_brightdata_images_array_and_original_image(self):
+        api = self.make_client({
+            "images": [{
+                "global_rank": 1,
+                "title": "The Matrix (1999)",
+                "link": "https://www.imdb.com/title/tt0133093/",
+                "image": "https://thumb.example.com/matrix.jpg",
+                "original_image": "https://cdn.example.com/matrix-original.jpg",
+            }]
+        })
+        result = api.search_by_image_url("https://example.com/poster.jpg")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["url"], "https://www.imdb.com/title/tt0133093/")
+        self.assertEqual(result[0]["source"], "https://cdn.example.com/matrix-original.jpg")
+        self.assertEqual(result[0]["position"], 1)
+
+    def test_unwraps_json_encoded_brightdata_body(self):
+        nested = {
+            "data": {
+                "images": [{
+                    "title": "Movie poster",
+                    "link": "https://example.com/movie",
+                    "original_image": "https://example.com/poster-full.jpg",
+                }]
+            }
+        }
+        api = self.make_client({"body": json.dumps(nested)})
+        result = api.search_by_image_url("https://example.com/poster.jpg")
+        self.assertEqual(result[0]["title"], "Movie poster")
+        self.assertEqual(result[0]["source"], "https://example.com/poster-full.jpg")
+
+    def test_unrecognized_json_includes_safe_shape_diagnostics(self):
+        api = self.make_client({"general": {"query": "hidden"}, "metadata": {"id": "private"}})
+        with self.assertRaisesRegex(BrightDataAPIError, "general=object\[query\]"):
+            api.search_by_image_url("https://example.com/poster.jpg")
 
     def test_empty_visual_matches_returns_empty_list(self):
         api = self.make_client({"visual_matches": []})
