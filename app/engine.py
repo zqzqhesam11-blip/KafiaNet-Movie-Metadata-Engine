@@ -209,12 +209,16 @@ class MetadataEngine:
                 key=int,
             )
 
-            if tmdb_imdb_id and linked_imdb_ids and tmdb_imdb_id not in linked_imdb_ids:
+            if tmdb_imdb_id and linked_imdb_ids and (
+                tmdb_imdb_id not in linked_imdb_ids or len(linked_imdb_ids) != 1
+            ):
                 identity_mismatches.append({
                     "tmdb_id": int(candidate_id),
                     "tmdb_imdb_id": tmdb_imdb_id,
                     "linked_imdb_ids": linked_imdb_ids,
-                    "reason": "IMDb backlink ID does not match TMDB external_ids.imdb_id",
+                    "reason": (
+                        "TMDB external_ids.imdb_id does not uniquely match the IMDb backlink IDs"
+                    ),
                 })
                 continue
 
@@ -268,7 +272,15 @@ class MetadataEngine:
         ]
         if len(identities) == 1:
             selected_id = next(iter(identities))
-            if unresolved_imdb_ids and not identities[selected_id]["cross_provider_match"]:
+            sole_identity = identities[selected_id]
+            if not sole_identity.get("imdb_id"):
+                return None, {
+                    "status": "review",
+                    "confidence": 0.0,
+                    "reason": "The single official TMDB/IMDb candidate has no verified IMDb identifier; both IDs are required for READY",
+                    "candidate_ids": [int(selected_id)],
+                }, evidence
+            if unresolved_imdb_ids and not sole_identity["cross_provider_match"]:
                 return None, {
                     "status": "review",
                     "confidence": 0.0,
