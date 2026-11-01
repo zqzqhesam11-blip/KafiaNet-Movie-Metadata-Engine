@@ -115,6 +115,20 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertFalse(evidence["id_resolution"]["folder_name_used"])
         self.assertFalse(evidence["id_resolution"]["image_filename_used"])
 
+    def test_tmdb_id_is_ready_even_when_tmdb_has_no_imdb_external_id(self):
+        engine = self.make_engine()
+        engine.tmdb.records[10754]["external_ids"] = {}
+
+        candidate, match, _ = engine._find_movie([{
+            "title": "Ignore title text",
+            "resolved_url": "https://www.themoviedb.org/movie/10754",
+        }])
+
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 10754)
+        self.assertIsNone(match["imdb_id"])
+
     def test_lens_title_without_tmdb_movie_id_stays_in_review(self):
         engine = self.make_engine()
 
