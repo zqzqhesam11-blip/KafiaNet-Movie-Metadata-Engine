@@ -121,6 +121,8 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
     result_hosts: dict[str, int] = {}
     result_url_count = 0
     google_wrapper_count = 0
+    google_goto_url_count = 0
+    result_url_paths: dict[str, int] = {}
 
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
@@ -145,10 +147,14 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
                 raw_parsed = None
             if raw_parsed:
                 raw_host = (raw_parsed.hostname or "").casefold().rstrip(".")
-                raw_path = raw_parsed.path.rstrip("/").casefold()
+                raw_path = raw_parsed.path.rstrip("/").casefold() or "/"
+                path_label = f"{raw_host}{raw_path}"
+                result_url_paths[path_label] = result_url_paths.get(path_label, 0) + 1
                 if raw_host == "google.com" or raw_host.endswith(".google.com"):
-                    if raw_path in {"/url", "/imgres"}:
+                    if raw_path in {"/url", "/imgres", "/goto"}:
                         google_wrapper_count += 1
+                    if raw_path == "/goto":
+                        google_goto_url_count += 1
 
         for destination in _resolved_destination_urls(result):
             try:
@@ -173,5 +179,9 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
         "official_tmdb_ids": movie_ids,
         "result_url_count": result_url_count,
         "google_wrapper_count": google_wrapper_count,
+        "google_goto_url_count": google_goto_url_count,
+        "result_url_paths": dict(
+            sorted(result_url_paths.items(), key=lambda item: (-item[1], item[0]))[:12]
+        ),
         "result_hosts": top_hosts,
     }
