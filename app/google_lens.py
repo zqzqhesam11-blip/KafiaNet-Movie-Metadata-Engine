@@ -306,11 +306,8 @@ class BrightDataGoogleLensClient:
             page_url = page_urls[0] if page_urls else ""
             # Bright Data's image schema uses original_image for the full-size
             # image and image for its preview; keep the full-size URL first.
-            image_url = cls._first_url(
-                item,
-                ("original_image", "image_url", "original", "image", "thumbnail", "thumbnail_url"),
-            )
             source_url = cls._first_url(item, ("source",))
+            source_is_image = False
             if source_url:
                 source_path = urlparse(source_url).path.casefold()
                 image_suffixes = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif")
@@ -318,11 +315,15 @@ class BrightDataGoogleLensClient:
                     source_path.endswith(image_suffixes)
                     or "/t/p/" in source_path
                 )
-                if source_is_image and not image_url:
-                    image_url = source_url
-                elif not source_is_image and source_url not in page_urls:
-                    page_urls.append(source_url)
-                    page_url = page_urls[0] if page_urls else source_url
+            # Bright Data's "source" commonly points to the original full-size
+            # image, so preserve its precedence over the preview/thumbnail.
+            image_url = source_url if source_is_image else cls._first_url(
+                item,
+                ("original_image", "image_url", "original", "image", "thumbnail", "thumbnail_url"),
+            )
+            if source_url and not source_is_image and source_url not in page_urls:
+                page_urls.append(source_url)
+                page_url = page_urls[0] if page_urls else source_url
             if not page_url and image_url:
                 page_url = image_url
             description = str(
