@@ -88,3 +88,24 @@ def extract_tmdb_movie_ids(results: list[dict]) -> list[int]:
                 seen.add(movie_id)
                 movie_ids.append(movie_id)
     return movie_ids
+
+def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
+    """Count distinct official TMDB movie URLs and IDs in resolved Lens results."""
+    official_urls: set[str] = set()
+    movie_ids: list[int] = []
+    seen_ids: set[int] = set()
+    for result in results or []:
+        if not isinstance(result, dict) or result.get("error"):
+            continue
+        for destination in _resolved_destination_urls(result):
+            movie_id = tmdb_movie_id_from_url(destination)
+            if movie_id is None:
+                continue
+            official_urls.add(destination)
+            if movie_id not in seen_ids:
+                seen_ids.add(movie_id)
+                movie_ids.append(movie_id)
+    return {
+        "official_tmdb_url_count": len(official_urls),
+        "official_tmdb_ids": movie_ids,
+    }

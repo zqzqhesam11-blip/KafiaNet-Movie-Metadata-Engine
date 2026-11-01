@@ -28,9 +28,9 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             api.client.post.return_value = response
         return api
 
-    def test_search_uses_brightdata_rest_and_google_lens_visual_matches(self):
+    def test_search_uses_brightdata_rest_and_google_lens_exact_matches(self):
         api = self.make_client({
-            "visual_matches": [{
+            "exact_matches": [{
                 "position": 1,
                 "title": "The Matrix (1999) - IMDb",
                 "link": "https://www.imdb.com/title/tt0133093/",
@@ -51,11 +51,11 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         target = call.kwargs["json"]["url"]
         self.assertIn("lens.google.com/uploadbyurl?", target)
         self.assertIn("brd_json=1", target)
-        self.assertIn("brd_lens=visual_matches", target)
+        self.assertIn("brd_lens=exact_matches", target)
         self.assertIn("raw.githubusercontent.com", target)
 
     def test_lens_image_search_uses_documented_parameters_only(self):
-        api = self.make_client({"visual_matches": []})
+        api = self.make_client({"exact_matches": []})
 
         rows = api.search_by_image_url("https://example.com/poster.jpg")
 
@@ -65,8 +65,9 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         from urllib.parse import parse_qs, urlparse
         query = parse_qs(urlparse(request_url).query)
         self.assertEqual(query["url"], ["https://example.com/poster.jpg"])
-        self.assertEqual(query["brd_lens"], ["visual_matches"])
+        self.assertEqual(query["brd_lens"], ["exact_matches"])
         self.assertEqual(query["hl"], ["en"])
+        self.assertEqual(api.last_lens_diagnostics["lens_tab"], "exact_matches")
         self.assertNotIn("q", query)
         self.assertNotIn("query", query)
 
@@ -88,7 +89,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
 
     def test_unwraps_brightdata_json_api_envelope(self):
         results = {
-            "visual_matches": [{
+            "exact_matches": [{
                 "title": "A Short Film About Killing (1988)",
                 "link": "https://www.imdb.com/title/tt0095468/",
                 "source": "https://images.example.com/poster.jpg",
@@ -121,9 +122,9 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
 
         recovered = Mock()
         recovered.status_code = 200
-        recovered.text = '{"visual_matches":[]}'
+        recovered.text = '{"exact_matches":[]}'
         recovered.headers = {"content-type": "application/json", "content-length": "21"}
-        recovered.json.return_value = {"visual_matches": []}
+        recovered.json.return_value = {"exact_matches": []}
 
         api = self.make_client()
         api.client.post.side_effect = [empty, recovered]
@@ -169,16 +170,16 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         with self.assertRaisesRegex(BrightDataAPIError, r"general=object\[query\]"):
             api.search_by_image_url("https://example.com/poster.jpg")
 
-    def test_empty_visual_matches_returns_empty_list(self):
-        api = self.make_client({"visual_matches": []})
+    def test_empty_exact_matches_returns_empty_list(self):
+        api = self.make_client({"exact_matches": []})
         self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
 
     def test_supports_nested_google_lens_results(self):
-        api = self.make_client({"data": {"visual_matches": [{"title": "Movie", "link": "https://example.com/movie"}]}})
+        api = self.make_client({"data": {"exact_matches": [{"title": "Movie", "link": "https://example.com/movie"}]}})
         self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg")[0]["title"], "Movie")
 
     def test_invalid_url_is_rejected_before_network_request(self):
-        api = self.make_client({"visual_matches": []})
+        api = self.make_client({"exact_matches": []})
         with self.assertRaisesRegex(BrightDataAPIError, "public HTTPS"):
             api.search_by_image_url("http://localhost/poster.jpg")
         api.client.post.assert_not_called()
@@ -206,8 +207,8 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         failed.json.side_effect = ValueError("not JSON")
         recovered = Mock()
         recovered.status_code = 200
-        recovered.text = '{"visual_matches":[]}'
-        recovered.json.return_value = {"visual_matches": []}
+        recovered.text = '{"exact_matches":[]}'
+        recovered.json.return_value = {"exact_matches": []}
         api = self.make_client()
         api.client.post.side_effect = [failed, recovered]
         with patch("app.google_lens.time.sleep"):
@@ -218,8 +219,8 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
     def test_transient_network_error_is_retried(self):
         recovered = Mock()
         recovered.status_code = 200
-        recovered.text = '{"visual_matches":[]}'
-        recovered.json.return_value = {"visual_matches": []}
+        recovered.text = '{"exact_matches":[]}'
+        recovered.json.return_value = {"exact_matches": []}
         api = self.make_client()
         api.client.post.side_effect = [httpx.ConnectError("temporary failure"), recovered]
         with patch("app.google_lens.time.sleep"):
@@ -233,8 +234,8 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         failed.json.return_value = {"status_code": 502, "body": "upstream gateway"}
         recovered = Mock()
         recovered.status_code = 200
-        recovered.text = '{"visual_matches":[]}'
-        recovered.json.return_value = {"visual_matches": []}
+        recovered.text = '{"exact_matches":[]}'
+        recovered.json.return_value = {"exact_matches": []}
         api = self.make_client()
         api.client.post.side_effect = [failed, recovered]
 
@@ -248,8 +249,8 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
     def test_retries_remote_protocol_errors(self):
         recovered = Mock()
         recovered.status_code = 200
-        recovered.text = '{"visual_matches":[]}'
-        recovered.json.return_value = {"visual_matches": []}
+        recovered.text = '{"exact_matches":[]}'
+        recovered.json.return_value = {"exact_matches": []}
         api = self.make_client()
         api.client.post.side_effect = [
             httpx.RemoteProtocolError("peer closed connection"),
@@ -272,7 +273,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
 
 
     def test_resolves_google_goto_using_location_without_following_target(self):
-        api = self.make_client({"visual_matches": []})
+        api = self.make_client({"exact_matches": []})
         api.redirect_client = Mock()
         response = Mock()
         response.status_code = 302
@@ -294,7 +295,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         api.redirect_client.get.assert_called_once_with(goto_url)
 
     def test_direct_official_links_do_not_trigger_google_redirect_requests(self):
-        api = self.make_client({"visual_matches": []})
+        api = self.make_client({"exact_matches": []})
         api.redirect_client = Mock()
         direct_url = "https://www.themoviedb.org/movie/10754-a-short-film-about-killing"
 
@@ -305,7 +306,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         api.redirect_client.get.assert_not_called()
 
     def test_uses_followed_destination_when_location_header_is_missing(self):
-        api = self.make_client({"visual_matches": []})
+        api = self.make_client({"exact_matches": []})
         api.redirect_client = Mock()
         first = Mock()
         first.status_code = 404

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from app.engine import MetadataEngine
 from app.tmdb import TMDBClient
+from app.image_evidence import tmdb_movie_url_diagnostics
 
 
 def movie_details(tmdb_id: int, imdb_id: str | None, title: str) -> dict:
@@ -242,6 +243,30 @@ class IdOnlyIdentityTests(unittest.TestCase):
         )
         self.assertFalse(record["original"]["folder_name_used_for_matching"])
 
+
+
+    def test_tmdb_url_diagnostics_count_only_official_movie_destinations(self):
+        diagnostics = tmdb_movie_url_diagnostics([
+            {
+                "url": "https://www.themoviedb.org/movie/10754",
+                "resolved_urls": [
+                    "https://www.themoviedb.org/movie/10754",
+                    "https://www.themoviedb.org/movie/10754-a-short-film",
+                    "https://www.imdb.com/title/tt0095468/",
+                ],
+            },
+            {
+                "url": "https://evil.example/movie/31056",
+                "resolved_urls": ["https://evil.example/movie/31056"],
+            },
+            {
+                "error": "provider failure",
+                "url": "https://www.themoviedb.org/movie/99999",
+            },
+        ])
+
+        self.assertEqual(diagnostics["official_tmdb_url_count"], 2)
+        self.assertEqual(diagnostics["official_tmdb_ids"], [10754])
 
 if __name__ == "__main__":
     unittest.main()

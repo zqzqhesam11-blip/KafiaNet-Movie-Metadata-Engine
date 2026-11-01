@@ -6,7 +6,7 @@ Cloud worker for enriching the public KafiaNet poster catalog with verified TMDB
 
 - Source images: `zqzqhesam11-blip/KafiaNet-Movie-Posters` (public).
 - Engine code: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine`.
-- Reverse-image provider: Google Lens through the Bright Data SERP API.
+- Reverse-image provider: Google Lens `exact_matches` tab through the Bright Data SERP API.
 - Metadata results are written to the poster repository only when APPLY is explicitly requested.
 
 ## Free-tier and no-payment setup
@@ -18,7 +18,7 @@ To keep this project free:
 - Do not add a payment card, deposit funds, or activate a paid plan.
 - Do not configure automatic top-ups or any paid balance.
 - If Bright Data reports HTTP 402 or 429, stop the batch. Do not retry repeatedly and do not add funds.
-- Each poster uses Google Lens image search only. The engine extracts only numeric movie IDs from official `themoviedb.org/movie/<id>` result destinations. It does not use Lens titles, snippets, countries, years, IMDb URLs, image URLs, poster filenames or source-folder names as identity inputs. No TMDB text search is performed.
+- Each poster uses the Google Lens `exact_matches` tab. The engine extracts only numeric movie IDs from official `themoviedb.org/movie/<id>` result destinations. It does not use Lens titles, snippets, countries, years, IMDb URLs, image URLs, poster filenames or source-folder names as identity inputs. No TMDB text search is performed.
 - At most two bounded retries are made for transient 5xx gateway errors, transport failures, and 5xx statuses inside Bright Data's HTTP-200 response envelope. HTTP 402/429 quota responses are never retried and stop the batch.
 - Bright Data free credits may be shared with other products or tools using the same account. Keep the key private.
 
@@ -42,8 +42,8 @@ References:
 - Folder names, folder years, poster filenames, image URLs, Lens text, snippets and catalog labels are never used as movie identity inputs.
 - No movie-title search, country search, title similarity scoring, metadata fingerprint comparison, or IMDb-only identity resolution is performed.
 - Every READY JSON and `metadata/index.json` row records the `tmdb_id` explicitly. The `imdb_id` is also saved when TMDB supplies it; otherwise it remains null. TMDB IDs are never invented.
-- A failed, blocked, or unparsed live response is recorded as an error, not as a successful empty result. Previously saved usable reverse-image evidence remains reusable.
-- Each per-film terminal result reports Lens HTTP status, retry count, result count and error, plus the TMDB movie IDs returned by Lens and the TMDB details-resolution outcome. These diagnostics do not include API secrets.
+- A failed, blocked, or unparsed live response is recorded as an error, not as a successful empty result. Previously saved results are reusable only when their stored diagnostics explicitly identify the `exact_matches` tab; older `visual_matches` evidence is ignored.
+- Each per-film terminal result reports the Lens tab, HTTP status, retry count, result count and error, the count of official TMDB movie URLs, their distinct numeric movie IDs, and the TMDB details-resolution outcome. These diagnostics do not include API secrets.
 - Duplicate identity is based on TMDB movie ID, not title spelling.
 - API keys and tokens are read only from Hostless environment variables. Never commit secrets.
 
