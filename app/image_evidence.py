@@ -121,14 +121,21 @@ def _resolved_destination_url(result: dict) -> str:
 
 
 def _resolved_destination_urls(result: dict) -> list[str]:
-    """Return every resolved result URL, retaining compatibility with older records."""
-    candidates: list[str] = []
-    for value in result.get("resolved_urls") or []:
-        if isinstance(value, str) and value.strip():
-            candidates.append(value.strip())
-    for value in (result.get("resolved_url"), result.get("url")):
-        if isinstance(value, str) and value.strip():
-            candidates.append(value.strip())
+    """Return resolved destinations, falling back to raw fields only for legacy records."""
+    resolved_values = result.get("resolved_urls") or []
+    if resolved_values:
+        candidates = [
+            value.strip()
+            for value in resolved_values
+            if isinstance(value, str) and value.strip()
+        ]
+    else:
+        candidates = [
+            value.strip()
+            for value in (result.get("resolved_url"), result.get("url"))
+            if isinstance(value, str) and value.strip()
+        ]
+
     destinations: list[str] = []
     seen: set[str] = set()
     for value in candidates:
