@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 import httpx
 
@@ -10,6 +11,7 @@ import httpx
 BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 GOOGLE_LENS_URL = "https://lens.google.com/uploadbyurl"
 MAX_NORMALIZED_RESULTS = 80
+MAX_GOTO_RESOLUTION_WORKERS = 8
 
 
 class BrightDataAPIError(RuntimeError):
@@ -43,9 +45,80 @@ class BrightDataGoogleLensClient:
             },
             timeout=max(15.0, float(timeout)),
         )
+        # Google Lens /goto links are opaque tokens. Resolve them with an
+        # unauthenticated, no-follow client and read only the Location header.
+        # Never send the Bright Data API key to Google.
+        self.redirect_client = httpx.Client(
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; KafiaNetMetadata/1.0)",
+                "Referer": "https://lens.google.com/",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            timeout=12.0,
+            follow_redirects=False,
+        )
 
     def close(self) -> None:
         self.client.close()
+        self.redirect_client.close()
+
+    @staticmethod
+    def _is_google_goto_url(value: str) -> bool:
+        try:
+            parsed = urlparse(str(value or "").strip())
+            host = (parsed.hostname or "").casefold().rstrip(".")
+        except ValueError:
+            return False
+        return (
+            parsed.scheme == "https"
+            and (host == "google.com" or host.endswith(".google.com"))
+            and parsed.path.rstrip("/") == "/goto"
+        )
+
+    def _resolve_goto_target(self, value: str) -> tuple[str, str | None]:
+        if not self._is_google_goto_url(value):
+            return value, None
+        try:
+            response = self.redirect_client.get(value)
+            location = str(response.headers.get("location") or "").strip()
+            if not location:
+                return "", f"Google /goto returned HTTP {response.status_code} without Location"
+            destination = urljoin(value, location)
+            parsed = urlparse(destination)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return "", "Google /goto returned an invalid destination URL"
+            return destination, None
+        except httpx.HTTPError as exc:
+            return "", f"Google /goto resolution failed ({type(exc).__name__})"
+
+    def resolve_result_urls(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Resolve every Google /goto result link without following the destination.
+
+        The destination URL is captured from Google's Location header. Other
+        results retain their original direct URL and require no extra request.
+        """
+        prepared = [dict(item) for item in (results or []) if isinstance(item, dict)]
+        work = [
+            (index, str(item.get("url") or "").strip())
+            for index, item in enumerate(prepared)
+            if str(item.get("url") or "").strip()
+        ]
+        if not work:
+            return prepared
+
+        with ThreadPoolExecutor(max_workers=MAX_GOTO_RESOLUTION_WORKERS) as executor:
+            resolved = list(executor.map(
+                lambda pair: self._resolve_goto_target(pair[1]),
+                work,
+            ))
+
+        for (index, original), (destination, error) in zip(work, resolved):
+            prepared[index]["resolved_url"] = destination
+            if error:
+                prepared[index]["url_resolution_error"] = error
+            else:
+                prepared[index].pop("url_resolution_error", None)
+        return prepared
 
     @staticmethod
     def _lens_request_url(image_url: str) -> str:
