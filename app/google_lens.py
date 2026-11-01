@@ -102,6 +102,7 @@ class BrightDataGoogleLensClient:
             (index, str(item.get("url") or "").strip())
             for index, item in enumerate(prepared)
             if str(item.get("url") or "").strip()
+            and not str(item.get("resolved_url") or "").strip()
         ]
         if not work:
             return prepared
