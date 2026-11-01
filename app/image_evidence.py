@@ -383,16 +383,19 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
                 seen_in_row.add(normalized_key)
                 entry = phrase_rows.setdefault(
                     normalized_key,
-                    {"count": 0, "phrase": key},
+                    {"count": 0, "prefix_count": 0, "phrase": key},
                 )
                 entry["count"] = int(entry["count"]) + 1
+                if start == 0:
+                    entry["prefix_count"] = int(entry["prefix_count"]) + 1
 
     repeated_phrases = [
         entry for entry in phrase_rows.values()
-        if int(entry["count"]) >= 2
+        if int(entry["count"]) >= 2 and int(entry["prefix_count"]) >= 1
     ]
     repeated_phrases.sort(
         key=lambda entry: (
+            -int(entry["prefix_count"]),
             -int(entry["count"]),
             -len(str(entry["phrase"]).split()),
             -len(str(entry["phrase"])),
