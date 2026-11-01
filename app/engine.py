@@ -331,6 +331,19 @@ class MetadataEngine:
         resolver = getattr(self.reverse_image, "resolve_result_urls", None)
         if callable(resolver):
             reverse_image_results = resolver(reverse_image_results)
+            resolver_diagnostics = (
+                getattr(self.reverse_image, "last_lens_diagnostics", {}) or {}
+            )
+            for key in (
+                "google_goto_candidates",
+                "google_goto_resolved",
+                "google_goto_failed",
+                "raw_result_fields",
+                "raw_result_field_types",
+                "raw_link_paths",
+            ):
+                if key in resolver_diagnostics:
+                    lens_diagnostics[key] = resolver_diagnostics[key]
 
         # Diagnostics are computed only from official TMDB destinations, never
         # from Lens titles, snippets, image URLs, or folder labels.
@@ -592,7 +605,11 @@ class MetadataEngine:
                 f"official_tmdb_ids={','.join(str(value) for value in (lens_diag.get('official_tmdb_ids') or [])[:10]) or 'none'} "
                 f"result_urls={lens_diag.get('result_url_count', 0)} "
                 f"google_wrappers={lens_diag.get('google_wrapper_count', 0)} "
+                f"google_goto={lens_diag.get('google_goto_candidates', 0)}/{lens_diag.get('google_goto_resolved', 0)}/{lens_diag.get('google_goto_failed', 0)} "
                 f"result_hosts='{safe_log_detail(','.join(f'{host}:{count}' for host, count in (lens_diag.get('result_hosts') or {}).items()), 220)}' "
+                f"result_paths='{safe_log_detail(','.join(f'{path}:{count}' for path, count in (lens_diag.get('result_url_paths') or {}).items()), 260)}' "
+                f"raw_fields='{safe_log_detail(','.join(lens_diag.get('raw_result_fields') or []), 240)}' "
+                f"raw_link_paths='{safe_log_detail(','.join(f'{path}:{count}' for path, count in (lens_diag.get('raw_link_paths') or {}).items()), 260)}' "
                 f"lens_error='{lens_error}' "
                 f"tmdb_id_lookup={tmdb_lookup.get('status', 'unknown')} "
                 f"tmdb_ids={','.join(str(value) for value in (tmdb_lookup.get('tmdb_ids') or [])[:10]) or 'none'} "
