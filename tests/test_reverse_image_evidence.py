@@ -22,6 +22,14 @@ class ReverseImageEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["imdb_ids"], [])
         self.assertEqual(evidence["tmdb_ids"], [])
 
+    def test_skips_provider_error_records_without_empty_backlinks(self):
+        evidence = extract_reverse_image_evidence([
+            {"error": "BrightDataAPIError", "message": "response not understood"},
+        ])
+        self.assertEqual(evidence["backlinks"], [])
+        self.assertEqual(evidence["title_hints"], [])
+        self.assertEqual(evidence["imdb_ids"], [])
+
     def test_preserves_numeric_title_and_connector_words(self):
         evidence = extract_reverse_image_evidence([
             {
