@@ -173,5 +173,38 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             api.search_by_image_url("https://example.com/poster.jpg")
 
 
+    def test_resolves_google_goto_using_location_without_following_target(self):
+        api = self.make_client({"visual_matches": []})
+        api.redirect_client = Mock()
+        response = Mock()
+        response.status_code = 302
+        response.headers = {
+            "location": "https://www.imdb.com/title/tt0095468/"
+        }
+        api.redirect_client.get.return_value = response
+
+        goto_url = "https://lens.google.com/goto?url=CAESopaque-token"
+        rows = api.resolve_result_urls([{
+            "title": "Any unrelated caption",
+            "url": goto_url,
+        }])
+
+        self.assertEqual(
+            rows[0]["resolved_url"],
+            "https://www.imdb.com/title/tt0095468/",
+        )
+        api.redirect_client.get.assert_called_once_with(goto_url)
+
+    def test_direct_official_links_do_not_trigger_google_redirect_requests(self):
+        api = self.make_client({"visual_matches": []})
+        api.redirect_client = Mock()
+        direct_url = "https://www.themoviedb.org/movie/10754-a-short-film-about-killing"
+
+        rows = api.resolve_result_urls([{"url": direct_url}])
+
+        self.assertEqual(rows[0]["resolved_url"], direct_url)
+        api.redirect_client.get.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
