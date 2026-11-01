@@ -42,6 +42,15 @@ def _country_tokens(value: str) -> list[str]:
     ]
 
 
+def _phrase_in_lens_text(phrase: str, text: str) -> bool:
+    """True only when a normalized TMDB fact is actually written in Lens evidence."""
+    key = normalize_title(phrase)
+    haystack = normalize_title(text)
+    if not key or not haystack:
+        return False
+    return f" {key} " in f" {haystack} "
+
+
 def _person_match(hint: str, candidates: list[str]) -> bool:
     hint_key = normalize_title(hint)
     if not hint_key:
@@ -129,7 +138,15 @@ def _compare_lens_metadata(
     character_hints = _unique_text([
         value for item in relevant for value in (item.get("characters") or [])
     ])
-    ratings: list[dict[str, Any]] = []
+
+    # Lens snippets are often prose, not structured "Director:"/"Cast:" fields.
+    # Accept a TMDB candidate fact as Lens evidence only when that exact name
+    # (or country name) occurs in the corresponding Lens result title/snippet.
+    lens_texts = [
+        " ".join((str(item.get("result_title") or ""), str(item.get("content") or "")))
+        for item in relevant
+    ]
+        ratings: list[dict[str, Any]] = []
     for item in relevant:
         for rating in item.get("ratings") or []:
             if isinstance(rating, dict):
@@ -148,6 +165,29 @@ def _compare_lens_metadata(
     candidate_directors = profile["directors"]
     candidate_cast = [item["name"] for item in profile["cast"] if item.get("name")]
     candidate_characters = [item["character"] for item in profile["cast"] if item.get("character")]
+
+    snippet_countries = [
+        value for value in candidate_countries
+        if len(normalize_title(value)) >= 4
+        and not re.fullmatch(r"[A-Z]{2}", value.strip(), flags=re.IGNORECASE)
+        and any(_phrase_in_lens_text(value, text) for text in lens_texts)
+    ]
+    snippet_directors = [
+        value for value in candidate_directors
+        if any(_phrase_in_lens_text(value, text) for text in lens_texts)
+    ]
+    snippet_cast = [
+        value for value in candidate_cast
+        if any(_phrase_in_lens_text(value, text) for text in lens_texts)
+    ]
+    snippet_characters = [
+        value for value in candidate_characters
+        if any(_phrase_in_lens_text(value, text) for text in lens_texts)
+    ]
+    countries = _unique_text([*countries, *snippet_countries])
+    directors = _unique_text([*directors, *snippet_directors])
+    cast_hints = _unique_text([*cast_hints, *snippet_cast])
+    character_hints = _unique_text([*character_hints, *snippet_characters])
 
     matches: dict[str, Any] = {}
     conflicts: dict[str, Any] = {}
