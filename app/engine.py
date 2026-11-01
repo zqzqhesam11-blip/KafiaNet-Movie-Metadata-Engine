@@ -604,19 +604,17 @@ class MetadataEngine:
             if not candidate_ids and match_info.get("candidate_id") is not None:
                 candidate_ids = [match_info["candidate_id"]]
             candidate_text = ",".join(str(value) for value in candidate_ids[:4]) or "none"
-            rejected_ids = [
-                str(value.get("candidate_id"))
-                for value in (reverse_image_info.get("evidence") or {}).get("rejected_external_ids", [])
-                if isinstance(value, dict) and value.get("candidate_id") is not None
-            ]
-            rejected_text = ",".join(rejected_ids[:4]) or "none"
+            identity_evidence = reverse_image_info.get("evidence") or {}
+            unresolved_ids = identity_evidence.get("id_resolution") or {}
+            unresolved_imdb = ",".join(str(value) for value in (unresolved_ids.get("unresolved_imdb_ids") or [])[:3]) or "none"
+            unresolved_tmdb = ",".join(str(value) for value in (unresolved_ids.get("unresolved_tmdb_ids") or [])[:3]) or "none"
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
                 f"imdb_id={imdb_id if imdb_id is not None else 'none'} "
                 f"reverse_image={latest_query_status} evidence={reverse_image_source} "
                 f'reason="{reason}" candidates={candidate_text} '
-                f"rejected_external_ids={rejected_text}",
+                f"unresolved_imdb_ids={unresolved_imdb} unresolved_tmdb_ids={unresolved_tmdb}",
                 flush=True,
             )
             if self._stop_batch:
