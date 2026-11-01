@@ -115,7 +115,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(match["imdb_id"], "tt0095468")
         self.assertEqual(match["identity_method"], "lens_tmdb_movie_id_lookup")
         self.assertEqual(evidence["tmdb_ids"], [10754])
-        self.assertEqual(evidence["tmdb_title_search"]["status"], "not_used_id_only")
+        self.assertEqual(evidence["tmdb_id_lookup"]["status"], "not_used_id_only")
         self.assertEqual(engine.tmdb.details_calls, [10754])
         self.assertFalse(evidence["id_resolution"]["folder_name_used"])
         self.assertFalse(evidence["id_resolution"]["image_filename_used"])
@@ -194,7 +194,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
 
         self.assertIsNone(candidate)
         self.assertEqual(match["status"], "review")
-        self.assertEqual(evidence["tmdb_title_search"]["queries"], [])
+        self.assertEqual(evidence["tmdb_id_lookup"]["queries"], [])
         self.assertEqual(engine.tmdb.details_calls, [])
 
     def test_record_saves_tmdb_details_and_tmdb_poster_urls(self):
