@@ -1289,6 +1289,7 @@ class MetadataEngine:
                 ]
                 matched_fields = ",".join(metadata.get("matched_fields") or []) or "none"
                 conflict_fields = ",".join((metadata.get("conflicts") or {}).keys()) or "none"
+                lens_clues = metadata.get("observed_clues") or {}
                 print(
                     f"[KafiaNet] [{position}/{total}] TMDB_CANDIDATE "
                     f"id={candidate_report.get('tmdb_id')} "
@@ -1301,6 +1302,12 @@ class MetadataEngine:
                     f"characters='{safe_log_detail(', '.join(character_names), 90)}' "
                     f"rating={profile.get('rating') if profile.get('rating') is not None else 'none'} "
                     f"votes={profile.get('rating_votes') if profile.get('rating_votes') is not None else 'none'} "
+                    f"lens_years={','.join(str(value) for value in (lens_clues.get('years') or [])) or 'none'} "
+                    f"lens_countries='{safe_log_detail(', '.join(lens_clues.get('countries') or []), 90)}' "
+                    f"lens_directors='{safe_log_detail(', '.join(lens_clues.get('directors') or []), 90)}' "
+                    f"lens_cast='{safe_log_detail(', '.join(lens_clues.get('cast') or []), 100)}' "
+                    f"lens_characters='{safe_log_detail(', '.join(lens_clues.get('main_characters') or []), 90)}' "
+                    f"lens_ratings='{safe_log_detail(', '.join(str(value.get('value')) for value in (lens_clues.get('ratings') or []) if isinstance(value, dict)), 50)}' "
                     f"lens_support={candidate_report.get('lens_title_support_count', 0)} "
                     f"matched={matched_fields} conflicts={conflict_fields} "
                     f"strong_metadata_matches={metadata.get('strong_match_count', 0)} "
@@ -1308,6 +1315,15 @@ class MetadataEngine:
                     f"supporting_lens_pages={metadata.get('supporting_observation_count', 0)}",
                     flush=True,
                 )
+                for support in (metadata.get("supporting_observations") or [])[:5]:
+                    print(
+                        f"[KafiaNet] [{position}/{total}] LENS_SUPPORT "
+                        f"candidate={candidate_report.get('tmdb_id')} "
+                        f"title='{safe_log_detail(support.get('result_title'), 100)}' "
+                        f"url='{safe_log_detail(support.get('result_url'), 180)}' "
+                        f"matched={','.join(support.get('matched_fields') or []) or 'none'}",
+                        flush=True,
+                    )
             if self._stop_batch:
                 print(
                     f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status}; "
