@@ -18,8 +18,9 @@ To keep this project free:
 - Do not add a payment card, deposit funds, or activate a paid plan.
 - Do not configure automatic top-ups or any paid balance.
 - If Bright Data reports HTTP 402 or 429, stop the batch. Do not retry repeatedly and do not add funds.
-- Each poster normally uses one Google Lens image request and, when Lens returns usable result titles, one additional Google text search for official IMDb/TMDB movie pages. The text query is built only from Lens titles, never from folder names or image filenames.
+- Each poster uses one Google Lens image request that sends the poster URL together with the fixed refinement query `movie ID in TMDB and IMDb` in the same request. There is no separate Google text-search request and no query built from Lens titles, folder names, or image filenames.
 - At most two bounded retries are made for transient 5xx gateway errors, transport failures, and 5xx statuses inside Bright Data's HTTP-200 response envelope. HTTP 402/429 quota responses are never retried and stop the batch.
+- Bright Data's published Google Lens parameter list documents the image URL, language and Lens tab but does not explicitly list `q`. This implementation passes `q` as an additional Lens refinement parameter; verify its effect with a live one-poster DRY_RUN before a larger batch.
 - Bright Data free credits may be shared with other products or tools using the same account. Keep the key private.
 
 References:
@@ -37,12 +38,12 @@ References:
 - Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
 - **Movie identity comes only from official IMDb/TMDB page URLs in Google Lens results.** The source-folder name, folder year, Lens captions, snippets, and image filenames are never used to search TMDB or choose a movie.
 - Google Lens `/goto?url=CAES...` backlinks are resolved by reading Google's `Location` header; if it is missing, one bounded redirect-following request is attempted. All page-URL candidates supplied by Lens are retained, so a broken `/goto` URL does not hide a direct official IMDb/TMDB link.
-- After Lens, the engine makes one Google query from up to three distinct Lens result titles and restricts results to `imdb.com/title` and `themoviedb.org/movie`. It does not require the extra words `IMDb OR TMDB`, which can unnecessarily suppress official pages. The text search is a discovery aid only: Lens captions, snippets, folder names, and image filenames do not establish identity.
-- Only official IMDb/TMDB URLs from Lens or the supplemental Google search are used to resolve IDs. TMDB movie details are fetched for the resolved TMDB candidates and the IMDb identifier is cross-checked against `external_ids.imdb_id` before READY.
+- The image search itself is refined with the fixed Lens query `movie ID in TMDB and IMDb`; no second text search is made. Lens captions and snippets remain diagnostic only and never establish identity.
+- Only official IMDb/TMDB movie URLs returned by the combined image-plus-query Lens request are used to resolve IDs. TMDB movie details are fetched for the resolved TMDB candidates and the IMDb identifier is cross-checked against `external_ids.imdb_id` before READY.
 - The engine resolves all distinct official IMDb/TMDB IDs from the returned result set (not just the first few). When multiple movie IDs are found, automatic selection requires one uniquely corroborated TMDB+IMDb pair; otherwise the film is sent to REVIEW.
 - Every READY JSON and `metadata/index.json` row records both `tmdb_id` and `imdb_id` explicitly, in addition to TMDB's `external_ids`. If an identifier is not supplied or confirmed by the official sources, it is not invented.
 - A failed, blocked, or unparsed live response is recorded as an error, not as a successful empty result. Previously saved usable reverse-image evidence remains reusable.
-- Each per-film terminal result reports Lens HTTP status, retry count and provider error, plus official-ID search status, usable Lens-title count, organic-result count and accepted official-URL count. These diagnostics do not include API secrets.
+- Each per-film terminal result reports the Lens query phrase, HTTP status, retry count, result count and provider error. These diagnostics do not include API secrets.
 - Duplicate identity is based on TMDB movie ID, not title spelling.
 - API keys and tokens are read only from Hostless environment variables. Never commit secrets.
 
