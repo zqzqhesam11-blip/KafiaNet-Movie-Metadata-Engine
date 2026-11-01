@@ -262,7 +262,7 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
             if value and value.casefold() not in {item.casefold() for item in director_hints}:
                 director_hints.append(value)
         for cast_match in CAST_RE.findall(raw_content):
-            for person in re.split(r"\\s*(?:,|;|\\band\\b|&)\\s*", cast_match):
+            for person in re.split(r"\s*(?:,|;|\band\b|&)\s*", cast_match):
                 person = person.strip(" .")
                 if person and person.casefold() not in {item.casefold() for item in result_cast}:
                     result_cast.append(person)
