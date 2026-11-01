@@ -139,6 +139,25 @@ class ReverseImageEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["imdb_ids"], [])
         self.assertEqual(evidence["tmdb_ids"], [])
 
+    def test_extracts_ids_from_all_resolved_result_urls(self):
+        evidence = extract_reverse_image_evidence([{
+            "title": "Misleading Lens caption",
+            "url": "https://lens.google.com/goto?url=CAESopaque-token",
+            "resolved_urls": [
+                "https://www.imdb.com/title/tt0095468/",
+                "https://www.themoviedb.org/movie/10754",
+            ],
+        }])
+        self.assertEqual(evidence["imdb_ids"], ["tt0095468"])
+        self.assertEqual(evidence["tmdb_ids"], [10754])
+        self.assertEqual(
+            evidence["backlinks"][0]["resolved_urls"],
+            [
+                "https://www.imdb.com/title/tt0095468/",
+                "https://www.themoviedb.org/movie/10754",
+            ],
+        )
+
     def test_extracts_all_official_ids_across_many_backlinks(self):
         results = []
         for index in range(1, 13):
