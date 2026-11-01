@@ -110,7 +110,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(match["imdb_id"], "tt0095468")
         self.assertEqual(match["identity_method"], "lens_tmdb_movie_id_lookup")
         self.assertEqual(evidence["tmdb_ids"], [10754])
-        self.assertEqual(evidence["tmdb_id_lookup"]["status"], "not_used_id_only")
+        self.assertEqual(evidence["tmdb_id_lookup"]["status"], "resolved")
         self.assertEqual(engine.tmdb.details_calls, [10754])
         self.assertFalse(evidence["id_resolution"]["folder_name_used"])
         self.assertFalse(evidence["id_resolution"]["image_filename_used"])
