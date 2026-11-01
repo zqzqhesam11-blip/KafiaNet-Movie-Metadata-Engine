@@ -50,11 +50,6 @@ GENERIC_WORDS = {
     "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "official",
     "artwork", "bluray", "brrip", "webrip", "webdl", "hdrip",
     "x264", "x265", "h264", "h265", "imdb", "tmdb",
-    # Retailer, media-format and result-page noise commonly attached to Lens
-    # visual matches. These are removed only from extracted title hints.
-    "amazon", "import", "dvd", "blu", "ray", "youtube", "dailymotion",
-    "video", "facebook", "photos", "tallenge", "classics", "prime",
-    "watch", "et", "fr", "best", "similar", "movies", "like",
 }
 
 
@@ -179,6 +174,20 @@ def _resolved_destination_urls(result: dict) -> list[str]:
     return destinations
 
 
+LENS_QUERY_NOISE = {
+    "amazon", "import", "dvd", "blu", "ray", "youtube", "dailymotion",
+    "video", "facebook", "photos", "tallenge", "classics", "prime",
+    "watch", "et", "fr", "best", "similar", "movies", "like",
+}
+
+
+def _clean_lens_query_title(value: str) -> str | None:
+    """Remove obvious Lens retailer/media noise without changing saved evidence titles."""
+    words = re.findall(r"[\wÀ-ÿ]+", str(value or ""), flags=re.UNICODE)
+    words = [word for word in words if word.casefold() not in LENS_QUERY_NOISE]
+    return _clean_hint(" ".join(words))
+
+
 def _unique_titles(values: list[str]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -206,6 +215,7 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
     director_hints: list[str] = []
     backlinks: list[dict] = []
     lens_title_rows: list[str] = []
+    lens_query_rows: list[str] = []
 
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
@@ -216,6 +226,9 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
         title = _clean_hint(raw_result_title)
         if title:
             lens_title_rows.append(title)
+            query_title = _clean_lens_query_title(raw_result_title)
+            if query_title:
+                lens_query_rows.append(query_title)
             if title.casefold() not in {item.casefold() for item in hints}:
                 hints.append(title)
         # Only Lens result titles seed TMDB queries. We derive repeated short
@@ -353,7 +366,7 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
     # director or cast names. Repeated contiguous phrases across independent
     # visual-match titles are stronger query hints than one long noisy caption.
     phrase_rows: dict[str, dict[str, object]] = {}
-    for row in lens_title_rows:
+    for row in lens_query_rows:
         words = row.split()
         seen_in_row: set[str] = set()
         for width in range(2, min(4, len(words)) + 1):
@@ -389,7 +402,7 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
     # Keep a clean short result title as a fallback, but don't send long
     # captions containing director/cast/retailer names as if they were titles.
     query_candidates.extend(
-        title for title in _unique_titles(lens_title_rows)
+        title for title in _unique_titles(lens_query_rows)
         if len(title.split()) <= 5
     )
     seen_queries: set[str] = set()
