@@ -120,6 +120,32 @@ def _resolved_destination_url(result: dict) -> str:
     return candidate
 
 
+def _resolved_destination_urls(result: dict) -> list[str]:
+    """Return resolved destinations, falling back to raw fields only for legacy records."""
+    resolved_values = result.get("resolved_urls") or []
+    if resolved_values:
+        candidates = [
+            value.strip()
+            for value in resolved_values
+            if isinstance(value, str) and value.strip()
+        ]
+    else:
+        candidates = [
+            value.strip()
+            for value in (result.get("resolved_url"), result.get("url"))
+            if isinstance(value, str) and value.strip()
+        ]
+
+    destinations: list[str] = []
+    seen: set[str] = set()
+    for value in candidates:
+        destination = _resolved_destination_url({**result, "resolved_url": value})
+        if destination and destination not in seen:
+            seen.add(destination)
+            destinations.append(destination)
+    return destinations
+
+
 def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
     """Extract official IMDb/TMDB IDs from resolved Lens result destination URLs.
 
@@ -143,21 +169,23 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
         if title and title.casefold() not in {item.casefold() for item in hints}:
             hints.append(title)
 
-        destination_url = _resolved_destination_url(result)
+        destination_urls = _resolved_destination_urls(result)
         linked_imdb_ids: list[str] = []
         linked_tmdb_ids: list[int] = []
-        if destination_url:
+        for destination_url in destination_urls:
             imdb_id = imdb_id_from_url(destination_url)
             if imdb_id:
                 if imdb_id not in imdb_ids:
                     imdb_ids.append(imdb_id)
-                linked_imdb_ids.append(imdb_id)
-
+                if imdb_id not in linked_imdb_ids:
+                    linked_imdb_ids.append(imdb_id)
             tmdb_id = tmdb_movie_id_from_url(destination_url)
             if tmdb_id:
                 if tmdb_id not in tmdb_ids:
                     tmdb_ids.append(tmdb_id)
-                linked_tmdb_ids.append(tmdb_id)
+                if tmdb_id not in linked_tmdb_ids:
+                    linked_tmdb_ids.append(tmdb_id)
+        destination_url = destination_urls[0] if destination_urls else ""
 
         source = str(result.get("source") or "")
         try:
@@ -189,6 +217,14 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
                 "title": raw_title[:180],
                 "url": str(result.get("url") or "")[:500],
                 "resolved_url": destination_url[:1000],
+                "resolved_urls": destination_urls[:10],
+                "url_candidates": [
+                    str(value)[:500]
+                    for value in (result.get("url_candidates") or [])[:10]
+                    if isinstance(value, str)
+                ],
+                "provider": str(result.get("provider") or "")[:80],
+                "search_query": str(result.get("search_query") or "")[:700],
                 "url_resolution_error": str(result.get("url_resolution_error") or "")[:200],
                 "source": source[:500],
                 "content": raw_content[:500],

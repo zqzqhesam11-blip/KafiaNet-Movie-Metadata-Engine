@@ -388,8 +388,53 @@ class MetadataEngine:
         if callable(resolver):
             reverse_image_results = resolver(reverse_image_results)
 
+        # Supplement image-based matches with one Google text search constructed
+        # only from Lens result titles (never from the poster folder or filename).
+        # Search snippets are stored as diagnostics; only official IMDb/TMDB
+        # destination URLs enter the existing ID resolution and cross-check.
+        official_id_search: dict[str, Any] = {
+            "status": "skipped",
+            "result_count": 0,
+            "error": None,
+        }
+        official_search = getattr(self.reverse_image, "search_official_id_pages", None)
+        if (
+            callable(official_search)
+            and reverse_image_results
+            and not any(
+                isinstance(result, dict) and result.get("error")
+                for result in reverse_image_results
+            )
+        ):
+            try:
+                official_results = official_search(reverse_image_results)
+                if official_results:
+                    reverse_image_results.extend(official_results)
+                official_id_search = {
+                    "status": "ok" if official_results else "no_official_pages",
+                    "result_count": len(official_results or []),
+                    "error": None,
+                }
+            except BrightDataQuotaError as exc:
+                self._stop_batch = True
+                self._provider_stop_status = exc.status_code
+                official_id_search = {
+                    "status": "quota_error",
+                    "result_count": 0,
+                    "error": str(exc)[:300],
+                }
+            except Exception as exc:
+                # An optional text-search failure must not invalidate usable
+                # official IDs already returned by the reverse-image lookup.
+                official_id_search = {
+                    "status": "error",
+                    "result_count": 0,
+                    "error": f"{type(exc).__name__}: {str(exc)[:250]}",
+                }
+
         candidate, match, reverse_image_evidence = self._find_movie(reverse_image_results)
         reverse_image_evidence["results_source"] = reverse_image_results_source
+        reverse_image_evidence["official_id_search"] = official_id_search
 
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,

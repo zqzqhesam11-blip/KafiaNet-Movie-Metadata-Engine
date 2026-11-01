@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import httpx
 
@@ -47,7 +47,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         call = api.client.post.call_args
         self.assertEqual(call.args[0], BRIGHTDATA_REQUEST_URL)
         self.assertEqual(call.kwargs["json"]["zone"], "serp_api1")
-        self.assertEqual(call.kwargs["json"]["format"], "json")
+        self.assertEqual(call.kwargs["json"]["format"], "raw")
         target = call.kwargs["json"]["url"]
         self.assertIn("lens.google.com/uploadbyurl?", target)
         self.assertIn("brd_json=1", target)
@@ -146,21 +146,43 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         with self.assertRaisesRegex(BrightDataAPIError, "BRIGHTDATA_API_KEY"):
             api.search_by_image_url("https://example.com/poster.jpg")
 
-    def test_402_reports_exhausted_free_credits(self):
+    def test_402_reports_exhausted_free_credits_without_retry(self):
         api = self.make_client({"error": "no credits"}, status=402, body="no credits")
         with self.assertRaisesRegex(BrightDataAPIError, "do not add funds"):
             api.search_by_image_url("https://example.com/poster.jpg")
+        self.assertEqual(api.client.post.call_count, 1)
 
     def test_429_reports_request_limit(self):
         api = self.make_client({"error": "rate limit"}, status=429, body="rate limit")
         with self.assertRaisesRegex(BrightDataAPIError, "quota"):
             api.search_by_image_url("https://example.com/poster.jpg")
 
-    def test_network_error_is_reported_without_retry(self):
-        api = self.make_client(error=httpx.ConnectError("connection refused"))
-        with self.assertRaisesRegex(BrightDataAPIError, "network error"):
-            api.search_by_image_url("https://example.com/poster.jpg")
-        self.assertEqual(api.client.post.call_count, 1)
+    def test_transient_502_is_retried_and_parsed(self):
+        failed = Mock()
+        failed.status_code = 502
+        failed.text = "temporary gateway error"
+        failed.json.side_effect = ValueError("not JSON")
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = '{"visual_matches":[]}'
+        recovered.json.return_value = {"visual_matches": []}
+        api = self.make_client()
+        api.client.post.side_effect = [failed, recovered]
+        with patch("app.google_lens.time.sleep"):
+            self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
+        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(api.client.post.call_args.kwargs["json"]["format"], "raw")
+
+    def test_transient_network_error_is_retried(self):
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = '{"visual_matches":[]}'
+        recovered.json.return_value = {"visual_matches": []}
+        api = self.make_client()
+        api.client.post.side_effect = [httpx.ConnectError("temporary failure"), recovered]
+        with patch("app.google_lens.time.sleep"):
+            self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
+        self.assertEqual(api.client.post.call_count, 2)
 
     def test_non_json_response_is_not_mistaken_for_no_matches(self):
         response = Mock()
@@ -203,7 +225,71 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         rows = api.resolve_result_urls([{"url": direct_url}])
 
         self.assertEqual(rows[0]["resolved_url"], direct_url)
+        self.assertEqual(rows[0]["resolved_urls"], [direct_url])
         api.redirect_client.get.assert_not_called()
+
+    def test_uses_followed_destination_when_location_header_is_missing(self):
+        api = self.make_client({"visual_matches": []})
+        api.redirect_client = Mock()
+        first = Mock()
+        first.status_code = 404
+        first.headers = {}
+        followed = Mock()
+        followed.url = "https://www.imdb.com/title/tt0095468/"
+        api.redirect_client.get.side_effect = [first, followed]
+
+        rows = api.resolve_result_urls([{
+            "url": "https://lens.google.com/goto?url=CAESopaque",
+        }])
+
+        self.assertEqual(rows[0]["resolved_url"], "https://www.imdb.com/title/tt0095468/")
+        self.assertEqual(api.redirect_client.get.call_count, 2)
+        self.assertEqual(
+            api.redirect_client.get.call_args_list[1].kwargs,
+            {"follow_redirects": True},
+        )
+
+    def test_google_official_id_search_uses_lens_titles_and_filters_unofficial_pages(self):
+        api = self.make_client({
+            "organic": [
+                {
+                    "title": "A Short Film About Killing - IMDb",
+                    "link": "https://www.imdb.com/title/tt0095468/",
+                    "description": "Official IMDb page",
+                },
+                {
+                    "title": "A Short Film About Killing",
+                    "link": "https://www.themoviedb.org/movie/10754",
+                    "description": "Official TMDB page",
+                },
+                {
+                    "title": "Fan page",
+                    "link": "https://example.com/a-short-film-about-killing",
+                },
+            ]
+        })
+        rows = api.search_official_id_pages([
+            {"title": "A Short Film About Killing (1988) - IMDb"},
+            {"title": "A Short Film About Killing (1988)"},
+        ])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["url"], "https://www.imdb.com/title/tt0095468/")
+        self.assertEqual(rows[1]["url"], "https://www.themoviedb.org/movie/10754")
+        self.assertEqual(rows[0]["provider"], "google_official_id_search")
+        request_url = api.client.post.call_args.kwargs["json"]["url"]
+        self.assertIn("IMDb", request_url)
+        self.assertIn("TMDB", request_url)
+        self.assertIn("site%3Aimdb.com%2Ftitle", request_url)
+        self.assertIn("site%3Athemoviedb.org%2Fmovie", request_url)
+        self.assertEqual(api.client.post.call_args.kwargs["json"]["format"], "raw")
+
+    def test_google_official_id_search_skips_long_unbounded_titles(self):
+        api = self.make_client({"organic": []})
+        rows = api.search_official_id_pages([{
+            "title": "A long news caption about a director attending an event " * 8
+        }])
+        self.assertEqual(rows, [])
+        api.client.post.assert_not_called()
 
 
 if __name__ == "__main__":
