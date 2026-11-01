@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from app.engine import MetadataEngine
 from app.tmdb import TMDBClient
-from app.image_evidence import tmdb_movie_url_diagnostics
+from app.image_evidence import extract_tmdb_movie_ids, tmdb_movie_url_diagnostics
 
 
 def movie_details(tmdb_id: int, imdb_id: str | None, title: str) -> dict:
@@ -267,6 +267,35 @@ class IdOnlyIdentityTests(unittest.TestCase):
 
         self.assertEqual(diagnostics["official_tmdb_url_count"], 2)
         self.assertEqual(diagnostics["official_tmdb_ids"], [10754])
+
+
+    def test_extracts_tmdb_id_from_google_imgres_imgrefurl(self):
+        results = [{
+            "url": (
+                "https://www.google.com/imgres?"
+                "imgurl=https%3A%2F%2Fimages.example%2Fposter.jpg&"
+                "imgrefurl=https%3A%2F%2Fwww.themoviedb.org%2Fmovie%2F10754"
+            )
+        }]
+        self.assertEqual(extract_tmdb_movie_ids(results), [10754])
+
+    def test_does_not_trust_google_imgres_image_asset_as_page_identity(self):
+        results = [{
+            "url": (
+                "https://www.google.com/imgres?"
+                "imgurl=https%3A%2F%2Fwww.themoviedb.org%2Fmovie%2F10754%2Fposter.jpg&"
+                "imgrefurl=https%3A%2F%2Fevil.example%2Fmovie%2F123"
+            )
+        }]
+        self.assertEqual(extract_tmdb_movie_ids(results), [])
+
+    def test_unwraps_nested_google_url_and_imgres_wrappers(self):
+        results = [{
+            "resolved_urls": [
+                "https://www.google.com/url?q=https%3A%2F%2Fwww.google.com%2Fimgres%3Fimgrefurl%3Dhttps%253A%252F%252Fwww.themoviedb.org%252Fmovie%252F10754"
+            ]
+        }]
+        self.assertEqual(extract_tmdb_movie_ids(results), [10754])
 
 if __name__ == "__main__":
     unittest.main()

@@ -282,7 +282,9 @@ class BrightDataGoogleLensClient:
                     candidate_value = (
                         candidate_value.get("url")
                         or candidate_value.get("link")
+                        or candidate_value.get("href")
                         or candidate_value.get("src")
+                        or candidate_value.get("target")
                     )
                 if not isinstance(candidate_value, str):
                     continue
@@ -299,15 +301,28 @@ class BrightDataGoogleLensClient:
         for item in rows[:MAX_NORMALIZED_RESULTS]:
             title = str(item.get("title") or item.get("name") or "").strip()[:300]
             page_urls = cls._all_urls(
-                item, ("link", "url", "page_url", "website", "source_url", "landing_page")
+                item, ("link", "url", "page_url", "website", "source_url", "landing_page", "result_url", "destination_url", "target_url", "href", "imgrefurl")
             )
             page_url = page_urls[0] if page_urls else ""
             # Bright Data's image schema uses original_image for the full-size
             # image and image for its preview; keep the full-size URL first.
             image_url = cls._first_url(
                 item,
-                ("original_image", "image_url", "original", "source", "image", "thumbnail", "thumbnail_url"),
+                ("original_image", "image_url", "original", "image", "thumbnail", "thumbnail_url"),
             )
+            source_url = cls._first_url(item, ("source",))
+            if source_url:
+                source_path = urlparse(source_url).path.casefold()
+                image_suffixes = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif")
+                source_is_image = (
+                    source_path.endswith(image_suffixes)
+                    or "/t/p/" in source_path
+                )
+                if source_is_image and not image_url:
+                    image_url = source_url
+                elif not source_is_image and source_url not in page_urls:
+                    page_urls.append(source_url)
+                    page_url = page_urls[0] if page_urls else source_url
             if not page_url and image_url:
                 page_url = image_url
             description = str(

@@ -326,5 +326,30 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             {"follow_redirects": True},
         )
 
+
+    def test_normalizes_source_page_url_when_source_is_a_publisher_link(self):
+        api = self.make_client({
+            "exact_matches": [{
+                "title": "A Short Film About Killing",
+                "source": "https://www.themoviedb.org/movie/10754",
+                "image": "https://images.example.test/poster.jpg",
+            }]
+        })
+        result = api.search_by_image_url("https://example.com/poster.jpg")
+        self.assertEqual(result[0]["url"], "https://www.themoviedb.org/movie/10754")
+        self.assertIn("https://www.themoviedb.org/movie/10754", result[0]["url_candidates"])
+        self.assertEqual(result[0]["source"], "https://images.example.test/poster.jpg")
+
+    def test_normalizes_href_as_a_source_page_url(self):
+        api = self.make_client({
+            "exact_matches": [{
+                "title": "A Short Film About Killing",
+                "link": {"href": "https://www.themoviedb.org/movie/10754"},
+                "image": "https://images.example.test/poster.jpg",
+            }]
+        })
+        result = api.search_by_image_url("https://example.com/poster.jpg")
+        self.assertEqual(result[0]["url"], "https://www.themoviedb.org/movie/10754")
+
 if __name__ == "__main__":
     unittest.main()
