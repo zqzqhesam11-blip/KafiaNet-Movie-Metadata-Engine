@@ -357,8 +357,8 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(rows[1]["url"], "https://www.themoviedb.org/movie/10754")
         self.assertEqual(rows[0]["provider"], "google_official_id_search")
         request_url = api.client.post.call_args.kwargs["json"]["url"]
-        self.assertIn("IMDb", request_url)
-        self.assertIn("TMDB", request_url)
+        decoded_query = __import__("urllib.parse", fromlist=["unquote"]).unquote(request_url)
+        self.assertNotIn("(IMDb OR TMDB)", decoded_query)
         self.assertIn("site%3Aimdb.com%2Ftitle", request_url)
         self.assertIn("site%3Athemoviedb.org%2Fmovie", request_url)
         self.assertEqual(api.client.post.call_args.kwargs["json"]["format"], "raw")
