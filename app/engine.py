@@ -690,7 +690,7 @@ class MetadataEngine:
             lens_error_items = (reverse_image_info.get("latest_query") or {}).get("errors") or []
 
             def safe_log_detail(value: Any, limit: int = 170) -> str:
-                detail = " ".join(str(value or "").replace('"', "'").replace("\\r", " ").replace("\\n", " ").split())
+                detail = " ".join(str(value or "").replace('"', "'").replace("\r", " ").replace("\n", " ").split())
                 secret = str(getattr(self.settings, "brightdata_api_key", "") or "")
                 if secret:
                     detail = detail.replace(secret, "[REDACTED]")
