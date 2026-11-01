@@ -34,8 +34,10 @@ References:
 - The source movie-folder name is never changed. Only the JSON basename changes to the verified TMDB worldwide title and release year.
 - Image filenames, extensions, bytes, and Git blob SHAs are preserved.
 - Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
-- **Mandatory title matching applies to every movie.** Before a result can become READY, its TMDB title or original title must match either a source-folder title variant or a meaningful Google Lens poster title. A trusted IMDb/TMDB ID alone is never sufficient.
-- Google Lens result links are retained with their associated IMDb/TMDB IDs and available matched-image evidence. When TMDB candidates share the same title/year, the engine compares production country, director, runtime, and release metadata.
+- **Movie identity comes only from official IMDb/TMDB page URLs in Google Lens results.** The source-folder name, folder year, Lens captions, snippets, and image filenames are never used to search TMDB or choose a movie.
+- Google Lens `/goto?url=CAES...` backlinks are resolved by making a no-follow GET request and reading Google's `Location` header. The resulting official IMDb/TMDB destination URLs are retained with their backlink evidence.
+- The engine resolves all distinct official IMDb/TMDB IDs from the returned result set (not just the first few). When multiple movie IDs are found, automatic selection requires one uniquely corroborated TMDB+IMDb pair; otherwise the film is sent to REVIEW.
+- Every READY JSON and `metadata/index.json` row records both `tmdb_id` and `imdb_id` explicitly, in addition to TMDB's `external_ids`. If an identifier is not supplied or confirmed by the official sources, it is not invented.
 - A failed, blocked, or unparsed live response is recorded as an error, not as a successful empty result. Previously saved usable reverse-image evidence remains reusable.
 - Duplicate identity is based on TMDB movie ID, not title spelling.
 - API keys and tokens are read only from Hostless environment variables. Never commit secrets.
