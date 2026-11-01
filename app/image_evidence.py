@@ -304,6 +304,7 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
             "lens_title": title or "",
             "result_title": raw_title[:180],
             "result_url": str(result.get("resolved_url") or result.get("url") or "")[:500],
+            "content": raw_content[:700],
             "years": result_years[:8],
             "countries": result_countries[:8],
             "directors": result_directors[:8],
