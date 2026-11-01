@@ -115,6 +115,8 @@ class BrightDataGoogleLensClient:
 
     def resolve_result_urls(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Resolve all URL candidates while preserving directly available official links."""
+        if not isinstance(getattr(self, "last_lens_diagnostics", None), dict):
+            self.last_lens_diagnostics = {}
         prepared = [dict(item) for item in (results or []) if isinstance(item, dict)]
         work: list[tuple[int, str]] = []
         for index, item in enumerate(prepared):
