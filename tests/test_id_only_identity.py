@@ -203,7 +203,8 @@ class IdOnlyIdentityTests(unittest.TestCase):
 
         self.assertIsNone(candidate)
         self.assertEqual(match["status"], "review")
-        self.assertEqual(evidence["tmdb_id_lookup"]["queries"], [])
+        self.assertEqual(evidence["tmdb_id_lookup"]["status"], "no_tmdb_id")
+        self.assertNotIn("queries", evidence["tmdb_id_lookup"])
         self.assertEqual(engine.tmdb.details_calls, [])
 
     def test_record_saves_tmdb_details_and_tmdb_poster_urls(self):
