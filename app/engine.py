@@ -779,6 +779,7 @@ class MetadataEngine:
             # a clear score margin over every competing candidate.
             if (
                 best_strong_count >= 2
+                and bool(best_metadata.get("evidence_qualified"))
                 and (
                     int(second_metadata.get("strong_match_count") or 0) < 2
                     or best_score - second_score >= 1.5
@@ -1235,7 +1236,9 @@ class MetadataEngine:
                     f"votes={profile.get('rating_votes') if profile.get('rating_votes') is not None else 'none'} "
                     f"lens_support={candidate_report.get('lens_title_support_count', 0)} "
                     f"matched={matched_fields} conflicts={conflict_fields} "
-                    f"strong_metadata_matches={metadata.get('strong_match_count', 0)}",
+                    f"strong_metadata_matches={metadata.get('strong_match_count', 0)} "
+                    f"metadata_evidence_qualified={metadata.get('evidence_qualified', False)} "
+                    f"supporting_lens_pages={metadata.get('supporting_observation_count', 0)}",
                     flush=True,
                 )
             if self._stop_batch:
