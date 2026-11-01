@@ -665,6 +665,7 @@ class MetadataEngine:
             candidate_id for candidate_id, identity in identities.items()
             if identity["cross_provider_match"]
         ]
+        metadata_selected = False
         if len(identities) == 1:
             selected_id = next(iter(identities))
             sole_identity = identities[selected_id]
@@ -688,14 +689,76 @@ class MetadataEngine:
                         "reason": "The TMDB result did not meet the configured Lens-title similarity threshold",
                         "candidate_ids": [int(selected_id)],
                     }, evidence
+            metadata = sole_identity.get("metadata_match") or {}
+            if len(metadata.get("conflicts") or {}) >= 2 and not metadata.get("strong_match_count"):
+                return None, {
+                    "status": "review", "confidence": 0.0,
+                    "reason": "The only title candidate conflicts with multiple explicit metadata clues from its Lens result",
+                    "candidate_ids": [int(selected_id)],
+                    "metadata_conflicts": metadata.get("conflicts") or {},
+                }, evidence
         elif len(cross_provider) == 1:
             selected_id = cross_provider[0]
         else:
+            ranked = sorted(
+                identities.items(),
+                key=lambda pair: (
+                    int((pair[1].get("metadata_match") or {}).get("strong_match_count") or 0),
+                    float((pair[1].get("metadata_match") or {}).get("score") or 0.0),
+                    int(pair[1].get("lens_title_support_count") or 0),
+                    float(pair[1].get("title_similarity") or 0.0),
+                ),
+                reverse=True,
+            )
+            best_id, best_identity = ranked[0]
+            best_metadata = best_identity.get("metadata_match") or {}
+            second_metadata = ranked[1][1].get("metadata_match") or {}
+            best_strong_count = int(best_metadata.get("strong_match_count") or 0)
+            best_score = float(best_metadata.get("score") or 0.0)
+            second_score = float(second_metadata.get("score") or 0.0)
+
+            # A title-only tie is not resolved by TMDB's metadata profile.
+            # Require at least two independent Lens-observed dimensions, and
+            # a clear score margin over every competing candidate.
+            if (
+                best_strong_count >= 2
+                and (
+                    int(second_metadata.get("strong_match_count") or 0) < 2
+                    or best_score - second_score >= 1.5
+                )
+            ):
+                selected_id = best_id
+                metadata_selected = True
+            else:
+                return None, {
+                    "status": "review",
+                    "confidence": 0.0,
+                    "reason": (
+                        "Multiple TMDB candidates remain; Lens evidence did not provide "
+                        "two or more matching metadata dimensions with a unique winner"
+                    ),
+                    "candidate_ids": sorted(int(value) for value in identities),
+                    "cross_provider_candidate_ids": sorted(int(value) for value in cross_provider),
+                    "candidate_comparisons": [
+                        {
+                            "tmdb_id": int(candidate_id),
+                            "title": identity.get("title"),
+                            "imdb_id": identity.get("imdb_id"),
+                            "title_similarity": identity.get("title_similarity"),
+                            "lens_title_support_count": identity.get("lens_title_support_count"),
+                            "metadata_profile": identity.get("metadata_profile"),
+                            "metadata_match": identity.get("metadata_match"),
+                        }
+                        for candidate_id, identity in ranked
+                    ],
+                }, evidence
+
+        if not identities[selected_id].get("imdb_id"):
             return None, {
-                "status": "review", "confidence": 0.0,
-                "reason": "Lens and TMDB produced multiple distinct movie candidates without one uniquely corroborated official IMDb+TMDB identity",
-                "candidate_ids": sorted(int(value) for value in identities),
-                "cross_provider_candidate_ids": sorted(int(value) for value in cross_provider),
+                "status": "review",
+                "confidence": 0.0,
+                "reason": "The selected TMDB candidate has no verified IMDb external ID",
+                "candidate_ids": [int(selected_id)],
             }, evidence
 
         selected_identity = identities[selected_id]
