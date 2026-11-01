@@ -239,7 +239,7 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
         # A year in the Lens result title is a clue. In result content, accept
         # only explicitly labelled film/release years to avoid article publish dates.
         content_years = re.findall(
-            r"\\b(?:release year|film year|year released|release date)\\s*[:=–-]?\\s*((?:19|20)\\d{2})",
+            r"\b(?:release year|film year|year released|release date)\s*[:=–-]?\s*((?:19|20)\d{2})",
             raw_content,
             flags=re.IGNORECASE,
         )
