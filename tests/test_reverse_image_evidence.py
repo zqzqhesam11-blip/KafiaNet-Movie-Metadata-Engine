@@ -4,6 +4,7 @@ import unittest
 
 from app.image_evidence import (
     extract_reverse_image_evidence,
+    extract_tmdb_movie_ids,
     imdb_id_from_url,
     tmdb_movie_id_from_url,
 )
@@ -175,6 +176,31 @@ class ReverseImageEvidenceTests(unittest.TestCase):
             "tt0133093",
         )
         self.assertIsNone(imdb_id_from_url("https://evil.example/tt0133093"))
+
+    def test_current_identity_path_extracts_only_official_tmdb_movie_ids(self):
+        ids = extract_tmdb_movie_ids([
+            {
+                "title": "Wrong film title (1900)",
+                "url": "https://lens.google.com/goto?url=CAESopaque",
+                "resolved_url": "https://www.themoviedb.org/movie/10754-a-film",
+                "source": "https://cdn.example/another-film-poster.jpg",
+                "content": "Country: France; Director: Wrong Person",
+            },
+            {
+                "title": "IMDb result",
+                "resolved_url": "https://www.imdb.com/title/tt0095468/",
+            },
+            {
+                "title": "Spoofed TMDB path",
+                "resolved_url": "https://evil.example/movie/99999",
+            },
+            {
+                "title": "Duplicate result",
+                "resolved_url": "https://www.themoviedb.org/movie/10754",
+            },
+        ])
+
+        self.assertEqual(ids, [10754])
 
     def test_extracts_tmdb_id_only_from_tmdb_host(self):
         self.assertEqual(
