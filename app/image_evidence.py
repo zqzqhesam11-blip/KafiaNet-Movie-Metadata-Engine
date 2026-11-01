@@ -369,7 +369,9 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
     for row in lens_query_rows:
         words = row.split()
         seen_in_row: set[str] = set()
-        for width in range(2, min(4, len(words)) + 1):
+        # Two-word fragments are too generic ("de souffle", "bout de");
+        # keep repeated 3-4 word phrases so the canonical title survives the cap.
+        for width in range(3, min(4, len(words)) + 1):
             for start in range(0, len(words) - width + 1):
                 phrase = " ".join(words[start:start + width]).strip()
                 key = _clean_hint(phrase)
