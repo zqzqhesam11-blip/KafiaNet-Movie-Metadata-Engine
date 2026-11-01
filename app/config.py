@@ -14,7 +14,6 @@ class Settings:
     posters_branch: str
     tmdb_language: str
     batch_limit: int
-    match_accept_score: float
     http_timeout_seconds: float
 
     @classmethod
@@ -28,7 +27,6 @@ class Settings:
             posters_branch=os.getenv("POSTERS_BRANCH", "main").strip(),
             tmdb_language=os.getenv("TMDB_LANGUAGE", "en-US").strip(),
             batch_limit=max(1, int(os.getenv("BATCH_LIMIT", "5"))),
-            match_accept_score=min(1.0, max(0.0, float(os.getenv("MATCH_ACCEPT_SCORE", "0.94")))),
             http_timeout_seconds=max(5.0, float(os.getenv("HTTP_TIMEOUT_SECONDS", "60"))),
         )
 
