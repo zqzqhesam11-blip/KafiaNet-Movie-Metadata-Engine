@@ -67,6 +67,13 @@ def _clean_hint(value: str) -> str | None:
     if len(value) > MAX_TITLE_HINT_CHARS or len(value.split()) > MAX_TITLE_HINT_WORDS:
         return None
 
+    # Remove bracketed release-year labels before punctuation is normalized,
+    # while preserving numeric movie titles such as "1917" and "2001".
+    value = re.sub(
+        r"(?<!\\w)[\\[(（](?:19|20)\\d{2}[\\])）](?!\\w)",
+        " ",
+        value,
+    )
     # Preserve an opening numeric title (e.g. "1917" or "2001: A Space Odyssey"),
     # while dropping a later release-year suffix from common poster filenames.
     parts = value.split()
