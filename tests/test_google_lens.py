@@ -86,7 +86,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
 
     def test_unrecognized_json_includes_safe_shape_diagnostics(self):
         api = self.make_client({"general": {"query": "hidden"}, "metadata": {"id": "private"}})
-        with self.assertRaisesRegex(BrightDataAPIError, "general=object\[query\]"):
+        with self.assertRaisesRegex(BrightDataAPIError, r"general=object\[query\]"):
             api.search_by_image_url("https://example.com/poster.jpg")
 
     def test_empty_visual_matches_returns_empty_list(self):
