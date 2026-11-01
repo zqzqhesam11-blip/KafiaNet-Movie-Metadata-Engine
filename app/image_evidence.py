@@ -12,6 +12,7 @@ TMDB_MOVIE_RE = re.compile(r"^/movie/(\d+)(?:[-/]|$)", re.IGNORECASE)
 MAX_TITLE_HINT_CHARS = 160
 MAX_TITLE_HINT_WORDS = 22
 MAX_BACKLINKS = 80
+MAX_LENS_TITLE_QUERIES = 5
 YEAR_HINT_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 COUNTRY_RE = re.compile(
     r"\b(?:country(?: of origin)?|production country|production countries)\s*[:=–-]\s*([^|;\n<>]{2,60})",
@@ -28,7 +29,7 @@ GENERIC_WORDS = {
     "original", "large", "small", "medium", "full", "hd", "jpg", "jpeg",
     "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "official",
     "artwork", "bluray", "brrip", "webrip", "webdl", "hdrip",
-    "x264", "x265", "h264", "h265",
+    "x264", "x265", "h264", "h265", "imdb", "tmdb",
 }
 
 
@@ -149,10 +150,12 @@ def _resolved_destination_urls(result: dict) -> list[str]:
 def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
     """Extract official IMDb/TMDB IDs from resolved Lens result destination URLs.
 
-    Search-result captions and image filenames are retained only as diagnostic
-    hints. They are never used as a movie identity or as a TMDB search query.
+    Official IMDb/TMDB IDs are extracted only from destination URLs. Bounded
+    Lens result titles are exposed separately as TMDB search hints; folder
+    names and image filenames are never used for TMDB searching.
     """
     hints: list[str] = []
+    lens_title_queries: list[str] = []
     imdb_ids: list[str] = []
     tmdb_ids: list[int] = []
     year_hints: list[int] = []
@@ -165,9 +168,18 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
             # Provider failures are diagnostics, not image matches or backlinks.
             continue
 
-        title = _clean_hint(str(result.get("title") or ""))
+        raw_result_title = str(result.get("title") or "")
+        title = _clean_hint(raw_result_title)
         if title and title.casefold() not in {item.casefold() for item in hints}:
             hints.append(title)
+        # Only Lens' result title can seed a TMDB query. Never use the image
+        # source URL/filename, catalog folder name, description, or snippet.
+        if (
+            title
+            and title.casefold() not in {item.casefold() for item in lens_title_queries}
+            and len(lens_title_queries) < MAX_LENS_TITLE_QUERIES
+        ):
+            lens_title_queries.append(title)
 
         destination_urls = _resolved_destination_urls(result)
         linked_imdb_ids: list[str] = []
@@ -234,6 +246,7 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
 
     return {
         "title_hints": hints[:80],
+        "lens_title_queries": lens_title_queries[:MAX_LENS_TITLE_QUERIES],
         "imdb_ids": imdb_ids[:80],
         "tmdb_ids": tmdb_ids[:80],
         "year_hints": year_hints[:80],
