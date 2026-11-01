@@ -8,8 +8,7 @@ from app.matching import normalize_title
 
 WORLDWIDE_TITLE_POLICY_VERSION = 1
 WORLDWIDE_TITLE_MIN_MARKETS = 3
-MAX_SEARCH_QUERY_CHARS = 160
-MAX_SEARCH_QUERY_WORDS = 22
+TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p"
 
 
 class TMDBClient:
@@ -33,14 +32,10 @@ class TMDBClient:
         return response.json()
 
     def search_movies(self, title: str, year: int | None = None) -> list[dict[str, Any]]:
-        # Defensive boundary: never send a full article/caption or malformed
-        # unbounded value to TMDB as a movie-title query.
+        # Kept for compatibility with older callers; the current identity
+        # pipeline does not use text search and resolves only Lens TMDB movie IDs.
         query = " ".join(str(title or "").split())
-        if (
-            not query
-            or len(query) > MAX_SEARCH_QUERY_CHARS
-            or len(query.split()) > MAX_SEARCH_QUERY_WORDS
-        ):
+        if not query:
             return []
 
         params: dict[str, Any] = {
@@ -73,10 +68,22 @@ class TMDBClient:
             {
                 "language": self.language,
                 "append_to_response": (
-                    "alternative_titles,credits,release_dates,external_ids,keywords"
+                    "alternative_titles,credits,release_dates,external_ids,keywords,images"
+                ),
+                "include_image_language": (
+                    f"{self.language.split('-', 1)[0]},null" if self.language else "null"
                 ),
             },
         )
+
+    @staticmethod
+    def image_url(file_path: str | None, size: str = "w500") -> str | None:
+        path = str(file_path or "").strip()
+        if not path.startswith("/") or "\n" in path or "\r" in path:
+            return None
+        allowed_sizes = {"w92", "w154", "w185", "w342", "w500", "w780", "original"}
+        selected_size = size if size in allowed_sizes else "w500"
+        return f"{TMDB_IMAGE_BASE_URL}/{selected_size}{path}"
 
     @staticmethod
     def select_worldwide_title(movie: dict[str, Any]) -> dict[str, Any]:
@@ -209,6 +216,46 @@ class TMDBClient:
 
         collection = details.get("belongs_to_collection")
         keywords = (details.get("keywords") or {}).get("keywords") or []
+        image_payload = details.get("images") or {}
+        poster_rows = [
+            item for item in (image_payload.get("posters") or [])
+            if isinstance(item, dict) and TMDBClient.image_url(item.get("file_path"))
+        ]
+        poster_rows.sort(
+            key=lambda item: (
+                str(item.get("iso_639_1") or "") != str(details.get("original_language") or ""),
+                -float(item.get("vote_average") or 0),
+                -int(item.get("vote_count") or 0),
+                -int(item.get("width") or 0),
+            )
+        )
+        posters = [
+            {
+                "file_path": item.get("file_path"),
+                "url": TMDBClient.image_url(item.get("file_path"), "w500"),
+                "original_url": TMDBClient.image_url(item.get("file_path"), "original"),
+                "language": item.get("iso_639_1"),
+                "width": item.get("width"),
+                "height": item.get("height"),
+                "vote_average": item.get("vote_average"),
+                "vote_count": item.get("vote_count"),
+            }
+            for item in poster_rows[:40]
+        ]
+        primary_poster = TMDBClient.image_url(details.get("poster_path"), "w500")
+        if primary_poster and not any(
+            item.get("file_path") == details.get("poster_path") for item in posters
+        ):
+            posters.insert(0, {
+                "file_path": details.get("poster_path"),
+                "url": primary_poster,
+                "original_url": TMDBClient.image_url(details.get("poster_path"), "original"),
+                "language": details.get("original_language"),
+                "width": None,
+                "height": None,
+                "vote_average": None,
+                "vote_count": None,
+            })
 
         return {
             "tmdb_id": details.get("id"),
@@ -232,7 +279,10 @@ class TMDBClient:
             "tagline": details.get("tagline"),
             "homepage": details.get("homepage"),
             "poster_path": details.get("poster_path"),
+            "poster_url": primary_poster,
+            "posters": posters,
             "backdrop_path": details.get("backdrop_path"),
+            "backdrop_url": TMDBClient.image_url(details.get("backdrop_path"), "w780"),
             "popularity": details.get("popularity"),
             "vote_average": details.get("vote_average"),
             "vote_count": details.get("vote_count"),
