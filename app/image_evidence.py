@@ -19,15 +19,15 @@ COUNTRY_RE = re.compile(
     re.IGNORECASE,
 )
 DIRECTOR_RE = re.compile(
-    r"\b(?:director|directed by|dir)\s*[:=–-]\s*([^|;\n<>]{2,80})",
+    r"\b(?:(?:director|dir)\s*[:=–-]\s*|directed by\s+)([^|;\n<>]{2,80})",
     re.IGNORECASE,
 )
 CAST_RE = re.compile(
-    r"\b(?:cast|starring|stars|featuring)\s*[:=–-]\s*([^|;\n<>]{2,180})",
+    r"\b(?:cast|starring|stars|featuring)\s*[:=–-]?\s*([^|;\n<>]{2,180})",
     re.IGNORECASE,
 )
 CHARACTER_RE = re.compile(
-    r"\b(?:main character|lead character|character|role)\s*[:=–-]\s*([^|;\n<>]{2,80})",
+    r"\b(?:main character|lead character|character|role)\s*(?:[:=–-]|\bis\b)\s*([^|;\n<>]{2,80})",
     re.IGNORECASE,
 )
 AS_CHARACTER_RE = re.compile(
