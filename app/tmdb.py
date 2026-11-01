@@ -212,19 +212,6 @@ class TMDBClient:
             for item in poster_rows[:40]
         ]
         primary_poster = TMDBClient.image_url(details.get("poster_path"), "w500")
-        if primary_poster and not any(
-            item.get("file_path") == details.get("poster_path") for item in posters
-        ):
-            posters.insert(0, {
-                "file_path": details.get("poster_path"),
-                "url": primary_poster,
-                "original_url": TMDBClient.image_url(details.get("poster_path"), "original"),
-                "language": details.get("original_language"),
-                "width": None,
-                "height": None,
-                "vote_average": None,
-                "vote_count": None,
-            })
 
         return {
             "tmdb_id": details.get("id"),
