@@ -7,7 +7,7 @@ from urllib.parse import unquote, urlparse
 
 IMDB_ID_RE = re.compile(r"\b(tt\d{5,12})\b", re.IGNORECASE)
 TMDB_MOVIE_RE = re.compile(r"^/movie/(\d+)(?:[-/]|$)", re.IGNORECASE)
-# TinEye result titles may be full article captions or snippets rather than
+# reverse-image result titles may be full article captions or snippets rather than
 # image/movie titles. Keep hints bounded before they can reach the TMDB API.
 MAX_TITLE_HINT_CHARS = 160
 MAX_TITLE_HINT_WORDS = 22
@@ -94,8 +94,8 @@ def _clean_hint(value: str) -> str | None:
     return hint if len(hint) >= 3 else None
 
 
-def extract_tineye_evidence(results: list[dict]) -> dict[str, list]:
-    """Extract conservative title hints and trusted external movie IDs from TinEye backlinks."""
+def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
+    """Extract conservative title hints and trusted external movie IDs from reverse-image backlinks."""
     hints: list[str] = []
     imdb_ids: list[str] = []
     tmdb_ids: list[int] = []

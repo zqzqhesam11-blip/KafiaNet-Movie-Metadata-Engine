@@ -2,76 +2,85 @@
 
 Cloud worker for enriching the public KafiaNet poster catalog with verified TMDB metadata.
 
-## Repositories
+## Repositories and providers
 
 - Source images: `zqzqhesam11-blip/KafiaNet-Movie-Posters` (public).
-- Engine code: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine` on `main`.
-- Reverse-image service: deploy the same repository on branch `feature/kafianet-searxng-auth-20261031` as the separate Hostless app `KafiaNet-SearXNG`.
-- Results are written back to the **poster repository**, so metadata commits do not trigger a redeploy of this engine.
+- Engine code: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine`.
+- Reverse-image provider: Google Lens through the Bright Data SERP API.
+- Metadata results are written to the poster repository only when APPLY is explicitly requested.
 
-## Safety and processing behavior
+## Free-tier and no-payment setup
+
+Bright Data advertises a recurring SERP API free tier of **5,000 requests per month with no credit card required**. The allowance renews monthly. Bright Data's free-tier guidance says requests stop when the free allowance is exhausted unless the account has deposited funds.
+
+To keep this project free:
+- Create/use only the SERP API free tier.
+- Do not add a payment card, deposit funds, or activate a paid plan.
+- Do not configure automatic top-ups or any paid balance.
+- If Bright Data reports HTTP 402 or 429, stop the batch. Do not retry repeatedly and do not add funds.
+- The engine sends one Google Lens request per poster and does not automatically retry.
+- Bright Data free credits may be shared with other products or tools using the same account. Keep the key private.
+
+References:
+- https://brightdata.com/products/serp-api/google-search/reverse-image
+- https://github.com/brightdata/cli#free-tier
+
+**Important:** DRY_RUN does not write to the poster repository, but it does perform live Google Lens requests and consumes Bright Data free-tier requests. Start with `--limit 1`.
+
+## Safety and matching behavior
 
 - The CLI defaults to **DRY RUN**. It never writes to GitHub unless `--apply` is supplied.
-- During APPLY, source movie folders are moved into `جاهز/` or `مراجعة/` in one Git tree commit together with their JSON metadata.
-- **The source movie-folder name is never changed**, even when its title or year is wrong. The folder is only classified/moved under `جاهز/`, `مراجعة/`, or `مكرر/` using its exact original name. Only the JSON basename changes to the verified TMDB worldwide title and release year. The JSON metadata records the original folder name and TMDB correction separately.
-- Image filenames, extensions, and bytes are unchanged; existing Git blob SHAs are reused instead of downloading and re-uploading images.
-- Every non-JSON file in a selected movie folder moves with that folder. The metadata JSON is written separately.
-- A confirmed movie's JSON filename uses the best-supported worldwide public title/year. TMDB's primary title is kept unless the same alternative title is recorded in at least three distinct country markets; a tie keeps the primary title. The rule is language-neutral and never strips original-script text automatically. The chosen title and market evidence are recorded in JSON; the full original and alternative titles remain available in TMDB metadata. A movie that remains unresolved in `مراجعة/` keeps its original folder name as the JSON filename.
-- Existing `مراجعة/` entries are re-scanned on later batches and can be promoted to `جاهز/` when a later match is verified. `جاهز/` and `مكرر/` are not treated as new source folders.
-- **Mandatory title matching applies to every movie**, not just cases with competing TMDB candidates. Before a result can become READY, its TMDB title or original title must match either a title variant from the source folder or a meaningful title extracted from the TinEye poster results. A trusted IMDb/TMDB ID alone is never sufficient; a missing or weak title match stays in `مراجعة`. The match score, matched title, and evidence source are recorded in the JSON.
-- TinEye backlinks are retained with their per-result IMDb/TMDB IDs and any available snippet metadata for year, country, and director. When the poster's trusted external ID and folder search produce different TMDB IDs with the same title/year, the engine compares TMDB production country, director, runtime, and release metadata, stores the competing records, and lets the trusted linked ID distinguish the title collision. Different-title/year conflicts and multiple distinct trusted IDs still go to `مراجعة`.
-- If SearXNG reports TinEye as unresponsive, the engine records the reason from `unresponsive_engines` rather than treating an upstream failure as a normal empty search. A transient empty/error response does not overwrite previously saved usable TinEye matches; those saved matches are reused and identified by `results_source`.
-- Every processing run requires the separately deployed, Bearer-protected KafiaNet-SearXNG app; there is no silent fallback to title-only matching.
+- During APPLY, source movie folders are classified into `جاهز/` or `مراجعة/` in one Git tree commit with their JSON metadata.
+- The source movie-folder name is never changed. Only the JSON basename changes to the verified TMDB worldwide title and release year.
+- Image filenames, extensions, bytes, and Git blob SHAs are preserved.
+- Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
+- **Mandatory title matching applies to every movie.** Before a result can become READY, its TMDB title or original title must match either a source-folder title variant or a meaningful Google Lens poster title. A trusted IMDb/TMDB ID alone is never sufficient.
+- Google Lens result links are retained with their associated IMDb/TMDB IDs and available matched-image evidence. When TMDB candidates share the same title/year, the engine compares production country, director, runtime, and release metadata.
+- A failed, blocked, or unparsed live response is recorded as an error, not as a successful empty result. Previously saved usable reverse-image evidence remains reusable.
 - Duplicate identity is based on TMDB movie ID, not title spelling.
 - API keys and tokens are read only from Hostless environment variables. Never commit secrets.
 
 ## Hostless setup
 
-Connect this repository to Hostless as a Docker-based app. The included `hostless.yaml` configures the Docker build and the `/health` HTTP health check. Scheduled runs, when needed, are managed from the Hostless dashboard.
-
-Before enabling a scheduled run, configure the environment variables below and inspect a five-film DRY_RUN report.
+Connect this repository to Hostless as a Docker-based app. The included `hostless.yaml` configures the Docker build and the `/health` HTTP health check.
 
 Required environment variables:
 
 - `TMDB_BEARER_TOKEN`: TMDB v3 API Bearer token.
-- `SEARXNG_URL`: base URL of the separately deployed `KafiaNet-SearXNG` Hostless app.
-- `SEARXNG_TOKEN`: same Bearer token configured on that SearXNG app.
-- `GITHUB_TOKEN`: fine-grained token with Contents read/write on the poster repository; required only for `--apply`.
+- `BRIGHTDATA_API_KEY`: Bright Data API key, stored as a Hostless secret.
+- `BRIGHTDATA_SERP_ZONE`: name of the SERP API free-tier zone created in Bright Data.
+- `GITHUB_TOKEN`: fine-grained token with Contents read/write on the poster repository; required only for APPLY.
 - `POSTERS_REPO`: defaults to `zqzqhesam11-blip/KafiaNet-Movie-Posters`.
 - `POSTERS_BRANCH`: defaults to `main`.
 
-Optional:
+Optional: `TMDB_LANGUAGE` (default `en-US`), `BATCH_LIMIT` (default `5`), `MATCH_ACCEPT_SCORE` (default `0.94`), `HTTP_TIMEOUT_SECONDS` (default `60`).
 
-- `TMDB_LANGUAGE`: defaults to `en-US`.
-- `BATCH_LIMIT`: defaults to `5`.
-- `MATCH_ACCEPT_SCORE`: defaults to `0.94`.
+### Configuration preflight
 
-The SearXNG app itself also needs two secrets: `SEARXNG_TOKEN` (shared with this engine app) and `SEARXNG_SECRET` (unique to SearXNG and not copied to the engine app). TinEye backlinks are used as title hints and, when present on trusted IMDb/TMDB domains, as external movie-ID evidence. Conflicting evidence is routed to review.
+Run:
 
-This product uses the TMDB API but is not endorsed or certified by TMDB.
+```bash
+python -m app.cli check-brightdata-config
+```
 
-## Local checks and commands
+This verifies that required environment variables are present. It intentionally sends **no network request** and does not consume credits or prove that the API key/zone is active.
+
+## Local checks
 
 ```bash
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-python -m app.cli run --limit 5
+python -m app.cli check-brightdata-config
+python -m app.cli run --limit 1
 ```
 
-The CLI prints a compact batch summary by default; it does not dump every movie's JSON metadata or long file-path arrays into the terminal. Use `--verbose` only when you explicitly need the full JSON report. The command above is read-only DRY RUN.
-
-
-```bash
-python -m app.cli run --limit 5 --apply
-```
-
-APPLY creates one atomic Git commit in the configured poster repository for each batch. Do not run it until the DRY_RUN report has been checked.
+The `run --limit 1` command is a live **DRY RUN** unless `--apply` is supplied. Inspect its results before processing a larger batch. APPLY writes one Git commit per batch.
 
 ## Output layout
 
-- `جاهز/<exact-original-source-folder>/<canonical-title> (<year>).json`: high-confidence TMDB match. The directory name remains exactly as supplied; only the JSON filename uses the verified canonical title/year.
-- `مراجعة/<exact-original-source-folder>/<exact-original-source-folder>.json`: uncertain or missing match. Its folder and JSON filename retain the original name until a match is verified.
-- `مكرر/<tmdb-id>/<exact-original-source-folder>/<canonical-title> (<year>).json`: each source folder sharing a TMDB ID; its source-folder portion is not renamed.
+- `جاهز/<exact-original-source-folder>/<canonical-title> (<year>).json`: verified TMDB match.
+- `مراجعة/<exact-original-source-folder>/<exact-original-source-folder>.json`: uncertain match.
+- `مكرر/<tmdb-id>/<exact-original-source-folder>/<canonical-title> (<year>).json`: another source folder with the same TMDB identity.
 - `metadata/index.json`: source-folder to TMDB identity/status mapping.
 
-All image and other non-JSON files are kept inside the corresponding movie folder when it moves. The image paths and raw image URLs in the JSON metadata and index are updated to their destination paths.
+The metadata schema writes new provider evidence under `reverse_image` and can still read legacy `tineye` evidence saved by older runs.

@@ -8,14 +8,14 @@ from typing import Any
 from app.config import Settings
 from app.github_api import GitHubAPI
 from app.matching import classify_match, normalize_title, score_candidate, split_title_year, title_search_variants, title_similarity
-from app.tineye_evidence import extract_tineye_evidence
-from app.searxng import SearXNGClient
+from app.image_evidence import extract_reverse_image_evidence
+from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
 from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
 
 
 SCHEMA_VERSION = 2
 MIN_REQUIRED_TITLE_MATCH = 0.88
-TINEYE_TITLE_HINT_LIMIT = 8
+REVERSE_IMAGE_TITLE_HINT_LIMIT = 8
 
 
 def safe_segment(value: str) -> str:
@@ -26,6 +26,8 @@ def safe_segment(value: str) -> str:
 class MetadataEngine:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._stop_batch = False
+        self._provider_stop_status: int | None = None
         self._details_cache: dict[int, dict[str, Any]] = {}
         self.github = GitHubAPI(
             settings.posters_repo,
@@ -38,27 +40,32 @@ class MetadataEngine:
             settings.tmdb_language,
             settings.http_timeout_seconds,
         )
-        self.searxng = (
-            SearXNGClient(
-                settings.searxng_url,
-                settings.searxng_token,
-                timeout=max(45, settings.http_timeout_seconds),
-            )
-            if settings.searxng_url
-            else None
+        self.reverse_image = BrightDataGoogleLensClient(
+            settings.brightdata_api_key,
+            settings.brightdata_serp_zone,
+            timeout=max(45, settings.http_timeout_seconds),
         )
 
     def close(self) -> None:
         self.github.close()
         self.tmdb.close()
-        if self.searxng:
-            self.searxng.close()
+        if self.reverse_image:
+            self.reverse_image.close()
 
-    def _tineye_results(self, image_url: str) -> list[dict[str, Any]]:
-        if not self.searxng:
+    def _reverse_image_results(self, image_url: str) -> list[dict[str, Any]]:
+        if not self.reverse_image:
             return []
         try:
-            return self.searxng.tineye_by_image_url(image_url)
+            return self.reverse_image.search_by_image_url(image_url)
+        except BrightDataQuotaError as exc:
+            # Free quota exhaustion and provider throttling stop the whole batch.
+            self._stop_batch = True
+            self._provider_stop_status = exc.status_code
+            return [{
+                "error": type(exc).__name__,
+                "message": str(exc)[:300],
+                "stop_batch": True,
+            }]
         except Exception as exc:
             # A reverse-image provider failure must never invent or block TMDB identity.
             return [{"error": type(exc).__name__, "message": str(exc)[:300]}]
@@ -102,12 +109,12 @@ class MetadataEngine:
         self,
         title: str,
         year: int | None,
-        tineye_results: list[dict[str, Any]],
+        reverse_image_results: list[dict[str, Any]],
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
-        evidence = extract_tineye_evidence(tineye_results)
-        tineye_failed = any(
+        evidence = extract_reverse_image_evidence(reverse_image_results)
+        reverse_image_failed = any(
             isinstance(item, dict) and item.get("error")
-            for item in tineye_results
+            for item in reverse_image_results
         )
         candidates: dict[str, dict[str, Any]] = {}
         sources: dict[str, set[str]] = {}
@@ -142,23 +149,23 @@ class MetadataEngine:
                 for candidate in self.tmdb.search_movies(folder_variant, None):
                     add_candidate(candidate, "folder_search")
 
-        # TinEye image filenames can carry a useful film title even when the
+        # Google Lens image filenames can carry a useful film title even when the
         # local folder name is abbreviated or misspelled. Keep fan-out bounded.
         seen_hints = {normalize_title(value) for value in folder_title_variants}
-        for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]:
+        for hint in evidence["title_hints"][:REVERSE_IMAGE_TITLE_HINT_LIMIT]:
             normalized_hint = normalize_title(hint)
             if not normalized_hint or normalized_hint in seen_hints:
                 continue
             seen_hints.add(normalized_hint)
             for candidate in self.tmdb.search_movies(hint, year):
-                add_candidate(candidate, "tineye_title")
+                add_candidate(candidate, "reverse_image_title")
 
-        # Trusted IMDb / TMDB URLs found in TinEye backlinks are stronger than
+        # Trusted IMDb / TMDB URLs found in Google Lens backlinks are stronger than
         # a guessed filename. IDs are accepted only from the official domains.
         for imdb_id in evidence["imdb_ids"][:3]:
             try:
                 for candidate in self.tmdb.find_by_imdb_id(imdb_id):
-                    add_candidate(candidate, "tineye_imdb")
+                    add_candidate(candidate, "reverse_image_imdb")
             except Exception as exc:
                 resolution_errors.append(
                     {"type": "imdb_lookup", "id": imdb_id, "error": type(exc).__name__}
@@ -168,7 +175,7 @@ class MetadataEngine:
             try:
                 details = self.tmdb.movie_details(int(tmdb_id))
                 self._details_cache[int(tmdb_id)] = details
-                add_candidate(details, "tineye_tmdb")
+                add_candidate(details, "reverse_image_tmdb")
             except Exception as exc:
                 resolution_errors.append(
                     {"type": "tmdb_lookup", "id": str(tmdb_id), "error": type(exc).__name__}
@@ -184,7 +191,7 @@ class MetadataEngine:
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "TMDB returned no candidates from folder or TinEye evidence",
+                "reason": "TMDB returned no candidates from folder or Google Lens evidence",
             }, evidence
 
         def best_folder_match(candidate: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -195,7 +202,7 @@ class MetadataEngine:
             return max(scored_variants, key=lambda row: row[0]["confidence"])
 
         def title_match_detail(candidate: dict[str, Any]) -> dict[str, Any]:
-            """Require a meaningful title match from the folder or TinEye poster evidence."""
+            """Require a meaningful title match from the folder or Google Lens poster evidence."""
             candidate_names = [
                 str(candidate.get("title") or "").strip(),
                 str(candidate.get("original_title") or "").strip(),
@@ -206,20 +213,20 @@ class MetadataEngine:
                 for name in candidate_names
                 if variant and name
             ]
-            tineye_matches = [
+            reverse_image_matches = [
                 (title_similarity(hint, name), hint, name)
-                for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]
+                for hint in evidence["title_hints"][:REVERSE_IMAGE_TITLE_HINT_LIMIT]
                 for name in candidate_names
                 if hint and name
             ]
             best_folder = max(folder_matches, default=(0.0, None, None))
-            best_tineye = max(tineye_matches, default=(0.0, None, None))
-            if best_folder[0] >= best_tineye[0]:
+            best_reverse_image = max(reverse_image_matches, default=(0.0, None, None))
+            if best_folder[0] >= best_reverse_image[0]:
                 score, source_value, matched_name = best_folder
                 source = "source_folder"
             else:
-                score, source_value, matched_name = best_tineye
-                source = "tineye_poster_title"
+                score, source_value, matched_name = best_reverse_image
+                source = "reverse_image_poster_title"
             return {
                 "title_match_score": round(float(score), 4),
                 "title_match_source": source if score else "none",
@@ -230,10 +237,10 @@ class MetadataEngine:
             }
 
         # A trusted IMDb/TMDB ID is never enough by itself: every candidate
-        # must also match a title from the source folder or from the TinEye
+        # must also match a title from the source folder or from the Google Lens
         # poster filename/title evidence, even when no competing candidate exists.
         rejected_external_ids: list[dict[str, Any]] = []
-        direct_sources = {"tineye_imdb", "tineye_tmdb"}
+        direct_sources = {"reverse_image_imdb", "reverse_image_tmdb"}
         for candidate_id in list(candidates):
             candidate_sources = sources.get(candidate_id, set())
             if not (candidate_sources & direct_sources):
@@ -245,8 +252,8 @@ class MetadataEngine:
             rejection_reason = None
             if not title_detail["title_match_passed"]:
                 rejection_reason = (
-                    "TinEye external ID rejected because the candidate title does not match "
-                    "the source folder or any TinEye poster title"
+                    "Google Lens external ID rejected because the candidate title does not match "
+                    "the source folder or any Google Lens poster title"
                 )
             elif year is not None and folder_detail["tmdb_year"] is None:
                 rejection_reason = "TMDB candidate has no release year while the source folder has one"
@@ -260,7 +267,7 @@ class MetadataEngine:
                 )
             ):
                 rejection_reason = (
-                    "TinEye external ID year differs by more than one year without an independent exact-title search match"
+                    "Google Lens external ID year differs by more than one year without an independent exact-title search match"
                 )
 
             if rejection_reason:
@@ -287,12 +294,12 @@ class MetadataEngine:
                 "status": "review",
                 "confidence": 0.0,
                 "reason": (
-                    "No candidate passed the mandatory title match against the source folder or TinEye poster title"
+                    "No candidate passed the mandatory title match against the source folder or Google Lens poster title"
                     if any(
                         "title does not match" in str(item.get("reason") or "")
                         for item in rejected_external_ids
                     )
-                    else "TinEye external IDs failed source-year validation; no independent TMDB title candidate remained"
+                    else "Google Lens external IDs failed source-year validation; no independent TMDB title candidate remained"
                 ),
                 "candidate_ids": [
                     item["candidate_id"] for item in rejected_external_ids
@@ -304,14 +311,14 @@ class MetadataEngine:
             folder_similarity = float(folder_detail["title_similarity"])
             hint_scores = [
                 (title_similarity(hint, str(candidate.get("title") or "")), hint)
-                for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]
+                for hint in evidence["title_hints"][:REVERSE_IMAGE_TITLE_HINT_LIMIT]
             ] + [
                 (title_similarity(hint, str(candidate.get("original_title") or "")), hint)
-                for hint in evidence["title_hints"][:TINEYE_TITLE_HINT_LIMIT]
+                for hint in evidence["title_hints"][:REVERSE_IMAGE_TITLE_HINT_LIMIT]
             ]
-            tineye_similarity, best_tineye_hint = max(hint_scores, default=(0.0, None))
+            reverse_image_similarity, best_reverse_image_hint = max(hint_scores, default=(0.0, None))
             title_detail = title_match_detail(candidate)
-            best_similarity = max(folder_similarity, tineye_similarity)
+            best_similarity = max(folder_similarity, reverse_image_similarity)
 
             tmdb_year = folder_detail["tmdb_year"]
             year_delta = folder_detail["year_delta"]
@@ -326,8 +333,8 @@ class MetadataEngine:
                 "title_similarity": round(best_similarity, 4),
                 "folder_title_similarity": round(folder_similarity, 4),
                 "best_folder_title_variant": best_folder_variant,
-                "tineye_title_similarity": round(tineye_similarity, 4),
-                "best_tineye_hint": best_tineye_hint if tineye_similarity > 0 else None,
+                "reverse_image_title_similarity": round(reverse_image_similarity, 4),
+                "best_reverse_image_hint": best_reverse_image_hint if reverse_image_similarity > 0 else None,
                 **title_detail,
                 "source_year": year,
                 "tmdb_year": tmdb_year,
@@ -341,23 +348,23 @@ class MetadataEngine:
         ]
         scored.sort(key=lambda row: row[0], reverse=True)
 
-        if not tineye_results:
+        if not reverse_image_results:
             return None, {
                 "status": "review",
                 **scored[0][3],
-                "reason": "TinEye returned no reverse-image matches; title-only candidate requires review",
+                "reason": "Google Lens returned no reverse-image matches; title-only candidate requires review",
                 "candidate_id": scored[0][2].get("id"),
                 "candidate_title": scored[0][2].get("title"),
             }, evidence
 
-        if tineye_failed or resolution_errors:
+        if reverse_image_failed or resolution_errors:
             return None, {
                 "status": "review",
                 **scored[0][3],
                 "reason": (
-                    "TinEye reverse-image request failed; folder-only candidate must be reviewed"
-                    if tineye_failed
-                    else "TMDB could not resolve a TinEye external movie ID; candidate must be reviewed"
+                    "Google Lens reverse-image request failed; folder-only candidate must be reviewed"
+                    if reverse_image_failed
+                    else "TMDB could not resolve a Google Lens external movie ID; candidate must be reviewed"
                 ),
                 "candidate_id": scored[0][2].get("id"),
                 "candidate_title": scored[0][2].get("title"),
@@ -371,7 +378,7 @@ class MetadataEngine:
             for candidate_id, candidate_sources in sources.items()
             if candidate_id in candidates
             and candidate_id not in rejected_ids
-            and ({"tineye_imdb", "tineye_tmdb"} & candidate_sources)
+            and ({"reverse_image_imdb", "reverse_image_tmdb"} & candidate_sources)
         }
 
         # Multiple distinct direct IDs from image backlinks are conflicting
@@ -380,7 +387,7 @@ class MetadataEngine:
             return None, {
                 "status": "review",
                 "confidence": scored[0][0],
-                "reason": "TinEye backlinks resolved to multiple different TMDB movie IDs",
+                "reason": "Google Lens backlinks resolved to multiple different TMDB movie IDs",
                 "candidate_ids": sorted(direct_ids, key=int),
             }, evidence
 
@@ -450,7 +457,7 @@ class MetadataEngine:
                 return None, {
                     "status": "review",
                     **direct_detail,
-                    "reason": "TinEye external ID conflicts with a different high-confidence folder-title candidate",
+                    "reason": "Google Lens external ID conflicts with a different high-confidence folder-title candidate",
                     "candidate_ids": [
                         direct_id,
                         *[item["candidate_id"] for item in unresolved_folder_conflicts[:3]],
@@ -474,7 +481,7 @@ class MetadataEngine:
                 return None, {
                     "status": "review",
                     **direct_detail,
-                    "reason": "TinEye external ID conflicts with the source folder year and lacks independent exact-title confirmation",
+                    "reason": "Google Lens external ID conflicts with the source folder year and lacks independent exact-title confirmation",
                     "candidate_id": direct_id,
                     "candidate_title": direct_candidate.get("title"),
                 }, evidence
@@ -486,13 +493,13 @@ class MetadataEngine:
                 "source_year_corrected": source_year_corrected,
                 "same_title_year_collision_resolved": bool(same_title_year_candidates),
                 "reason": (
-                    "TinEye IMDb/TMDB backlink resolved a same-title/year collision using the linked movie ID and TMDB identity metadata"
+                    "Google Lens IMDb/TMDB backlink resolved a same-title/year collision using the linked movie ID and TMDB identity metadata"
                     if same_title_year_candidates
                     else (
-                        "TinEye ID and independent exact folder-title search agree; "
+                        "Google Lens ID and independent exact folder-title search agree; "
                         "TMDB release year will be used for the JSON filename"
                         if source_year_corrected
-                        else "TinEye backlink resolved to a single title/year-validated IMDb/TMDB movie ID"
+                        else "Google Lens backlink resolved to a single title/year-validated IMDb/TMDB movie ID"
                     )
                 ),
             }, evidence
@@ -500,7 +507,7 @@ class MetadataEngine:
         top_score, top_id, top_candidate, top_detail = scored[0]
         second_score = scored[1][0] if len(scored) > 1 else 0.0
 
-        # If folder-name matching and TinEye-title matching strongly disagree,
+        # If folder-name matching and Google Lens-title matching strongly disagree,
         # preserve both candidates for review rather than blending the signals.
         folder_ranked = sorted(
             (
@@ -518,7 +525,7 @@ class MetadataEngine:
             return None, {
                 "status": "review",
                 **top_detail,
-                "reason": "TinEye title evidence conflicts with a high-confidence folder-title match",
+                "reason": "Google Lens title evidence conflicts with a high-confidence folder-title match",
                 "candidate_ids": [top_id, folder_ranked[0][1]],
             }, evidence
 
@@ -534,7 +541,7 @@ class MetadataEngine:
             top_detail["year_delta"] is not None
             and top_detail["year_delta"] > 1
             and top_detail["folder_title_similarity"] >= 0.98
-            and top_detail["tineye_title_similarity"] >= 0.94
+            and top_detail["reverse_image_title_similarity"] >= 0.94
             and "folder_search" in sources.get(top_id, set())
         )
         if source_year_corrected:
@@ -544,7 +551,7 @@ class MetadataEngine:
                 "confidence": 1.0,
                 "source_year_corrected": True,
                 "reason": (
-                    "Exact source-folder title, independent TinEye title hint, "
+                    "Exact source-folder title, independent Google Lens title hint, "
                     "and TMDB search agree; TMDB release year will be used for the JSON filename"
                 ),
             }, evidence
@@ -555,7 +562,7 @@ class MetadataEngine:
                 **top_detail,
                 "reason": (
                     "Candidate did not pass the mandatory title match against "
-                    "the source folder or TinEye poster title"
+                    "the source folder or Google Lens poster title"
                 ),
                 "candidate_id": top_candidate.get("id"),
                 "candidate_title": top_candidate.get("title"),
@@ -566,7 +573,7 @@ class MetadataEngine:
             return None, {
                 "status": "review",
                 **top_detail,
-                "reason": "Combined folder/TinEye title and year confidence is below the automatic-accept threshold",
+                "reason": "Combined folder/Google Lens title and year confidence is below the automatic-accept threshold",
                 "candidate_id": top_candidate.get("id"),
                 "candidate_title": top_candidate.get("title"),
             }, evidence
@@ -574,7 +581,7 @@ class MetadataEngine:
         return top_candidate, {
             "status": "ready",
             **top_detail,
-            "reason": "High-confidence folder title or TinEye image-title match",
+            "reason": "High-confidence folder title or Google Lens image-title match",
         }, evidence
 
     def _record_for_folder(
@@ -587,29 +594,29 @@ class MetadataEngine:
         title_hint, year_hint = split_title_year(folder)
         image_url = self.github.raw_url(image_path)
 
-        latest_tineye_results = self._tineye_results(image_url)
+        latest_reverse_image_results = self._reverse_image_results(image_url)
         latest_errors = [
-            item for item in latest_tineye_results
+            item for item in latest_reverse_image_results
             if isinstance(item, dict) and item.get("error")
         ]
         latest_query_status = (
             "error" if latest_errors
-            else "ok" if latest_tineye_results
+            else "ok" if latest_reverse_image_results
             else "no_matches"
         )
 
-        # A temporary empty/unresponsive TinEye response must not erase useful
+        # A temporary empty/unresponsive Google Lens response must not erase useful
         # reverse-image evidence already stored for this exact poster.
-        tineye_results = latest_tineye_results
-        tineye_results_source = "live"
-        if not latest_tineye_results or latest_errors:
+        reverse_image_results = latest_reverse_image_results
+        reverse_image_results_source = "live"
+        if not latest_reverse_image_results or latest_errors:
             previous_record = (
                 self.github.get_json_file(previous_output_path)
                 if previous_output_path
                 else None
             )
-            previous_tineye = (previous_record or {}).get("tineye") or {}
-            saved_results = previous_tineye.get("results") or []
+            previous_reverse_image = (previous_record or {}).get("reverse_image") or (previous_record or {}).get("tineye") or {}
+            saved_results = previous_reverse_image.get("results") or []
             reusable_results = [
                 result for result in saved_results
                 if isinstance(result, dict)
@@ -617,11 +624,11 @@ class MetadataEngine:
                 and any(result.get(key) for key in ("title", "url", "source"))
             ]
             if reusable_results:
-                tineye_results = reusable_results
-                tineye_results_source = "previous_saved"
+                reverse_image_results = reusable_results
+                reverse_image_results_source = "previous_saved"
 
-        candidate, match, tineye_evidence = self._find_movie(title_hint, year_hint, tineye_results)
-        tineye_evidence["results_source"] = tineye_results_source
+        candidate, match, reverse_image_evidence = self._find_movie(title_hint, year_hint, reverse_image_results)
+        reverse_image_evidence["results_source"] = reverse_image_results_source
 
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -639,15 +646,17 @@ class MetadataEngine:
                 "year_hint": year_hint,
             },
             "match": match,
-            "tineye": {
-                "enabled": self.searxng is not None,
-                "results": tineye_results,
-                "results_source": tineye_results_source,
+            "reverse_image": {
+                "enabled": self.reverse_image is not None,
+                "provider": "google_lens_brightdata",
+                "provider": "google_lens_brightdata",
+                "results": reverse_image_results,
+                "results_source": reverse_image_results_source,
                 "latest_query": {
                     "status": latest_query_status,
                     "errors": latest_errors,
                 },
-                "evidence": tineye_evidence,
+                "evidence": reverse_image_evidence,
             },
         }
 
@@ -689,6 +698,8 @@ class MetadataEngine:
         return record
 
     def run_batch(self, limit: int, apply: bool) -> dict[str, Any]:
+        self._stop_batch = False
+        self._provider_stop_status = None
         self.settings.validate_for_processing(apply=apply)
 
         print("[KafiaNet] Scanning poster repository...", flush=True)
@@ -724,7 +735,7 @@ class MetadataEngine:
                 )
             except Exception as exc:
                 # Isolate failures to this film. Persist it as REVIEW so a later
-                # batch can retry it; one malformed TinEye title or API response
+                # batch can retry it; one malformed Google Lens title or API response
                 # must not abort the remaining films in the batch.
                 folder = item["folder"]
                 image_path = item["image_path"]
@@ -738,9 +749,9 @@ class MetadataEngine:
                         # Preserve the original processing error; Git history still
                         # retains the previously committed metadata if this read fails.
                         previous_record = None
-                previous_tineye = (previous_record or {}).get("tineye") or {}
-                previous_tineye_results = [
-                    result for result in (previous_tineye.get("results") or [])
+                previous_reverse_image = (previous_record or {}).get("reverse_image") or (previous_record or {}).get("tineye") or {}
+                previous_reverse_image_results = [
+                    result for result in (previous_reverse_image.get("results") or [])
                     if isinstance(result, dict)
                     and not result.get("error")
                     and any(result.get(key) for key in ("title", "url", "source"))
@@ -765,10 +776,11 @@ class MetadataEngine:
                         "confidence": 0.0,
                         "reason": "Processing failed before a verified movie match; item is eligible for retry",
                     },
-                    "tineye": {
-                        "enabled": self.searxng is not None,
-                        "results": previous_tineye_results,
-                        "results_source": "previous_saved" if previous_tineye_results else "none",
+                    "reverse_image": {
+                        "enabled": self.reverse_image is not None,
+                "provider": "google_lens_brightdata",
+                        "results": previous_reverse_image_results,
+                        "results_source": "previous_saved" if previous_reverse_image_results else "none",
                         "latest_query": {
                             "status": "processing_error",
                             "errors": [{
@@ -776,7 +788,7 @@ class MetadataEngine:
                                 "message": str(exc).replace("\\n", " ")[:300],
                             }],
                         },
-                        "evidence": previous_tineye.get("evidence") or {},
+                        "evidence": previous_reverse_image.get("evidence") or {},
                     },
                     "tmdb": None,
                     "correction": None,
@@ -793,9 +805,9 @@ class MetadataEngine:
                 )
             records.append(record)
             tmdb_id = (record.get("tmdb") or {}).get("tmdb_id")
-            tineye_info = record.get("tineye") or {}
-            latest_query_status = (tineye_info.get("latest_query") or {}).get("status", "unknown")
-            tineye_source = tineye_info.get("results_source", "live")
+            reverse_image_info = record.get("reverse_image") or {}
+            latest_query_status = (reverse_image_info.get("latest_query") or {}).get("status", "unknown")
+            reverse_image_source = reverse_image_info.get("results_source", "live")
             match_info = record.get("match") or {}
             reason = str(match_info.get("reason") or "unknown")
             reason = " ".join(reason.replace('"', "'").replace("\\r", " ").replace("\\n", " ").split())[:150]
@@ -805,18 +817,65 @@ class MetadataEngine:
             candidate_text = ",".join(str(value) for value in candidate_ids[:4]) or "none"
             rejected_ids = [
                 str(value.get("candidate_id"))
-                for value in (tineye_info.get("evidence") or {}).get("rejected_external_ids", [])
+                for value in (reverse_image_info.get("evidence") or {}).get("rejected_external_ids", [])
                 if isinstance(value, dict) and value.get("candidate_id") is not None
             ]
             rejected_text = ",".join(rejected_ids[:4]) or "none"
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
-                f"tineye={latest_query_status} evidence={tineye_source} "
+                f"reverse_image={latest_query_status} evidence={reverse_image_source} "
                 f'reason="{reason}" candidates={candidate_text} '
                 f"rejected_external_ids={rejected_text}",
                 flush=True,
             )
+            if self._stop_batch:
+                print(
+                    f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status}; "
+                    "remaining posters were not queried and this batch will not write catalog changes.",
+                    flush=True,
+                )
+                break
+
+        if self._stop_batch:
+            return {
+                "mode": "STOPPED_PROVIDER_LIMIT",
+                "source_repo": self.settings.posters_repo,
+                "branch": self.settings.posters_branch,
+                "source_folders_found": len(folders),
+                "already_indexed_before_batch": len(old_items),
+                "batch_requested": limit,
+                "batch_selected": len(records),
+                "ready": sum(1 for item in records if item.get("status") == "ready"),
+                "review": sum(1 for item in records if item.get("status") == "review"),
+                "duplicates_in_this_batch": sum(1 for item in records if item.get("status") == "duplicate"),
+                "reverse_image_unresponsive": sum(
+                    1 for item in records
+                    if (item.get("reverse_image") or {}).get("latest_query", {}).get("status")
+                    in {"error", "processing_error"}
+                ),
+                "reverse_image_no_matches": sum(
+                    1 for item in records
+                    if (item.get("reverse_image") or {}).get("latest_query", {}).get("status") == "no_matches"
+                ),
+                "reverse_image_previous_evidence_reused": sum(
+                    1 for item in records
+                    if (item.get("reverse_image") or {}).get("results_source") == "previous_saved"
+                ),
+                "reverse_image_rejected_external_ids": sum(
+                    len(((item.get("reverse_image") or {}).get("evidence") or {}).get("rejected_external_ids", []))
+                    for item in records
+                ),
+                "planned_output_files": [],
+                "planned_image_moves": [],
+                "planned_source_image_deletes": [],
+                "written_files": 0,
+                "moved_image_files": 0,
+                "deleted_old_files": 0,
+                "provider_stop_status": self._provider_stop_status,
+                "records": records,
+                "next_pending_estimate": max(0, len(pending) - len(records)),
+            }
 
         projected = list(old_items)
         previous_by_folder = {str(row.get("source_folder")): row for row in projected}
@@ -1043,23 +1102,23 @@ class MetadataEngine:
             "ready": ready_count,
             "review": review_count,
             "duplicates_in_this_batch": duplicate_count,
-            "tineye_unresponsive": sum(
+            "reverse_image_unresponsive": sum(
                 1 for record in records
-                if (record.get("tineye") or {}).get("latest_query", {}).get("status")
+                if (record.get("reverse_image") or {}).get("latest_query", {}).get("status")
                 in {"error", "processing_error"}
             ),
-            "tineye_no_matches": sum(
+            "reverse_image_no_matches": sum(
                 1 for record in records
-                if (record.get("tineye") or {}).get("latest_query", {}).get("status")
+                if (record.get("reverse_image") or {}).get("latest_query", {}).get("status")
                 == "no_matches"
             ),
-            "tineye_previous_evidence_reused": sum(
+            "reverse_image_previous_evidence_reused": sum(
                 1 for record in records
-                if (record.get("tineye") or {}).get("results_source") == "previous_saved"
+                if (record.get("reverse_image") or {}).get("results_source") == "previous_saved"
             ),
-            "tineye_rejected_external_ids": sum(
+            "reverse_image_rejected_external_ids": sum(
                 len(
-                    ((record.get("tineye") or {}).get("evidence") or {}).get(
+                    ((record.get("reverse_image") or {}).get("evidence") or {}).get(
                         "rejected_external_ids", []
                     )
                 )

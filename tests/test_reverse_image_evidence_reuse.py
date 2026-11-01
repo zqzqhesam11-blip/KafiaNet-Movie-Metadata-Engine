@@ -5,16 +5,17 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from app.engine import MetadataEngine
+from app.google_lens import BrightDataQuotaError
 
 
-class PreviousTinEyeEvidenceTests(unittest.TestCase):
+class PreviousGoogleLensEvidenceTests(unittest.TestCase):
     def make_engine(self, latest_results, previous_results):
         engine = MetadataEngine.__new__(MetadataEngine)
         engine.settings = SimpleNamespace(
             posters_repo="owner/posters",
             posters_branch="main",
         )
-        engine.searxng = object()
+        engine.reverse_image = object()
         engine.github = Mock()
         engine.github.raw_url.return_value = "https://raw.example/poster.jpg"
         engine.github.get_json_file.return_value = {
@@ -25,7 +26,7 @@ class PreviousTinEyeEvidenceTests(unittest.TestCase):
         }
         engine.tmdb = Mock()
         engine._details_cache = {}
-        engine._tineye_results = Mock(return_value=latest_results)
+        engine._reverse_image_results = Mock(return_value=latest_results)
         engine._find_movie = Mock(return_value=(
             None,
             {"status": "review", "reason": "test"},
@@ -46,9 +47,9 @@ class PreviousTinEyeEvidenceTests(unittest.TestCase):
             previous_output_path="مراجعة/Example Movie (2000)/Example Movie (2000).json",
         )
 
-        self.assertEqual(record["tineye"]["results"], previous)
-        self.assertEqual(record["tineye"]["results_source"], "previous_saved")
-        self.assertEqual(record["tineye"]["latest_query"]["status"], "no_matches")
+        self.assertEqual(record["reverse_image"]["results"], previous)
+        self.assertEqual(record["reverse_image"]["results_source"], "previous_saved")
+        self.assertEqual(record["reverse_image"]["latest_query"]["status"], "no_matches")
         self.assertEqual(engine._find_movie.call_args.args[2], previous)
 
     def test_reuses_saved_results_when_live_search_is_unresponsive(self):
@@ -59,7 +60,7 @@ class PreviousTinEyeEvidenceTests(unittest.TestCase):
         }]
         latest_error = [{
             "error": "RuntimeError",
-            "message": "TinEye engine unresponsive: suspended",
+            "message": "Google Lens API rate limit or service failure",
         }]
         engine = self.make_engine(latest_error, previous)
 
@@ -68,10 +69,10 @@ class PreviousTinEyeEvidenceTests(unittest.TestCase):
             previous_output_path="مراجعة/Example Movie (2000)/Example Movie (2000).json",
         )
 
-        self.assertEqual(record["tineye"]["results"], previous)
-        self.assertEqual(record["tineye"]["results_source"], "previous_saved")
-        self.assertEqual(record["tineye"]["latest_query"]["status"], "error")
-        self.assertEqual(record["tineye"]["latest_query"]["errors"], latest_error)
+        self.assertEqual(record["reverse_image"]["results"], previous)
+        self.assertEqual(record["reverse_image"]["results_source"], "previous_saved")
+        self.assertEqual(record["reverse_image"]["latest_query"]["status"], "error")
+        self.assertEqual(record["reverse_image"]["latest_query"]["errors"], latest_error)
 
     def test_does_not_reuse_previous_error_rows_as_evidence(self):
         previous_errors = [{"error": "RuntimeError", "message": "old failure"}]
@@ -83,9 +84,28 @@ class PreviousTinEyeEvidenceTests(unittest.TestCase):
             previous_output_path="مراجعة/Example Movie (2000)/Example Movie (2000).json",
         )
 
-        self.assertEqual(record["tineye"]["results"], latest_error)
-        self.assertEqual(record["tineye"]["results_source"], "live")
-        self.assertEqual(record["tineye"]["latest_query"]["status"], "error")
+        self.assertEqual(record["reverse_image"]["results"], latest_error)
+        self.assertEqual(record["reverse_image"]["results_source"], "live")
+        self.assertEqual(record["reverse_image"]["latest_query"]["status"], "error")
+
+
+    def test_provider_quota_stop_flag_prevents_batch_continuation(self):
+        for status_code in (402, 429):
+            with self.subTest(status_code=status_code):
+                engine = MetadataEngine.__new__(MetadataEngine)
+                engine.reverse_image = Mock()
+                engine.reverse_image.search_by_image_url.side_effect = BrightDataQuotaError(
+                    status_code, f"Bright Data HTTP {status_code}"
+                )
+                engine._stop_batch = False
+                engine._provider_stop_status = None
+
+                result = engine._reverse_image_results("https://example.com/poster.jpg")
+
+                self.assertTrue(engine._stop_batch)
+                self.assertEqual(engine._provider_stop_status, status_code)
+                self.assertTrue(result[0]["stop_batch"])
+                self.assertEqual(engine.reverse_image.search_by_image_url.call_count, 1)
 
 
 if __name__ == "__main__":
