@@ -54,7 +54,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertIn("brd_lens=visual_matches", target)
         self.assertIn("raw.githubusercontent.com", target)
 
-    def test_lens_image_search_adds_movie_id_hint_to_the_same_request(self):
+    def test_lens_image_search_uses_documented_parameters_only(self):
         api = self.make_client({"visual_matches": []})
 
         rows = api.search_by_image_url("https://example.com/poster.jpg")
@@ -65,9 +65,10 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         from urllib.parse import parse_qs, urlparse
         query = parse_qs(urlparse(request_url).query)
         self.assertEqual(query["url"], ["https://example.com/poster.jpg"])
-        self.assertEqual(query["q"], ["movie ID in TMDB and IMDb"])
         self.assertEqual(query["brd_lens"], ["visual_matches"])
-        self.assertEqual(api.last_lens_diagnostics["query_text"], "movie ID in TMDB and IMDb")
+        self.assertEqual(query["hl"], ["en"])
+        self.assertNotIn("q", query)
+        self.assertNotIn("query", query)
 
     def test_accepts_brightdata_images_array_and_original_image(self):
         api = self.make_client({
