@@ -368,8 +368,9 @@ class MetadataEngine:
 
         Official IMDb/TMDB links in Lens are the strongest evidence. If Lens
         returns no official ID links, bounded Lens result titles may be searched
-        in TMDB. Folder names, folder years, image filenames and descriptions
-        are never sent to TMDB and never identify a movie.
+        in TMDB. Explicit metadata in the associated Lens result title/snippet is
+        compared with TMDB year, country, director, cast, character and rating.
+        Folder names, folder years and poster filenames never identify a movie.
         """
         evidence = extract_reverse_image_evidence(reverse_image_results)
         reverse_image_failed = any(
@@ -452,8 +453,9 @@ class MetadataEngine:
                         links["lens_result_titles"].add(result_title)
 
         # If Lens did not expose an official ID URL, search TMDB using only the
-        # Lens result titles. This is not a second Google search and never uses
-        # the catalog folder name, the poster filename, the image URL or snippets.
+        # Lens result titles. This is not a second Google search. Lens descriptions
+        # and snippets may supply comparison clues, but are never TMDB query strings.
+        # The catalog folder name, poster filename and image URL are never used.
         initial_title_search_status = (
             "skipped_official_ids_present"
             if evidence.get("imdb_ids") or evidence.get("tmdb_ids")
