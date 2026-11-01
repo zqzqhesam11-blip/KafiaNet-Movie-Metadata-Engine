@@ -50,6 +50,11 @@ GENERIC_WORDS = {
     "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "official",
     "artwork", "bluray", "brrip", "webrip", "webdl", "hdrip",
     "x264", "x265", "h264", "h265", "imdb", "tmdb",
+    # Retailer, media-format and result-page noise commonly attached to Lens
+    # visual matches. These are removed only from extracted title hints.
+    "amazon", "import", "dvd", "blu", "ray", "youtube", "dailymotion",
+    "video", "facebook", "photos", "tallenge", "classics", "prime",
+    "watch", "et", "fr", "best", "similar", "movies", "like",
 }
 
 
@@ -174,6 +179,17 @@ def _resolved_destination_urls(result: dict) -> list[str]:
     return destinations
 
 
+def _unique_titles(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = " ".join(str(value or "").casefold().split())
+        if key and key not in seen:
+            seen.add(key)
+            result.append(str(value))
+    return result
+
+
 def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
     """Extract official IMDb/TMDB IDs from resolved Lens result destination URLs.
 
@@ -189,6 +205,7 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
     country_hints: list[str] = []
     director_hints: list[str] = []
     backlinks: list[dict] = []
+    lens_title_rows: list[str] = []
 
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
@@ -197,16 +214,13 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
 
         raw_result_title = str(result.get("title") or "")
         title = _clean_hint(raw_result_title)
-        if title and title.casefold() not in {item.casefold() for item in hints}:
-            hints.append(title)
-        # Only Lens' result title can seed a TMDB query. Never use the image
-        # source URL/filename, catalog folder name, description, or snippet.
-        if (
-            title
-            and title.casefold() not in {item.casefold() for item in lens_title_queries}
-            and len(lens_title_queries) < MAX_LENS_TITLE_QUERIES
-        ):
-            lens_title_queries.append(title)
+        if title:
+            lens_title_rows.append(title)
+            if title.casefold() not in {item.casefold() for item in hints}:
+                hints.append(title)
+        # Only Lens result titles seed TMDB queries. We derive repeated short
+        # phrases from Lens titles to remove retailer/person-name suffix noise;
+        # folders, poster filenames, image URLs and snippets remain excluded.
 
         destination_urls = _resolved_destination_urls(result)
         linked_imdb_ids: list[str] = []
@@ -334,6 +348,58 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
                 "imdb_ids": linked_imdb_ids,
                 "tmdb_ids": linked_tmdb_ids,
             })
+
+    # Lens often decorates a real movie title with retailer, disc-format,
+    # director or cast names. Repeated contiguous phrases across independent
+    # visual-match titles are stronger query hints than one long noisy caption.
+    phrase_rows: dict[str, dict[str, object]] = {}
+    for row in lens_title_rows:
+        words = row.split()
+        seen_in_row: set[str] = set()
+        for width in range(2, min(4, len(words)) + 1):
+            for start in range(0, len(words) - width + 1):
+                phrase = " ".join(words[start:start + width]).strip()
+                key = _clean_hint(phrase)
+                if not key:
+                    continue
+                normalized_key = " ".join(key.casefold().split())
+                if normalized_key in seen_in_row:
+                    continue
+                seen_in_row.add(normalized_key)
+                entry = phrase_rows.setdefault(
+                    normalized_key,
+                    {"count": 0, "phrase": key},
+                )
+                entry["count"] = int(entry["count"]) + 1
+
+    repeated_phrases = [
+        entry for entry in phrase_rows.values()
+        if int(entry["count"]) >= 2
+    ]
+    repeated_phrases.sort(
+        key=lambda entry: (
+            -int(entry["count"]),
+            -len(str(entry["phrase"]).split()),
+            -len(str(entry["phrase"])),
+        )
+    )
+    query_candidates = [
+        str(entry["phrase"]) for entry in repeated_phrases
+    ]
+    # Keep a clean short result title as a fallback, but don't send long
+    # captions containing director/cast/retailer names as if they were titles.
+    query_candidates.extend(
+        title for title in _unique_titles(lens_title_rows)
+        if len(title.split()) <= 5
+    )
+    seen_queries: set[str] = set()
+    for candidate_title in query_candidates:
+        query_key = " ".join(candidate_title.casefold().split())
+        if query_key and query_key not in seen_queries:
+            seen_queries.add(query_key)
+            lens_title_queries.append(candidate_title)
+        if len(lens_title_queries) >= MAX_LENS_TITLE_QUERIES:
+            break
 
     return {
         "title_hints": hints[:80],
