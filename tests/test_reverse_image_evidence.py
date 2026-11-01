@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.image_evidence import extract_tmdb_movie_ids, tmdb_movie_id_from_url
+from app.image_evidence import extract_tmdb_movie_ids, tmdb_movie_id_from_url, tmdb_movie_url_diagnostics
 
 
 class TMDBMovieIdExtractionTests(unittest.TestCase):
@@ -51,6 +51,21 @@ class TMDBMovieIdExtractionTests(unittest.TestCase):
         ])
 
         self.assertEqual(ids, [10754, 31056])
+
+    def test_url_path_diagnostics_count_google_goto_but_never_extract_ids(self):
+        diagnostics = tmdb_movie_url_diagnostics([{
+            "url": "https://lens.google.com/goto?url=CAESopaque",
+            "url_candidates": [
+                "https://lens.google.com/goto?url=CAESopaque",
+                "https://play.google.com/store/apps/details?id=com.example",
+            ],
+        }])
+
+        self.assertEqual(diagnostics["google_goto_url_count"], 1)
+        self.assertEqual(diagnostics["google_wrapper_count"], 1)
+        self.assertIn("lens.google.com/goto", diagnostics["result_url_paths"])
+        self.assertIn("play.google.com/store/apps/details", diagnostics["result_url_paths"])
+        self.assertEqual(diagnostics["official_tmdb_ids"], [])
 
     def test_title_snippet_country_and_image_filename_never_create_id(self):
         ids = extract_tmdb_movie_ids([{

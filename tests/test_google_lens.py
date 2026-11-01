@@ -54,6 +54,24 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertIn("brd_lens=exact_matches", target)
         self.assertIn("raw.githubusercontent.com", target)
 
+    def test_captures_raw_result_fields_and_redacted_link_paths(self):
+        api = self.make_client({
+            "exact_matches": [{
+                "title": "A Short Film About Killing",
+                "link": "https://lens.google.com/goto?url=CAES_PRIVATE_TOKEN",
+                "source": "Play Store",
+                "thumbnail": "https://images.example.test/poster.jpg",
+            }]
+        })
+
+        api.search_by_image_url("https://example.com/poster.jpg")
+
+        diagnostics = api.last_lens_diagnostics
+        self.assertIn("link", diagnostics["raw_result_fields"])
+        self.assertIn("source", diagnostics["raw_result_fields"])
+        self.assertIn("lens.google.com/goto", diagnostics["raw_link_paths"])
+        self.assertNotIn("CAES_PRIVATE_TOKEN", repr(diagnostics))
+
     def test_lens_image_search_uses_documented_parameters_only(self):
         api = self.make_client({"exact_matches": []})
 
@@ -293,6 +311,28 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             "https://www.imdb.com/title/tt0095468/",
         )
         api.redirect_client.get.assert_called_once_with(goto_url)
+        self.assertEqual(api.last_lens_diagnostics["google_goto_candidates"], 1)
+        self.assertEqual(api.last_lens_diagnostics["google_goto_resolved"], 1)
+        self.assertEqual(api.last_lens_diagnostics["google_goto_failed"], 0)
+
+    def test_counts_google_goto_resolution_failure(self):
+        api = self.make_client({"exact_matches": []})
+        api.redirect_client = Mock()
+        first = Mock()
+        first.status_code = 200
+        first.headers = {}
+        followed = Mock()
+        followed.url = "https://lens.google.com/goto?url=CAESopaque"
+        api.redirect_client.get.side_effect = [first, followed]
+
+        rows = api.resolve_result_urls([{
+            "url": "https://lens.google.com/goto?url=CAESopaque",
+        }])
+
+        self.assertEqual(rows[0]["resolved_urls"], [])
+        self.assertEqual(api.last_lens_diagnostics["google_goto_candidates"], 1)
+        self.assertEqual(api.last_lens_diagnostics["google_goto_resolved"], 0)
+        self.assertEqual(api.last_lens_diagnostics["google_goto_failed"], 1)
 
     def test_direct_official_links_do_not_trigger_google_redirect_requests(self):
         api = self.make_client({"exact_matches": []})

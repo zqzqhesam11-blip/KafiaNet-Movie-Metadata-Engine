@@ -121,20 +121,28 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
     result_hosts: dict[str, int] = {}
     result_url_count = 0
     google_wrapper_count = 0
+    google_goto_url_count = 0
+    result_url_paths: dict[str, int] = {}
 
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
             continue
-        raw_values = result.get("resolved_urls") or []
-        if not raw_values:
-            raw_values = [
-                value for value in (
-                    result.get("resolved_url"),
-                    result.get("url"),
-                    *(result.get("url_candidates") or []),
-                )
-                if isinstance(value, str) and value.strip()
-            ]
+        raw_values = []
+        raw_values.extend(
+            value for value in (result.get("resolved_urls") or [])
+            if isinstance(value, str) and value.strip()
+        )
+        raw_values.extend(
+            value for value in (
+                result.get("resolved_url"),
+                result.get("url"),
+                *(result.get("url_candidates") or []),
+            )
+            if isinstance(value, str) and value.strip()
+        )
+        # Count each distinct URL once even when the same link appears in both
+        # the primary url field and url_candidates.
+        raw_values = list(dict.fromkeys(raw_values))
         for raw_value in raw_values:
             if not isinstance(raw_value, str) or not raw_value.strip():
                 continue
@@ -145,10 +153,14 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
                 raw_parsed = None
             if raw_parsed:
                 raw_host = (raw_parsed.hostname or "").casefold().rstrip(".")
-                raw_path = raw_parsed.path.rstrip("/").casefold()
+                raw_path = raw_parsed.path.rstrip("/").casefold() or "/"
+                path_label = f"{raw_host}{raw_path}"
+                result_url_paths[path_label] = result_url_paths.get(path_label, 0) + 1
                 if raw_host == "google.com" or raw_host.endswith(".google.com"):
-                    if raw_path in {"/url", "/imgres"}:
+                    if raw_path in {"/url", "/imgres", "/goto"}:
                         google_wrapper_count += 1
+                    if raw_path == "/goto":
+                        google_goto_url_count += 1
 
         for destination in _resolved_destination_urls(result):
             try:
@@ -173,5 +185,9 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
         "official_tmdb_ids": movie_ids,
         "result_url_count": result_url_count,
         "google_wrapper_count": google_wrapper_count,
+        "google_goto_url_count": google_goto_url_count,
+        "result_url_paths": dict(
+            sorted(result_url_paths.items(), key=lambda item: (-item[1], item[0]))[:12]
+        ),
         "result_hosts": top_hosts,
     }
