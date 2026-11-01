@@ -22,6 +22,22 @@ DIRECTOR_RE = re.compile(
     r"\b(?:director|directed by)\s*[:=–-]\s*([^|;\n<>]{2,80})",
     re.IGNORECASE,
 )
+CAST_RE = re.compile(
+    r"\b(?:cast|starring|stars|featuring)\s*[:=–-]\s*([^|;\n<>]{2,180})",
+    re.IGNORECASE,
+)
+CHARACTER_RE = re.compile(
+    r"\b(?:main character|lead character|character|role)\s*[:=–-]\s*([^|;\n<>]{2,80})",
+    re.IGNORECASE,
+)
+AS_CHARACTER_RE = re.compile(
+    r"([A-ZÀ-Þ][\w'’. -]{1,60}?)\s+as\s+([A-ZÀ-Þ][\w'’. -]{1,50})",
+    re.IGNORECASE,
+)
+RATING_RE = re.compile(
+    r"\b(?:(IMDb|TMDB)\s*(?:rating|score)?\s*[:=]?\s*|(?:rating|score)\s*[:=]\s*)(\d{1,2}(?:\.\d+)?)\s*(?:/\s*10)?",
+    re.IGNORECASE,
+)
 
 GENERIC_WORDS = {
     "poster", "posters", "cover",
@@ -217,23 +233,77 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
 
         raw_title = str(result.get("title") or "")
         raw_content = str(result.get("content") or "")
-        raw_text = " ".join((raw_title, raw_content, unquote(basename)))
+        # Metadata clues must come only from the Lens result title/content.
+        # Never treat the uploaded poster filename or image URL as film metadata.
+        raw_text = " ".join((raw_title, raw_content))
+        result_years: list[int] = []
+        result_countries: list[str] = []
+        result_directors: list[str] = []
+        result_cast: list[str] = []
+        result_characters: list[str] = []
+        result_ratings: list[dict] = []
+
         for year_match in YEAR_HINT_RE.findall(raw_text):
             year_value = int(year_match)
+            if 1888 <= year_value <= 2035 and year_value not in result_years:
+                result_years.append(year_value)
             if 1888 <= year_value <= 2035 and year_value not in year_hints:
                 year_hints.append(year_value)
         for country_match in COUNTRY_RE.findall(raw_content):
             value = country_match.strip(" .,")
+            if value and value.casefold() not in {item.casefold() for item in result_countries}:
+                result_countries.append(value)
             if value and value.casefold() not in {item.casefold() for item in country_hints}:
                 country_hints.append(value)
         for director_match in DIRECTOR_RE.findall(raw_content):
             value = director_match.strip(" .,")
+            if value and value.casefold() not in {item.casefold() for item in result_directors}:
+                result_directors.append(value)
             if value and value.casefold() not in {item.casefold() for item in director_hints}:
                 director_hints.append(value)
+        for cast_match in CAST_RE.findall(raw_content):
+            for person in re.split(r"\\s*(?:,|;|\\band\\b|&)\\s*", cast_match):
+                person = person.strip(" .")
+                if person and person.casefold() not in {item.casefold() for item in result_cast}:
+                    result_cast.append(person)
+        for character_match in CHARACTER_RE.findall(raw_content):
+            value = character_match.strip(" .,")
+            if value and value.casefold() not in {item.casefold() for item in result_characters}:
+                result_characters.append(value)
+        for actor_name, character_name in AS_CHARACTER_RE.findall(raw_content):
+            actor_name = actor_name.strip(" .,")
+            character_name = character_name.strip(" .,")
+            if actor_name and actor_name.casefold() not in {item.casefold() for item in result_cast}:
+                result_cast.append(actor_name)
+            if character_name and character_name.casefold() not in {item.casefold() for item in result_characters}:
+                result_characters.append(character_name)
+        for rating_source, rating_value in RATING_RE.findall(raw_content):
+            try:
+                numeric_rating = float(rating_value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= numeric_rating <= 10:
+                result_ratings.append({
+                    "source": (rating_source or "unspecified").upper(),
+                    "value": numeric_rating,
+                })
+
+        observation = {
+            "lens_title": title or "",
+            "result_title": raw_title[:180],
+            "years": result_years[:8],
+            "countries": result_countries[:8],
+            "directors": result_directors[:8],
+            "cast": result_cast[:12],
+            "characters": result_characters[:12],
+            "ratings": result_ratings[:5],
+        }
 
         if len(backlinks) < MAX_BACKLINKS:
             backlinks.append({
                 "title": raw_title[:180],
+                "lens_title": title or "",
+                "metadata_clues": observation,
                 "url": str(result.get("url") or "")[:500],
                 "resolved_url": destination_url[:1000],
                 "resolved_urls": destination_urls[:10],
@@ -259,5 +329,10 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
         "year_hints": year_hints[:80],
         "country_hints": country_hints[:80],
         "director_hints": director_hints[:80],
+        "metadata_observations": [
+            item.get("metadata_clues")
+            for item in backlinks
+            if isinstance(item.get("metadata_clues"), dict)
+        ],
         "backlinks": backlinks,
     }
