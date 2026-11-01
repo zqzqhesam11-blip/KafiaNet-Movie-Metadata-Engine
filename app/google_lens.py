@@ -12,6 +12,7 @@ import httpx
 
 BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 GOOGLE_LENS_URL = "https://lens.google.com/uploadbyurl"
+LENS_TAB = "exact_matches"
 MAX_NORMALIZED_RESULTS = 80
 MAX_GOTO_RESOLUTION_WORKERS = 8
 MAX_TRANSIENT_RETRIES = 2
@@ -177,7 +178,7 @@ class BrightDataGoogleLensClient:
             "url": image_url,
             "hl": "en",
             "brd_json": "1",
-            "brd_lens": "visual_matches",
+            "brd_lens": LENS_TAB,
         }
         return f"{GOOGLE_LENS_URL}?{urlencode(query)}"
 
@@ -424,6 +425,7 @@ class BrightDataGoogleLensClient:
         target_url = self._lens_request_url(image_url)
         self.last_lens_diagnostics = {
             "status": "requesting",
+            "lens_tab": LENS_TAB,
             "http_status": None,
             "attempts": 0,
             "result_count": 0,

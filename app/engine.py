@@ -7,7 +7,7 @@ from typing import Any
 
 from app.config import Settings
 from app.github_api import GitHubAPI
-from app.image_evidence import extract_tmdb_movie_ids
+from app.image_evidence import extract_tmdb_movie_ids, tmdb_movie_url_diagnostics
 from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
 from app.tmdb import TMDBClient
 
@@ -284,9 +284,10 @@ class MetadataEngine:
             else "ok" if latest_reverse_image_results
             else "no_matches"
         )
-        lens_diagnostics = (
-            getattr(self.reverse_image, "last_lens_diagnostics", {}) or {}
-        ) if self.reverse_image else {}
+        lens_diagnostics = dict(
+            (getattr(self.reverse_image, "last_lens_diagnostics", {}) or {})
+            if self.reverse_image else {}
+        )
 
         # A temporary empty/unresponsive Google Lens response must not erase useful
         # reverse-image evidence already stored for this exact poster.
@@ -303,7 +304,18 @@ class MetadataEngine:
                 or (previous_record or {}).get("tineye")
                 or {}
             )
-            saved_results = previous_reverse_image.get("results") or []
+            saved_query_diagnostics = (
+                (previous_reverse_image.get("latest_query") or {}).get("diagnostics")
+                or (previous_reverse_image.get("evidence") or {}).get("lens_diagnostics")
+                or {}
+            )
+            # Evidence from the former visual_matches tab is deliberately stale:
+            # only results explicitly tagged as exact_matches may be reused.
+            saved_results = (
+                previous_reverse_image.get("results") or []
+                if saved_query_diagnostics.get("lens_tab") == "exact_matches"
+                else []
+            )
             reusable_results = [
                 result for result in saved_results
                 if isinstance(result, dict)
@@ -320,7 +332,9 @@ class MetadataEngine:
         if callable(resolver):
             reverse_image_results = resolver(reverse_image_results)
 
-
+        # Diagnostics are computed only from official TMDB destinations, never
+        # from Lens titles, snippets, image URLs, or folder labels.
+        lens_diagnostics.update(tmdb_movie_url_diagnostics(reverse_image_results))
 
         candidate, match, reverse_image_evidence = self._find_movie(reverse_image_results)
         reverse_image_evidence["results_source"] = reverse_image_results_source
@@ -570,9 +584,12 @@ class MetadataEngine:
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
                 f"imdb_id={imdb_id if imdb_id is not None else 'none'} "
                 f"reverse_image={latest_query_status} evidence={reverse_image_source} "
+                f"lens_tab={lens_diag.get('lens_tab', 'unknown')} "
                 f"lens_http={lens_diag.get('http_status', 'none')} "
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
+                f"official_tmdb_urls={lens_diag.get('official_tmdb_url_count', 0)} "
+                f"official_tmdb_ids={','.join(str(value) for value in (lens_diag.get('official_tmdb_ids') or [])[:10]) or 'none'} "
                 f"lens_error='{lens_error}' "
                 f"tmdb_id_lookup={tmdb_lookup.get('status', 'unknown')} "
                 f"tmdb_ids={','.join(str(value) for value in (tmdb_lookup.get('tmdb_ids') or [])[:10]) or 'none'} "
