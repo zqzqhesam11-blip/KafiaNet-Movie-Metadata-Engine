@@ -62,11 +62,6 @@ class FakeTMDB:
     def normalize_details(details: dict):
         return TMDBClient.normalize_details(details)
 
-    @staticmethod
-    def select_worldwide_title(details: dict):
-        return TMDBClient.select_worldwide_title(details)
-
-
 class FakeGitHub:
     def raw_url(self, path: str) -> str:
         return f"https://raw.example.test/{path}"
