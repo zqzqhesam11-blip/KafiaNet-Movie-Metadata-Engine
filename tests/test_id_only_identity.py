@@ -33,6 +33,7 @@ class FakeTMDB:
         }
         self.search_movies_calls = 0
         self.search_movies_queries = []
+        self.search_overrides = {}
 
     def find_by_imdb_id(self, imdb_id: str):
         return self.imdb_map.get(imdb_id, [])
@@ -51,6 +52,8 @@ class FakeTMDB:
     def search_movies(self, title: str, year=None):
         self.search_movies_calls += 1
         self.search_movies_queries.append(title)
+        if title in self.search_overrides:
+            return self.search_overrides[title]
         key = title.casefold()
         if key == "a short film about killing":
             return [{"id": 10754, "title": "A Short Film About Killing", "original_title": "Krótki film o zabijaniu"}]
@@ -176,6 +179,26 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertFalse(evidence["tmdb_title_search"]["folder_name_used"])
         self.assertFalse(evidence["tmdb_title_search"]["image_filename_used"])
         self.assertFalse(match["folder_name_used_for_matching"])
+
+    def test_multiple_close_tmdb_candidates_remain_in_review(self):
+        engine = self.make_engine()
+        engine.tmdb.records[5001] = movie_details(5001, "tt0005001", "The Thing")
+        engine.tmdb.records[5002] = movie_details(5002, "tt0005002", "The Thing")
+        engine.tmdb.search_overrides["The Thing"] = [
+            {"id": 5001, "title": "The Thing", "original_title": "The Thing"},
+            {"id": 5002, "title": "The Thing", "original_title": "The Thing"},
+        ]
+
+        candidate, match, evidence = engine._find_movie([{
+            "title": "The Thing - IMDb",
+            "url": "https://example.com/lens-result",
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(set(match["candidate_ids"]), {5001, 5002})
+        self.assertEqual(evidence["tmdb_title_search"]["status"], "matched")
+        self.assertEqual(len(evidence["tmdb_title_search"]["qualified_candidate_ids"]), 2)
 
     def test_image_filename_alone_never_becomes_a_tmdb_search_query(self):
         engine = self.make_engine()
