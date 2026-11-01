@@ -9,7 +9,7 @@ from app.config import Settings
 from app.github_api import GitHubAPI
 from app.image_evidence import extract_reverse_image_evidence
 from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
-from app.matching import title_similarity
+from app.matching import normalize_title, title_similarity
 from app.tmdb import TMDBClient, WORLDWIDE_TITLE_POLICY_VERSION
 
 
@@ -20,6 +20,240 @@ MAX_OFFICIAL_ID_LOOKUPS = 80
 def safe_segment(value: str) -> str:
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" .")
     return (value or "untitled")[:140]
+
+
+def _unique_text(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = " ".join(str(value or "").split()).strip()
+        key = normalize_title(item)
+        if item and key and key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result
+
+
+def _country_tokens(value: str) -> list[str]:
+    return [
+        part.strip(" .()")
+        for part in re.split(r"[,;/|&]|\\band\\b", str(value or ""), flags=re.IGNORECASE)
+        if part.strip(" .()")
+    ]
+
+
+def _person_match(hint: str, candidates: list[str]) -> bool:
+    hint_key = normalize_title(hint)
+    if not hint_key:
+        return False
+    for candidate in candidates:
+        candidate_key = normalize_title(candidate)
+        if not candidate_key:
+            continue
+        if hint_key == candidate_key:
+            return True
+        if min(len(hint_key), len(candidate_key)) >= 6 and title_similarity(hint, candidate) >= 0.92:
+            return True
+    return False
+
+
+def _candidate_metadata_profile(normalized: dict[str, Any]) -> dict[str, Any]:
+    country_values: list[str] = []
+    for item in normalized.get("production_countries") or []:
+        if isinstance(item, dict):
+            country_values.extend([
+                str(item.get("name") or ""),
+                str(item.get("iso_3166_1") or ""),
+            ])
+    for item in normalized.get("origin_country") or []:
+        if isinstance(item, str):
+            country_values.append(item)
+        elif isinstance(item, dict):
+            country_values.extend([str(item.get("name") or ""), str(item.get("iso_3166_1") or "")])
+
+    directors = [
+        str(person.get("name") or "")
+        for person in (normalized.get("directors") or [])
+        if isinstance(person, dict) and person.get("name")
+    ]
+    cast = [
+        {
+            "name": str(person.get("name") or ""),
+            "character": str(person.get("character") or ""),
+        }
+        for person in (normalized.get("cast") or [])[:12]
+        if isinstance(person, dict) and (person.get("name") or person.get("character"))
+    ]
+    return {
+        "year": normalized.get("year"),
+        "countries": _unique_text(country_values),
+        "directors": _unique_text(directors),
+        "cast": cast,
+        "rating": normalized.get("vote_average"),
+        "rating_votes": normalized.get("vote_count"),
+    }
+
+
+def _compare_lens_metadata(
+    normalized: dict[str, Any],
+    observations: list[dict[str, Any]],
+    associated_lens_titles: list[str],
+) -> dict[str, Any]:
+    """Compare explicit facts in Lens result text with a candidate's TMDB facts.
+
+    Unknown fields are neutral. A TMDB value is never treated as Lens evidence
+    by itself; a clue must first be present in a Lens result title/snippet.
+    """
+    allowed_titles = {
+        normalize_title(value) for value in associated_lens_titles if normalize_title(value)
+    }
+    relevant = [
+        item for item in observations
+        if isinstance(item, dict)
+        and normalize_title(item.get("lens_title") or "") in allowed_titles
+    ]
+    years = list(dict.fromkeys(
+        int(value)
+        for item in relevant for value in (item.get("years") or [])
+        if str(value).isdigit()
+    ))
+    countries = _unique_text([
+        value for item in relevant for value in (item.get("countries") or [])
+    ])
+    directors = _unique_text([
+        value for item in relevant for value in (item.get("directors") or [])
+    ])
+    cast_hints = _unique_text([
+        value for item in relevant for value in (item.get("cast") or [])
+    ])
+    character_hints = _unique_text([
+        value for item in relevant for value in (item.get("characters") or [])
+    ])
+    ratings: list[dict[str, Any]] = []
+    for item in relevant:
+        for rating in item.get("ratings") or []:
+            if isinstance(rating, dict):
+                try:
+                    value = float(rating.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                ratings.append({
+                    "source": str(rating.get("source") or "UNSPECIFIED").upper(),
+                    "value": value,
+                })
+
+    profile = _candidate_metadata_profile(normalized)
+    candidate_year = profile.get("year")
+    candidate_countries = profile["countries"]
+    candidate_directors = profile["directors"]
+    candidate_cast = [item["name"] for item in profile["cast"] if item.get("name")]
+    candidate_characters = [item["character"] for item in profile["cast"] if item.get("character")]
+
+    matches: dict[str, Any] = {}
+    conflicts: dict[str, Any] = {}
+    matched_fields: list[str] = []
+
+    def record_field(name: str, clue_values: list[Any], candidate_values: list[Any], matched: bool) -> None:
+        if not clue_values:
+            return
+        details = {
+            "lens_values": clue_values[:12],
+            "tmdb_values": candidate_values[:12],
+            "matched": bool(matched),
+        }
+        if matched:
+            matches[name] = details
+            matched_fields.append(name)
+        elif candidate_values:
+            conflicts[name] = details
+
+    if years and candidate_year is not None:
+        record_field("year", years, [candidate_year], any(abs(year - int(candidate_year)) <= 1 for year in years))
+
+    country_parts = _unique_text([
+        part for country in countries for part in _country_tokens(country)
+    ])
+    country_match = any(
+        normalize_title(part) == normalize_title(candidate)
+        for part in country_parts for candidate in candidate_countries
+    )
+    record_field("country", country_parts, candidate_countries, country_match)
+
+    director_match = any(
+        _person_match(hint, candidate_directors)
+        for hint in directors
+    )
+    record_field("director", directors, candidate_directors, director_match)
+
+    cast_match = any(
+        _person_match(hint, candidate_cast)
+        for hint in cast_hints
+    )
+    record_field("cast", cast_hints, candidate_cast, cast_match)
+
+    character_match = any(
+        _person_match(hint, candidate_characters)
+        for hint in character_hints
+    )
+    record_field("main_character", character_hints, candidate_characters, character_match)
+
+    rating = profile.get("rating")
+    rating_match = False
+    rating_details: dict[str, Any] | None = None
+    if ratings and rating is not None:
+        try:
+            candidate_rating = float(rating)
+        except (TypeError, ValueError):
+            candidate_rating = None
+        if candidate_rating is not None:
+            deltas = [
+                {
+                    **item,
+                    "delta": round(abs(float(item["value"]) - candidate_rating), 2),
+                }
+                for item in ratings
+            ]
+            best = min(deltas, key=lambda item: item["delta"])
+            tolerance = 1.25 if best["source"] == "IMDB" else 0.9
+            rating_match = best["delta"] <= tolerance
+            rating_details = {
+                "lens_values": ratings[:8],
+                "tmdb_value": candidate_rating,
+                "delta": best["delta"],
+                "matched": rating_match,
+                "note": "supporting signal only; ratings vary by provider and time",
+            }
+    if rating_details:
+        (matches if rating_match else conflicts)["rating"] = rating_details
+
+    # Rating is deliberately not a decisive identity field. At least two
+    # independent hard metadata dimensions must agree for disambiguation.
+    strong_matches = [name for name in matched_fields if name in {
+        "year", "country", "director", "cast", "main_character"
+    }]
+    score_weights = {
+        "year": 2.0, "country": 1.5, "director": 2.0,
+        "cast": 1.5, "main_character": 2.0, "rating": 0.25,
+    }
+    score = sum(score_weights.get(name, 0.0) for name in matches)
+    return {
+        "lens_titles_used": _unique_text(associated_lens_titles),
+        "lens_observations_used": len(relevant),
+        "observed_clues": {
+            "years": years,
+            "countries": countries,
+            "directors": directors,
+            "cast": cast_hints,
+            "main_characters": character_hints,
+            "ratings": ratings,
+        },
+        "matches": matches,
+        "conflicts": conflicts,
+        "matched_fields": matched_fields,
+        "strong_match_count": len(strong_matches),
+        "score": round(score, 3),
+        "rating_is_decisive": False,
+    }
 
 
 class MetadataEngine:
