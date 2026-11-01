@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from app.engine import MetadataEngine
+from app.tmdb import TMDBClient
 
 
 def movie_details(tmdb_id: int, imdb_id: str, title: str) -> dict:
@@ -37,6 +38,14 @@ class FakeTMDB:
 
     def movie_details(self, tmdb_id: int):
         return self.records[int(tmdb_id)]
+
+    @staticmethod
+    def normalize_details(details: dict):
+        return TMDBClient.normalize_details(details)
+
+    @staticmethod
+    def select_worldwide_title(details: dict):
+        return TMDBClient.select_worldwide_title(details)
 
     def search_movies(self, *args, **kwargs):
         self.search_movies_calls += 1
