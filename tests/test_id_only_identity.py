@@ -58,8 +58,16 @@ class FakeGitHub:
 
 
 class FakeResolver:
+    def __init__(self):
+        self.search_rows = []
+        self.search_input = []
+
     def resolve_result_urls(self, rows):
         return rows
+
+    def search_official_id_pages(self, rows):
+        self.search_input = list(rows)
+        return list(self.search_rows)
 
 
 class IdOnlyIdentityTests(unittest.TestCase):
@@ -213,6 +221,47 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(record["identity"]["imdb_id"], "tt0095468")
         self.assertFalse(record["original"]["folder_name_used_for_matching"])
         self.assertEqual(engine.tmdb.search_movies_calls, 0)
+
+    def test_google_official_id_search_results_can_resolve_image_match_without_folder_name(self):
+        engine = self.make_engine()
+        engine.reverse_image.search_rows = [
+            {
+                "title": "Official IMDb result",
+                "url": "https://www.imdb.com/title/tt0095468/",
+                "resolved_url": "https://www.imdb.com/title/tt0095468/",
+                "resolved_urls": ["https://www.imdb.com/title/tt0095468/"],
+                "provider": "google_official_id_search",
+            },
+            {
+                "title": "Official TMDB result",
+                "url": "https://www.themoviedb.org/movie/10754",
+                "resolved_url": "https://www.themoviedb.org/movie/10754",
+                "resolved_urls": ["https://www.themoviedb.org/movie/10754"],
+                "provider": "google_official_id_search",
+            },
+        ]
+        engine._reverse_image_results = lambda _image_url: [{
+            "title": "Lens title hint from the poster image",
+            "url": "https://example.com/non-official-result",
+        }]
+
+        record = engine._record_for_folder({
+            "folder": "DO NOT USE THIS FOLDER NAME FOR SEARCH",
+            "image_path": "Posters/poster.jpg",
+        })
+
+        self.assertEqual(record["status"], "ready")
+        self.assertEqual(record["tmdb_id"], 10754)
+        self.assertEqual(record["imdb_id"], "tt0095468")
+        self.assertEqual(
+            engine.reverse_image.search_input[0]["title"],
+            "Lens title hint from the poster image",
+        )
+        self.assertEqual(engine.tmdb.search_movies_calls, 0)
+        self.assertEqual(
+            record["reverse_image"]["evidence"]["official_id_search"]["status"],
+            "ok",
+        )
 
 
 if __name__ == "__main__":
