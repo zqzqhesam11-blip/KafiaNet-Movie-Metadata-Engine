@@ -19,7 +19,7 @@ COUNTRY_RE = re.compile(
     re.IGNORECASE,
 )
 DIRECTOR_RE = re.compile(
-    r"\b(?:director|directed by)\s*[:=–-]\s*([^|;\n<>]{2,80})",
+    r"\b(?:director|directed by|dir)\s*[:=–-]\s*([^|;\n<>]{2,80})",
     re.IGNORECASE,
 )
 CAST_RE = re.compile(
@@ -32,6 +32,10 @@ CHARACTER_RE = re.compile(
 )
 AS_CHARACTER_RE = re.compile(
     r"([A-ZÀ-Þ][\w'’. -]{1,60}?)\s+as\s+([A-ZÀ-Þ][\w'’. -]{1,50})",
+    re.IGNORECASE,
+)
+CHARACTER_ACTOR_RE = re.compile(
+    r"([A-ZÀ-Þ][\w'’. -]{1,45}?)\s*\(\s*([A-ZÀ-Þ][\w'’. -]{1,60})\s*\)",
     re.IGNORECASE,
 )
 RATING_RE = re.compile(
@@ -277,6 +281,14 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
                 result_cast.append(actor_name)
             if character_name and character_name.casefold() not in {item.casefold() for item in result_characters}:
                 result_characters.append(character_name)
+        for character_name, actor_name in CHARACTER_ACTOR_RE.findall(raw_content):
+            character_name = character_name.strip(" .,")
+            actor_name = actor_name.strip(" .,")
+            if character_name and character_name.casefold() not in {item.casefold() for item in result_characters}:
+                result_characters.append(character_name)
+            if actor_name and actor_name.casefold() not in {item.casefold() for item in result_cast}:
+                result_cast.append(actor_name)
+
         for rating_source, rating_value in RATING_RE.findall(raw_content):
             try:
                 numeric_rating = float(rating_value)
@@ -291,6 +303,7 @@ def extract_reverse_image_evidence(results: list[dict]) -> dict[str, list]:
         observation = {
             "lens_title": title or "",
             "result_title": raw_title[:180],
+            "result_url": str(result.get("resolved_url") or result.get("url") or "")[:500],
             "years": result_years[:8],
             "countries": result_countries[:8],
             "directors": result_directors[:8],
