@@ -331,7 +331,6 @@ class MetadataEngine:
     ) -> dict[str, Any]:
         folder = item["folder"]
         image_path = item["image_path"]
-        title_hint, year_hint = split_title_year(folder)
         image_url = self.github.raw_url(image_path)
 
         latest_reverse_image_results = self._reverse_image_results(image_url)
@@ -355,7 +354,11 @@ class MetadataEngine:
                 if previous_output_path
                 else None
             )
-            previous_reverse_image = (previous_record or {}).get("reverse_image") or (previous_record or {}).get("tineye") or {}
+            previous_reverse_image = (
+                (previous_record or {}).get("reverse_image")
+                or (previous_record or {}).get("tineye")
+                or {}
+            )
             saved_results = previous_reverse_image.get("results") or []
             reusable_results = [
                 result for result in saved_results
@@ -367,7 +370,13 @@ class MetadataEngine:
                 reverse_image_results = reusable_results
                 reverse_image_results_source = "previous_saved"
 
-        candidate, match, reverse_image_evidence = self._find_movie(title_hint, year_hint, reverse_image_results)
+        # Google /goto links hide the real page behind an opaque token. Resolve
+        # all Lens result URLs before extracting official IMDb/TMDB identifiers.
+        resolver = getattr(self.reverse_image, "resolve_result_urls", None)
+        if callable(resolver):
+            reverse_image_results = resolver(reverse_image_results)
+
+        candidate, match, reverse_image_evidence = self._find_movie(reverse_image_results)
         reverse_image_evidence["results_source"] = reverse_image_results_source
 
         record: dict[str, Any] = {
@@ -382,13 +391,11 @@ class MetadataEngine:
             },
             "original": {
                 "folder_name": folder,
-                "title_hint": title_hint,
-                "year_hint": year_hint,
+                "folder_name_used_for_matching": False,
             },
             "match": match,
             "reverse_image": {
                 "enabled": self.reverse_image is not None,
-                "provider": "google_lens_brightdata",
                 "provider": "google_lens_brightdata",
                 "results": reverse_image_results,
                 "results_source": reverse_image_results_source,
@@ -408,14 +415,39 @@ class MetadataEngine:
                 self._details_cache[tmdb_id] = details
             normalized = self.tmdb.normalize_details(details)
             title_selection = self.tmdb.select_worldwide_title(normalized)
-            canonical_title = title_selection.get("title") or normalized.get("title") or candidate.get("title") or title_hint
+
+            external_ids = normalized.setdefault("external_ids", {})
+            imdb_id = (
+                str(match.get("imdb_id") or external_ids.get("imdb_id") or "")
+                .strip()
+                .lower()
+                or None
+            )
+            if imdb_id:
+                external_ids["imdb_id"] = imdb_id
+
+            canonical_title = (
+                title_selection.get("title")
+                or normalized.get("title")
+                or f"TMDB Movie {tmdb_id}"
+            )
             canonical_year = normalized.get("year")
             canonical_folder_name = (
                 f"{canonical_title} ({canonical_year})" if canonical_year else canonical_title
             )
             normalized["worldwide_title"] = canonical_title
             normalized["worldwide_title_selection"] = title_selection
+
             record["tmdb"] = normalized
+            record["tmdb_id"] = tmdb_id
+            record["imdb_id"] = imdb_id
+            record["identity"] = {
+                "tmdb_id": tmdb_id,
+                "imdb_id": imdb_id,
+                "source": match.get("identity_source"),
+                "verification": match.get("identity_method"),
+                "folder_name_used": False,
+            }
             record["title_policy_version"] = WORLDWIDE_TITLE_POLICY_VERSION
             record["correction"] = {
                 # Legacy key retained for catalog-reader compatibility; this
@@ -432,6 +464,9 @@ class MetadataEngine:
             record["status"] = "ready"
         else:
             record["tmdb"] = None
+            record["tmdb_id"] = None
+            record["imdb_id"] = None
+            record["identity"] = None
             record["correction"] = None
             record["status"] = "review"
 
@@ -475,11 +510,10 @@ class MetadataEngine:
                 )
             except Exception as exc:
                 # Isolate failures to this film. Persist it as REVIEW so a later
-                # batch can retry it; one malformed Google Lens title or API response
+                # batch can retry it; one invalid Lens backlink or API response
                 # must not abort the remaining films in the batch.
                 folder = item["folder"]
                 image_path = item["image_path"]
-                title_hint, year_hint = split_title_year(folder)
                 image_url = self.github.raw_url(image_path)
                 previous_record = None
                 if previous_row.get("output_path"):
@@ -508,8 +542,7 @@ class MetadataEngine:
                     },
                     "original": {
                         "folder_name": folder,
-                        "title_hint": title_hint,
-                        "year_hint": year_hint,
+                        "folder_name_used_for_matching": False,
                     },
                     "match": {
                         "status": "review",
@@ -531,6 +564,9 @@ class MetadataEngine:
                         "evidence": previous_reverse_image.get("evidence") or {},
                     },
                     "tmdb": None,
+                    "tmdb_id": None,
+                    "imdb_id": None,
+                    "identity": None,
                     "correction": None,
                     "status": "review",
                     "processing_error": {
@@ -544,7 +580,8 @@ class MetadataEngine:
                     flush=True,
                 )
             records.append(record)
-            tmdb_id = (record.get("tmdb") or {}).get("tmdb_id")
+            tmdb_id = record.get("tmdb_id")
+            imdb_id = record.get("imdb_id")
             reverse_image_info = record.get("reverse_image") or {}
             latest_query_status = (reverse_image_info.get("latest_query") or {}).get("status", "unknown")
             reverse_image_source = reverse_image_info.get("results_source", "live")
@@ -564,6 +601,7 @@ class MetadataEngine:
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
+                f"imdb_id={imdb_id if imdb_id is not None else 'none'} "
                 f"reverse_image={latest_query_status} evidence={reverse_image_source} "
                 f'reason="{reason}" candidates={candidate_text} '
                 f"rejected_external_ids={rejected_text}",
@@ -636,7 +674,9 @@ class MetadataEngine:
                     "source_folder": record["source"]["folder"],
                     "image_path": record["source"]["image_path"],
                     "original_image_path": original_image_path,
-                    "tmdb_id": (record.get("tmdb") or {}).get("tmdb_id"),
+                    "tmdb_id": record.get("tmdb_id"),
+                    "imdb_id": record.get("imdb_id"),
+                    "identity_source": (record.get("identity") or {}).get("source"),
                     "canonical_folder_name": (record.get("correction") or {}).get("canonical_folder_name"),
                     "canonical_json_name": (record.get("correction") or {}).get("canonical_json_name"),
                     "status": record["status"],
