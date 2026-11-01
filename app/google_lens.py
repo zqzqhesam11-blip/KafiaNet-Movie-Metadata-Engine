@@ -390,7 +390,26 @@ class BrightDataGoogleLensClient:
                 if inner_status:
                     effective_status = inner_status
 
-            if effective_status in TRANSIENT_HTTP_STATUSES and attempt < MAX_TRANSIENT_RETRIES:
+            # Bright Data has occasionally returned HTTP 200 with no body or
+            # a JSON envelope whose inner body is empty. That is a failed delivery,
+            # not a valid empty Lens result. Retry it with the same bounded backoff
+            # used for transient gateway failures before classifying the film REVIEW.
+            empty_success_body = (
+                200 <= effective_status < 300
+                and (
+                    payload is None
+                    or (
+                        isinstance(payload, dict)
+                        and "status_code" in payload
+                        and "body" in payload
+                        and not str(payload.get("body") or "").strip()
+                    )
+                )
+            )
+            if (
+                (effective_status in TRANSIENT_HTTP_STATUSES or empty_success_body)
+                and attempt < MAX_TRANSIENT_RETRIES
+            ):
                 time.sleep(min(2 ** attempt, 2))
                 continue
 
