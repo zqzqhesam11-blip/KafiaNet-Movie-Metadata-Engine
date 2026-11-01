@@ -119,7 +119,13 @@ def _compare_lens_metadata(
     relevant = [
         item for item in observations
         if isinstance(item, dict)
-        and normalize_title(item.get("lens_title") or "") in allowed_titles
+        and (
+            normalize_title(item.get("lens_title") or "") in allowed_titles
+            or any(
+                _phrase_in_lens_text(query, str(item.get("lens_title") or ""))
+                for query in allowed_titles
+            )
+        )
     ]
     years = list(dict.fromkeys(
         int(value)
