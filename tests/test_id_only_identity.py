@@ -65,15 +65,8 @@ class FakeGitHub:
 
 
 class FakeResolver:
-    def __init__(self):
-        self.text_search_calls = 0
-
     def resolve_result_urls(self, rows):
         return rows
-
-    def search_official_id_pages(self, rows):
-        self.text_search_calls += 1
-        raise AssertionError("A separate text search must never run")
 
 
 class IdOnlyIdentityTests(unittest.TestCase):
@@ -217,7 +210,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertIn("both IDs are required", match["reason"])
         self.assertEqual(engine.tmdb.search_movies_calls, 0)
 
-    def test_lens_provider_error_is_preserved_and_text_search_is_skipped(self):
+    def test_lens_provider_error_is_preserved_and_tmdb_search_is_skipped(self):
         engine = self.make_engine()
         engine._reverse_image_results = lambda _image_url: [{
             "error": "BrightDataAPIError",
@@ -235,7 +228,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertIn("HTTP 502", latest["errors"][0]["message"])
         self.assertEqual(
             record["reverse_image"]["evidence"]["tmdb_title_search"]["status"],
-            "skipped_official_ids_present",
+            "skipped_lens_error",
         )
         self.assertEqual(engine.tmdb.search_movies_calls, 0)
 
