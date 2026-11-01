@@ -169,7 +169,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         response.json.side_effect = ValueError("not json")
         api = self.make_client()
         api.client.post.return_value = response
-        with self.assertRaisesRegex(BrightDataAPIError, "did not return parsed JSON"):
+        with self.assertRaisesRegex(BrightDataAPIError, "non-JSON response"):
             api.search_by_image_url("https://example.com/poster.jpg")
 
 
