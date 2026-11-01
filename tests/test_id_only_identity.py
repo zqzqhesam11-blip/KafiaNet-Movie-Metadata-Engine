@@ -165,6 +165,24 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertIn("No official IMDb/TMDB movie URL", match["reason"])
         self.assertEqual(engine.tmdb.search_movies_calls, 0)
 
+    def test_single_tmdb_candidate_without_verified_imdb_id_stays_in_review(self):
+        engine = self.make_engine()
+        engine.tmdb.records[10754] = movie_details(
+            10754, "", "A Short Film About Killing"
+        )
+        engine.tmdb.records[10754]["external_ids"] = {}
+
+        candidate, match, _ = engine._find_movie([{
+            "title": "Caption is not an identity signal",
+            "url": "https://www.themoviedb.org/movie/10754",
+            "resolved_url": "https://www.themoviedb.org/movie/10754",
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertIn("both IDs are required", match["reason"])
+        self.assertEqual(engine.tmdb.search_movies_calls, 0)
+
     def test_record_persists_both_ids_as_explicit_fields(self):
         engine = self.make_engine()
         rows = [
