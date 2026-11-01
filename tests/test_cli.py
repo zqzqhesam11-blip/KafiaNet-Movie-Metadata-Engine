@@ -22,7 +22,9 @@ class CliSummaryTests(unittest.TestCase):
             "reverse_image_unresponsive": 12,
             "reverse_image_no_matches": 5,
             "reverse_image_previous_evidence_reused": 8,
-            "reverse_image_rejected_external_ids": 3,
+            "reverse_image_official_id_backlinks": 4,
+            "reverse_image_resolved_identities": 190,
+            "reverse_image_identity_conflicts": 2,
             "records": [{"large": "must not appear"}],
             "planned_output_files": ["very/long/path.json"],
             "planned_image_moves": ["poster.jpg"],
@@ -34,7 +36,7 @@ class CliSummaryTests(unittest.TestCase):
         self.assertIn("ready=178 review=20 duplicates=2", output)
         self.assertIn("commit_sha=abc123", output)
         self.assertIn(
-            "reverse_image_unresponsive=12 no_matches=5 reused_saved_evidence=8 rejected_external_ids=3",
+            "reverse_image_unresponsive=12 no_matches=5 reused_saved_evidence=8 official_id_backlinks=4 resolved_identities=190 identity_conflicts=2",
             output,
         )
         self.assertNotIn("must not appear", output)
