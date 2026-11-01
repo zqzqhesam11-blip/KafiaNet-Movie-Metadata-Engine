@@ -155,7 +155,7 @@ class BrightDataGoogleLensClient:
             # image and image for its preview; keep the full-size URL first.
             image_url = cls._first_url(
                 item,
-                ("original_image", "image_url", "original", "image", "thumbnail", "thumbnail_url"),
+                ("original_image", "image_url", "original", "source", "image", "thumbnail", "thumbnail_url"),
             )
             if not page_url and image_url:
                 page_url = image_url
