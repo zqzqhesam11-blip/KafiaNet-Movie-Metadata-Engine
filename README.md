@@ -61,7 +61,9 @@ Required environment variables:
 - `POSTERS_BRANCH`: defaults to `main`.
 
 
-### Configuration preflight
+#Optional: `TMDB_LANGUAGE` (default `en-US`), `BATCH_LIMIT` (default `5`), `HTTP_TIMEOUT_SECONDS` (default `60`).
+
+## Configuration preflight
 
 Run:
 
