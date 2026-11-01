@@ -170,15 +170,37 @@ class IdOnlyIdentityTests(unittest.TestCase):
 
         candidate, match, evidence = engine._find_movie(rows)
 
-        self.assertEqual(candidate["id"], 10754)
-        self.assertEqual(match["status"], "ready")
-        self.assertEqual(match["tmdb_id"], 10754)
-        self.assertEqual(match["imdb_id"], "tt0095468")
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(match["candidate_ids"], [10754])
+        self.assertIn("at least two independent matching metadata facts", match["reason"])
+        self.assertEqual(match["candidate_comparisons"][0]["metadata_match"]["matched_fields"], ["year"])
         self.assertEqual(engine.tmdb.search_movies_queries, ["A Short Film About Killing"])
         self.assertEqual(evidence["tmdb_title_search"]["status"], "matched")
         self.assertFalse(evidence["tmdb_title_search"]["folder_name_used"])
         self.assertFalse(evidence["tmdb_title_search"]["image_filename_used"])
-        self.assertFalse(match["folder_name_used_for_matching"])
+
+    def test_unique_lens_title_candidate_requires_two_matching_metadata_facts(self):
+        engine = self.make_engine()
+        engine.tmdb.records[10754]["credits"]["crew"] = [{
+            "id": 20,
+            "name": "Krzysztof Kieslowski",
+            "job": "Director",
+            "department": "Directing",
+        }]
+
+        candidate, match, evidence = engine._find_movie([{
+            "title": "A Short Film About Killing (1988) - IMDb",
+            "url": "https://example.com/a-short-film-about-killing",
+            "content": "Directed by Krzysztof Kieslowski.",
+        }])
+
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        metadata = evidence["resolved_identity"]["metadata_match"]
+        self.assertIn("year", metadata["matched_fields"])
+        self.assertIn("director", metadata["matched_fields"])
+        self.assertTrue(metadata["evidence_qualified"])
 
     def test_multiple_close_tmdb_candidates_remain_in_review(self):
         engine = self.make_engine()
