@@ -32,7 +32,7 @@ References:
 
 - The CLI defaults to **DRY RUN**. It never writes to GitHub unless `--apply` is supplied.
 - During APPLY, source movie folders are classified into `جاهز/` or `مراجعة/` in one Git tree commit with their JSON metadata.
-- The source movie-folder name is never changed. Only the JSON basename changes to the verified TMDB worldwide title and release year.
+- The source movie-folder name is never changed. Only the JSON basename changes to the movie title and release year returned by TMDB.
 - Image filenames, extensions, bytes, and Git blob SHAs are preserved.
 - Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
 - Movie identity starts with the poster image in Google Lens. The only accepted identity signal is a numeric movie ID parsed from an official TMDB movie destination URL returned by Lens.
@@ -60,7 +60,6 @@ Required environment variables:
 - `POSTERS_REPO`: defaults to `zqzqhesam11-blip/KafiaNet-Movie-Posters`.
 - `POSTERS_BRANCH`: defaults to `main`.
 
-Optional: `TMDB_LANGUAGE` (default `en-US`), `BATCH_LIMIT` (default `5`), `MATCH_ACCEPT_SCORE` (default `0.94`), `HTTP_TIMEOUT_SECONDS` (default `60`).
 
 ### Configuration preflight
 
