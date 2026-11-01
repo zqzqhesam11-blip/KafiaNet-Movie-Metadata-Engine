@@ -47,6 +47,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         call = api.client.post.call_args
         self.assertEqual(call.args[0], BRIGHTDATA_REQUEST_URL)
         self.assertEqual(call.kwargs["json"]["zone"], "serp_api1")
+        self.assertEqual(call.kwargs["json"]["format"], "json")
         target = call.kwargs["json"]["url"]
         self.assertIn("lens.google.com/uploadbyurl?", target)
         self.assertIn("brd_json=1", target)
@@ -68,6 +69,43 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(result[0]["url"], "https://www.imdb.com/title/tt0133093/")
         self.assertEqual(result[0]["source"], "https://cdn.example.com/matrix-original.jpg")
         self.assertEqual(result[0]["position"], 1)
+
+    def test_unwraps_brightdata_json_api_envelope(self):
+        results = {
+            "visual_matches": [{
+                "title": "A Short Film About Killing (1988)",
+                "link": "https://www.imdb.com/title/tt0095468/",
+                "source": "https://images.example.com/poster.jpg",
+            }]
+        }
+        api = self.make_client({
+            "status_code": 200,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps(results),
+        })
+        result = api.search_by_image_url("https://example.com/poster.jpg")
+        self.assertEqual(len(result), 1)
+        self.assertIn("A Short Film About Killing", result[0]["title"])
+
+    def test_reports_brightdata_inner_http_errors_from_json_envelope(self):
+        api = self.make_client({
+            "status_code": 401,
+            "headers": {"content-type": "application/json"},
+            "body": "unauthorized",
+        })
+        with self.assertRaisesRegex(BrightDataAPIError, "BRIGHTDATA_API_KEY"):
+            api.search_by_image_url("https://example.com/poster.jpg")
+
+    def test_empty_json_response_reports_http_metadata(self):
+        response = Mock()
+        response.status_code = 200
+        response.text = ""
+        response.headers = {"content-type": "application/json", "content-length": "0"}
+        response.json.side_effect = ValueError("empty")
+        api = self.make_client()
+        api.client.post.return_value = response
+        with self.assertRaisesRegex(BrightDataAPIError, "content-length=0"):
+            api.search_by_image_url("https://example.com/poster.jpg")
 
     def test_unwraps_json_encoded_brightdata_body(self):
         nested = {
@@ -131,7 +169,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         response.json.side_effect = ValueError("not json")
         api = self.make_client()
         api.client.post.return_value = response
-        with self.assertRaisesRegex(BrightDataAPIError, "did not return parsed JSON"):
+        with self.assertRaisesRegex(BrightDataAPIError, "non-JSON response"):
             api.search_by_image_url("https://example.com/poster.jpg")
 
 

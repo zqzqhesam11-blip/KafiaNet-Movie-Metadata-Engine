@@ -180,7 +180,7 @@ class BrightDataGoogleLensClient:
         try:
             response = self.client.post(
                 BRIGHTDATA_REQUEST_URL,
-                json={"zone": self.zone, "url": target_url, "format": "raw"},
+                json={"zone": self.zone, "url": target_url, "format": "json"},
             )
         except httpx.HTTPError as exc:
             raise BrightDataAPIError(
@@ -198,10 +198,33 @@ class BrightDataGoogleLensClient:
                 raise BrightDataQuotaError(response.status_code, message)
             raise BrightDataAPIError(message)
         if payload is None:
+            headers = getattr(response, "headers", {}) or {}
+            content_type = headers.get("content-type", "unknown") if hasattr(headers, "get") else "unknown"
+            content_length = headers.get("content-length", "unknown") if hasattr(headers, "get") else "unknown"
             raise BrightDataAPIError(
-                "Bright Data did not return parsed JSON for Google Lens (brd_json=1); "
-                f"response began with: {body[:180]!r}"
+                "Bright Data returned an empty or non-JSON response "
+                f"(HTTP {response.status_code}, content-type={content_type}, "
+                f"content-length={content_length}); request uses format=json. "
+                "Verify the SERP API zone configuration and Bright Data request delivery."
             )
+        if isinstance(payload, dict) and "status_code" in payload and "body" in payload:
+            try:
+                inner_status = int(payload.get("status_code") or 0)
+            except (TypeError, ValueError):
+                inner_status = 0
+            inner_body = payload.get("body")
+            if inner_status and not 200 <= inner_status < 300:
+                detail = self._error_detail(inner_body if isinstance(inner_body, dict) else None,
+                                            inner_body if isinstance(inner_body, str) else "")
+                message = self._http_error(inner_status, detail)
+                if inner_status in {402, 429}:
+                    raise BrightDataQuotaError(inner_status, message)
+                raise BrightDataAPIError(message)
+            if not str(inner_body or "").strip():
+                raise BrightDataAPIError(
+                    "Bright Data API envelope was received but its body is empty "
+                    f"(inner HTTP {inner_status or 'unknown'}); no Google Lens results were delivered"
+                )
         if isinstance(payload, dict) and any(payload.get(key) for key in ("error", "errors")):
             detail = self._error_detail(payload)
             raise BrightDataAPIError(f"Bright Data returned an API error: {detail or 'unknown provider error'}")
