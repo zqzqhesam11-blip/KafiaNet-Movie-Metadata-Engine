@@ -701,7 +701,16 @@ class MetadataEngine:
                 details = self.tmdb.movie_details(tmdb_id)
                 self._details_cache[tmdb_id] = details
             normalized = self.tmdb.normalize_details(details)
-            title_selection = self.tmdb.select_worldwide_title(normalized)
+            # Use the title returned by the verified TMDB movie record as-is.
+            # Do not infer or select a title from Lens text, countries or market counts.
+            canonical_title = (
+                str(normalized.get("title") or normalized.get("original_title") or "").strip()
+                or f"TMDB Movie {tmdb_id}"
+            )
+            title_selection = {
+                "title": canonical_title,
+                "source": "tmdb_movie_details",
+            }
 
             external_ids = normalized.setdefault("external_ids", {})
             imdb_id = (
@@ -713,11 +722,6 @@ class MetadataEngine:
             if imdb_id:
                 external_ids["imdb_id"] = imdb_id
 
-            canonical_title = (
-                title_selection.get("title")
-                or normalized.get("title")
-                or f"TMDB Movie {tmdb_id}"
-            )
             canonical_year = normalized.get("year")
             canonical_folder_name = (
                 f"{canonical_title} ({canonical_year})" if canonical_year else canonical_title
