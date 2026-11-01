@@ -24,7 +24,7 @@ DIRECTOR_RE = re.compile(
 )
 
 GENERIC_WORDS = {
-    "poster", "posters", "movie", "movies", "film", "films", "cover",
+    "poster", "posters", "cover",
     "covers", "image", "images", "thumbnail", "thumb", "download",
     "original", "large", "small", "medium", "full", "hd", "jpg", "jpeg",
     "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "official",
