@@ -48,7 +48,8 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(call.args[0], BRIGHTDATA_REQUEST_URL)
         self.assertEqual(call.kwargs["json"]["zone"], "serp_api1")
         self.assertEqual(call.kwargs["json"]["format"], "raw")
-        self.assertEqual(call.kwargs["json"]["data_format"], "parsed_light")
+        self.assertNotIn("data_format", call.kwargs["json"])
+        self.assertEqual(call.kwargs["headers"]["x-unblock-data-format"], "parsed_light")
         self.assertEqual(api.last_lens_diagnostics["data_format"], "parsed_light")
         target = call.kwargs["json"]["url"]
         self.assertIn("lens.google.com/uploadbyurl?", target)
