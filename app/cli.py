@@ -31,7 +31,10 @@ def format_summary(result: dict[str, Any]) -> str:
             f"planned_image_moves={len(result.get('planned_image_moves') or [])} "
             f"planned_deletes={len(result.get('planned_source_image_deletes') or [])}"
         )
-        lines.append("NOTE: DRY_RUN performs live Google Lens lookups and consumes free-tier requests.")
+        lines.append(
+            "NOTE: DRY_RUN performs live Google Lens lookups and, when no official ID is found, "
+            "one Google Search query for official TMDB/IMDb pages; these requests consume free-tier quota."
+        )
     else:
         lines.append(
             f"written_files={result.get('written_files', 0)} "
