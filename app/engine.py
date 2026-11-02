@@ -609,6 +609,9 @@ class MetadataEngine:
             title_search_diag = {}
         lens_diagnostics.update({
             "title_search_status": title_search_diag.get("status", "not_run"),
+            "title_search_response_format": title_search_diag.get("response_format", "unknown"),
+            "title_search_http_status": title_search_diag.get("http_status"),
+            "title_search_payload_shape": title_search_diag.get("payload_shape"),
             "title_search_attempts": title_search_diag.get("attempts", 0),
             "title_search_results": title_search_diag.get("organic_result_count", 0),
             "title_search_official_urls": title_search_diag.get("official_url_count", 0),
@@ -871,6 +874,9 @@ class MetadataEngine:
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
                 f"title_search_status={lens_diag.get('title_search_status', 'not_run')} "
+                f"title_search_format={lens_diag.get('title_search_response_format', 'unknown')} "
+                f"title_search_http={lens_diag.get('title_search_http_status', 'none')} "
+                f"title_search_shape='{safe_log_detail(str(lens_diag.get('title_search_payload_shape') or 'none'), 180)}' "
                 f"title_search_attempts={lens_diag.get('title_search_attempts', 0)} "
                 f"title_search_results={lens_diag.get('title_search_results', 0)} "
                 f"title_search_official_urls={lens_diag.get('title_search_official_urls', 0)} "
