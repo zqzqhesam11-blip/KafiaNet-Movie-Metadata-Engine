@@ -579,9 +579,16 @@ class MetadataEngine:
         # Recompute after _find_movie: its official title-search fallback may
         # append direct TMDB/IMDb URLs found from Lens-derived title hints.
         lens_diagnostics.update(tmdb_movie_url_diagnostics(reverse_image_results))
-        lens_diagnostics.update(
+        title_search_diag = (
             getattr(self.reverse_image, "last_official_search_diagnostics", {}) or {}
         )
+        lens_diagnostics.update({
+            "title_search_status": title_search_diag.get("status", "not_run"),
+            "title_search_attempts": title_search_diag.get("attempts", 0),
+            "title_search_results": title_search_diag.get("organic_result_count", 0),
+            "title_search_official_urls": title_search_diag.get("official_url_count", 0),
+            "title_search_query_count": title_search_diag.get("query_count", 0),
+        })
         reverse_image_evidence["results_source"] = reverse_image_results_source
         reverse_image_evidence["lens_diagnostics"] = lens_diagnostics
 
@@ -834,11 +841,12 @@ class MetadataEngine:
                 f"lens_http={lens_diag.get('http_status', 'none')} "
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
-                f"title_search_status={lens_diag.get('status', 'not_run')} "
-                f"title_search_attempts={lens_diag.get('attempts', 0)} "
-                f"title_search_results={lens_diag.get('organic_result_count', 0)} "
-                f"title_search_official_urls={lens_diag.get('official_url_count', 0)} "
-                f"official_tmdb_urls={lens_diag.get('official_tmdb_url_count', 0)} 
+                f"title_search_status={lens_diag.get('title_search_status', 'not_run')} "
+                f"title_search_attempts={lens_diag.get('title_search_attempts', 0)} "
+                f"title_search_results={lens_diag.get('title_search_results', 0)} "
+                f"title_search_official_urls={lens_diag.get('title_search_official_urls', 0)} "
+                f"title_search_query_count={lens_diag.get('title_search_query_count', 0)} "
+                f"official_tmdb_urls={lens_diag.get('official_tmdb_url_count', 0)} "
                 f"official_tmdb_ids={','.join(str(value) for value in (lens_diag.get('official_tmdb_ids') or [])[:10]) or 'none'} "
                 f"official_imdb_ids={','.join(str(value) for value in (lens_diag.get('official_imdb_ids') or [])[:10]) or 'none'} "
                 f"result_urls={lens_diag.get('result_url_count', 0)} "
