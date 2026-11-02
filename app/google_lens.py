@@ -4,13 +4,14 @@ import json
 import re
 import time
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 
 import httpx
 
 
 BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 GOOGLE_LENS_URL = "https://lens.google.com/uploadbyurl"
+GOOGLE_SEARCH_URL = "https://www.google.com/search"
 LENS_TAB = "exact_matches"
 MAX_NORMALIZED_RESULTS = 80
 MAX_TRANSIENT_RETRIES = 2
@@ -405,6 +406,8 @@ class BrightDataGoogleLensClient:
         self,
         target_url: str,
         stage: str,
+        *,
+        parsed_light_header: bool = True,
     ) -> tuple[httpx.Response, Any, int, int]:
         """POST one SERP request and retry transport or outer/inner transient failures.
 
@@ -414,9 +417,13 @@ class BrightDataGoogleLensClient:
         """
         for attempt in range(MAX_TRANSIENT_RETRIES + 1):
             try:
+                request_headers = (
+                    {"x-unblock-data-format": "parsed_light"}
+                    if parsed_light_header else None
+                )
                 response = self.client.post(
                     BRIGHTDATA_REQUEST_URL,
-                    headers={"x-unblock-data-format": "parsed_light"},
+                    headers=request_headers,
                     json={
                         "zone": self.zone,
                         "url": target_url,
@@ -479,6 +486,229 @@ class BrightDataGoogleLensClient:
         raise BrightDataAPIError(
             f"Bright Data {stage} ended without a response after {MAX_TRANSIENT_RETRIES + 1} attempts"
         )
+
+
+    @staticmethod
+    def _clean_title_hint(value: str) -> tuple[str, int | None]:
+        """Clean a title obtained from Lens metadata or a direct Play Store result URL."""
+        text = unquote(str(value or "")).replace("_", " ").replace("+", " ")
+        text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
+        year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", text)
+        year = int(year_match.group(1)) if year_match else None
+        text = re.sub(r"[\[(](?:19|20)\d{2}[\])]", " ", text)
+        text = re.sub(
+            r"\s+(?:[-–—|:]\s*)?(?:google play|tmdb|the movie database|imdb|"
+            r"wikipedia|youtube|official trailer|watch online)\s*$",
+            "",
+            text,
+            flags=re.I,
+        )
+        text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
+        if len(text) < 5 or not re.search(r"[A-Za-zÀ-ž]", text):
+            return "", year
+        if text.casefold() in {
+            "google play", "movie", "movies", "film", "films",
+            "official site", "watch online", "full movie",
+        }:
+            return "", year
+        return text[:180], year
+
+    @classmethod
+    def title_hints_from_lens_results(
+        cls,
+        results: list[dict[str, Any]],
+    ) -> tuple[list[str], int | None]:
+        """Collect search phrases only from Lens result titles and direct Play Store URLs.
+
+        Source-folder labels and local image filenames are not accepted by this API.
+        Google /goto wrappers are deliberately excluded because their destinations
+        are not known.
+        """
+        hints: list[str] = []
+        years: set[int] = set()
+
+        def add(value: str) -> None:
+            title, year = cls._clean_title_hint(value)
+            if year:
+                years.add(year)
+            if not title:
+                return
+            key = re.sub(r"\W+", " ", title.casefold()).strip()
+            if not key or any(
+                re.sub(r"\W+", " ", old.casefold()).strip() == key
+                for old in hints
+            ):
+                return
+            hints.append(title)
+
+        for item in results or []:
+            if not isinstance(item, dict) or item.get("error"):
+                continue
+            title_value = item.get("title")
+            if isinstance(title_value, str):
+                add(title_value)
+
+            urls: list[str] = []
+            for key in ("url", "resolved_url", "url_candidates", "resolved_urls"):
+                value = item.get(key)
+                candidates = value if isinstance(value, list) else [value]
+                urls.extend(
+                    candidate.strip()
+                    for candidate in candidates
+                    if isinstance(candidate, str) and candidate.strip()
+                )
+
+            for candidate in dict.fromkeys(urls):
+                try:
+                    parsed = urlparse(candidate)
+                except ValueError:
+                    continue
+                host = (parsed.hostname or "").casefold().rstrip(".")
+                if host != "play.google.com":
+                    continue
+                prefix = "/store/movies/details/"
+                if not parsed.path.casefold().startswith(prefix):
+                    continue
+                slug = parsed.path[len(prefix):].split("/", 1)[0]
+                if slug and not slug.isdigit():
+                    add(slug)
+                if len(hints) >= 3:
+                    break
+            if len(hints) >= 3:
+                break
+
+        # Only use a year explicitly present in the Lens result title text.
+        # A year embedded in a Play Store slug is not considered a release year.
+        return hints[:3], next(iter(years)) if len(years) == 1 else None
+
+    @staticmethod
+    def _google_official_title_search_url(
+        title_hints: list[str],
+        year: int | None,
+    ) -> str:
+        quoted = [f'"{value.replace(chr(34), " ").strip()}"' for value in title_hints if value.strip()]
+        title_clause = " OR ".join(quoted)
+        query = (
+            f"({title_clause}) "
+            "(site:themoviedb.org/movie OR site:imdb.com/title)"
+        )
+        if year:
+            query += f" {int(year)}"
+        return f"{GOOGLE_SEARCH_URL}?{urlencode({'q': query, 'hl': 'en', 'brd_json': '1'})}"
+
+    def search_official_movie_pages_from_lens(
+        self,
+        lens_results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Search Google once for official TMDB/IMDb pages using Lens-derived titles only."""
+        title_hints, year = self.title_hints_from_lens_results(lens_results)
+        self.last_official_search_diagnostics = {
+            "status": "no_title_hints" if not title_hints else "requesting",
+            "query_count": 0,
+            "title_hints": title_hints,
+            "year_hint": year,
+            "http_status": None,
+            "attempts": 0,
+            "organic_result_count": 0,
+            "official_url_count": 0,
+            "error": None,
+        }
+        if not title_hints:
+            return []
+
+        target_url = self._google_official_title_search_url(title_hints, year)
+        try:
+            response, payload, effective_status, attempts = self._post_serp_with_retries(
+                target_url,
+                "Google official movie title search",
+                parsed_light_header=False,
+            )
+        except BrightDataAPIError as exc:
+            self.last_official_search_diagnostics.update({
+                "status": "error",
+                "query_count": 1,
+                "attempts": MAX_TRANSIENT_RETRIES + 1,
+                "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            })
+            raise
+
+        body = getattr(response, "text", "") or ""
+        self.last_official_search_diagnostics.update({
+            "status": "http_error" if effective_status < 200 or effective_status >= 300 else "parsing",
+            "query_count": 1,
+            "http_status": effective_status,
+            "attempts": attempts,
+        })
+        if effective_status < 200 or effective_status >= 300:
+            error_payload = payload.get("body") if (
+                isinstance(payload, dict) and "status_code" in payload and "body" in payload
+            ) else payload
+            message = self._http_error(
+                effective_status,
+                self._error_detail(error_payload, str(error_payload or body)),
+            )
+            self.last_official_search_diagnostics["error"] = message
+            if effective_status in {402, 429}:
+                raise BrightDataQuotaError(effective_status, message)
+            raise BrightDataAPIError(message)
+
+        if payload is None:
+            headers = getattr(response, "headers", {}) or {}
+            content_type = headers.get("content-type", "unknown") if hasattr(headers, "get") else "unknown"
+            content_length = headers.get("content-length", "unknown") if hasattr(headers, "get") else "unknown"
+            message = (
+                "Bright Data Google title search returned an empty or non-JSON response "
+                f"(HTTP {effective_status}, content-type={content_type}, "
+                f"content-length={content_length})"
+            )
+            self.last_official_search_diagnostics.update({
+                "status": "invalid_response",
+                "error": message,
+            })
+            raise BrightDataAPIError(message)
+
+        rows = self._rows_from_payload(payload)
+        if rows is None:
+            shape = self._payload_shape(payload)
+            message = (
+                "Bright Data Google title search returned JSON without a recognized organic result list; "
+                + shape
+            )
+            self.last_official_search_diagnostics.update({
+                "status": "unparsed_response",
+                "error": message,
+            })
+            raise BrightDataAPIError(message)
+
+        normalized = self._normalize_matches(rows)
+        official_rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for result in normalized:
+            official_urls = [
+                value for value in (result.get("url_candidates") or [])
+                if isinstance(value, str) and self._official_movie_url(value)
+            ]
+            for official_url in official_urls:
+                if official_url in seen:
+                    continue
+                seen.add(official_url)
+                official_rows.append({
+                    **result,
+                    "url": official_url,
+                    "url_candidates": [official_url],
+                    "resolved_urls": [official_url],
+                    "resolved_url": official_url,
+                    "provider": "google_serp_official_movie_title_search",
+                    "search_source": "lens_result_title_or_direct_play_store_url",
+                })
+
+        self.last_official_search_diagnostics.update({
+            "status": "ok" if official_rows else "no_official_results",
+            "organic_result_count": len(rows),
+            "official_url_count": len(official_rows),
+            "error": None,
+        })
+        return official_rows
 
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
         """Search one public poster URL with bounded retries for transient provider failures."""
