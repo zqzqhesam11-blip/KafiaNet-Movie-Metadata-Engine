@@ -319,7 +319,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_lens_diagnostics["google_goto_candidates"], 1)
         self.assertEqual(api.last_lens_diagnostics["google_goto_resolved"], 1)
         self.assertEqual(api.last_lens_diagnostics["google_goto_failed"], 0)
-        self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {"302": 1})
+        self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {"HEAD:302": 1})
         self.assertEqual(api.last_lens_diagnostics["google_goto_methods"], {"HEAD": 1})
 
     def test_accepts_location_header_even_with_non_3xx_status(self):
@@ -335,7 +335,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         }])
 
         self.assertEqual(rows[0]["resolved_url"], "https://www.imdb.com/title/tt0095468/")
-        self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {"402": 1})
+        self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {"HEAD:402": 1})
         self.assertEqual(api.last_lens_diagnostics["google_goto_resolved"], 1)
 
 
@@ -359,7 +359,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_lens_diagnostics["google_goto_candidates"], 1)
         self.assertEqual(api.last_lens_diagnostics["google_goto_resolved"], 0)
         self.assertEqual(api.last_lens_diagnostics["google_goto_failed"], 1)
-        self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {"200": 1})
+        self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {"HEAD:200": 1, "GET:200": 1})
         self.assertEqual(api.last_lens_diagnostics["google_goto_methods"], {"HEAD+GET": 1})
         self.assertEqual(api.last_lens_diagnostics["google_goto_error_kinds"], {"no_location": 1})
         api.redirect_client.get.assert_called_once_with(
