@@ -86,7 +86,7 @@ class MetadataEngine:
         lens_tmdb_ids = extract_tmdb_movie_ids(reverse_image_results)
         lens_imdb_ids = extract_imdb_ids(reverse_image_results)
         tmdb_id_lookup = {
-            "status": "resolving" if (lens_tmdb_ids or lens_imdb_ids) else "no_official_id",
+            "status": "resolving" if (lens_tmdb_ids or lens_imdb_ids) else "no_tmdb_id",
             "tmdb_ids": list(lens_tmdb_ids),
             "direct_tmdb_ids": list(lens_tmdb_ids),
             "imdb_ids": list(lens_imdb_ids),
@@ -252,7 +252,7 @@ class MetadataEngine:
                 "status": "review",
                 "confidence": 0.0,
                 "reason": "One or more TMDB movie IDs could not be verified through official movie details",
-                "candidate_ids": sorted(resolved),
+                "candidate_ids": sorted(candidate_tmdb_ids),
                 "details_errors": details_errors,
             }, evidence
 
