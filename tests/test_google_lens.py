@@ -195,6 +195,21 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         api = self.make_client({"exact_matches": []})
         self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
 
+    def test_supports_nested_generic_results_wrapper(self):
+        rows = BrightDataGoogleLensClient._rows_from_payload({
+            "results": {
+                "organic": [{
+                    "title": "A Short Film About Killing",
+                    "link": "https://www.imdb.com/title/tt0095468/",
+                }]
+            }
+        })
+        self.assertEqual(len(rows or []), 1)
+        self.assertEqual(
+            rows[0]["link"] if rows else None,
+            "https://www.imdb.com/title/tt0095468/",
+        )
+
     def test_supports_nested_google_lens_results(self):
         api = self.make_client({"data": {"exact_matches": [{"title": "Movie", "link": "https://example.com/movie"}]}})
         self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg")[0]["title"], "Movie")
