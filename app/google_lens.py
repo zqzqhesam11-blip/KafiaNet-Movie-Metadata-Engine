@@ -492,6 +492,9 @@ class BrightDataGoogleLensClient:
     def _clean_title_hint(value: str) -> tuple[str, int | None]:
         """Clean a title obtained from Lens metadata or a direct Play Store result URL."""
         text = unquote(str(value or "")).replace("_", " ").replace("+", " ")
+        # Result titles are untrusted data: keep them as plain quoted words,
+        # never allow them to inject extra Google search operators.
+        text = re.sub(r"[^\w\s'’\-]", " ", text, flags=re.UNICODE)
         text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
         year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", text)
         year = int(year_match.group(1)) if year_match else None
