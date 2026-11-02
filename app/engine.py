@@ -72,12 +72,13 @@ class MetadataEngine:
         self,
         reverse_image_results: list[dict[str, Any]],
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
-        """Resolve a movie only from official TMDB or IMDb URL identifiers.
+        """Resolve only official TMDB/IMDb identifiers, with a Lens-derived title-search fallback.
 
-        TMDB movie URLs provide TMDB IDs directly. Official IMDb title URLs
-        provide IMDb IDs, which are mapped through TMDB's /find endpoint with
-        external_source=imdb_id. Lens captions, snippets, folder names, image
-        filenames, and title searches are never identity inputs.
+        Direct Lens links are preferred. If Lens exposes no official movie ID,
+        one Google SERP query is built only from Lens result titles and direct
+        Google Play movie URLs. The source-folder name and local image filename
+        are never inputs. IMDb IDs are mapped through TMDB /find, then every
+        candidate is verified through TMDB movie details.
         """
         reverse_image_failed = any(
             isinstance(item, dict) and item.get("error")
@@ -123,15 +124,115 @@ class MetadataEngine:
                 "candidate_ids": [],
             }, evidence
 
+        lens_tmdb_ids_from_lens = list(lens_tmdb_ids)
+        lens_imdb_ids_from_lens = list(lens_imdb_ids)
+        title_search_tmdb_ids: list[int] = []
+        title_search_imdb_ids: list[str] = []
+        title_search_diagnostics: dict[str, Any] = {
+            "status": "skipped_direct_official_id_present"
+            if (lens_tmdb_ids or lens_imdb_ids) else "unavailable",
+            "query_count": 0,
+            "title_hints": [],
+            "year_hint": None,
+            "http_status": None,
+            "attempts": 0,
+            "organic_result_count": 0,
+            "official_url_count": 0,
+            "error": None,
+        }
+
+        # Fallback only when Lens itself returned no official TMDB/IMDb ID.
+        # Its single query is derived exclusively from Lens result titles and
+        # direct Google Play movie URLs, never from the source folder or filename.
         if not lens_tmdb_ids and not lens_imdb_ids:
+            title_searcher = getattr(
+                getattr(self, "reverse_image", None),
+                "search_official_movie_pages_from_lens",
+                None,
+            )
+            if callable(title_searcher):
+                title_search_rows: list[dict[str, Any]] = []
+                try:
+                    title_search_rows = title_searcher(reverse_image_results) or []
+                    if title_search_rows and isinstance(reverse_image_results, list):
+                        reverse_image_results.extend(title_search_rows)
+                    title_search_diagnostics = dict(
+                        getattr(
+                            getattr(self, "reverse_image", None),
+                            "last_official_search_diagnostics",
+                            {},
+                        ) or {}
+                    )
+                except BrightDataQuotaError as exc:
+                    self._stop_batch = True
+                    self._provider_stop_status = exc.status_code
+                    title_search_diagnostics.update({
+                        "status": "quota_error",
+                        "error": str(exc)[:300],
+                    })
+                except Exception as exc:
+                    title_search_diagnostics.update({
+                        "status": "error",
+                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    })
+
+                title_search_tmdb_ids = extract_tmdb_movie_ids(title_search_rows)
+                title_search_imdb_ids = extract_imdb_ids(title_search_rows)
+                lens_tmdb_ids = list(dict.fromkeys([*lens_tmdb_ids, *title_search_tmdb_ids]))
+                lens_imdb_ids = list(dict.fromkeys([*lens_imdb_ids, *title_search_imdb_ids]))
+
+        evidence["official_title_search"] = {
+            "source": "google_lens_result_titles_and_direct_play_store_urls",
+            "status": title_search_diagnostics.get("status", "unavailable"),
+            "query_count": title_search_diagnostics.get("query_count", 0),
+            "title_hints": list(title_search_diagnostics.get("title_hints") or [])[:3],
+            "year_hint": title_search_diagnostics.get("year_hint"),
+            "organic_result_count": title_search_diagnostics.get("organic_result_count", 0),
+            "official_url_count": title_search_diagnostics.get("official_url_count", 0),
+            "error": title_search_diagnostics.get("error"),
+            "tmdb_ids": list(title_search_tmdb_ids),
+            "imdb_ids": list(title_search_imdb_ids),
+        }
+        evidence["id_resolution"]["strategy"] = (
+            "lens_official_id_or_lens_derived_google_official_title_search_then_tmdb_find"
+        )
+        evidence["id_resolution"]["tmdb_ids_seen"] = list(lens_tmdb_ids)
+        evidence["id_resolution"]["imdb_ids_seen"] = list(lens_imdb_ids)
+        evidence["id_resolution"]["google_title_search_tmdb_ids"] = list(title_search_tmdb_ids)
+        evidence["id_resolution"]["google_title_search_imdb_ids"] = list(title_search_imdb_ids)
+        tmdb_id_lookup.update({
+            "status": "resolving" if (lens_tmdb_ids or lens_imdb_ids) else "no_tmdb_id",
+            "tmdb_ids": list(lens_tmdb_ids),
+            "direct_tmdb_ids": list(lens_tmdb_ids_from_lens),
+            "imdb_ids": list(lens_imdb_ids),
+            "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
+            "google_title_search_imdb_ids": list(title_search_imdb_ids),
+        })
+        evidence["tmdb_ids"] = list(lens_tmdb_ids)
+        evidence["imdb_ids"] = list(lens_imdb_ids)
+
+        if not lens_tmdb_ids and not lens_imdb_ids:
+            reason = (
+                "Lens returned no direct official IDs and the Lens-derived Google title search "
+                "found no official TMDB/IMDb movie URL with a usable numeric identifier"
+            )
+            if title_search_diagnostics.get("error"):
+                reason = (
+                    "Lens returned no official IDs and the Lens-derived Google title search failed: "
+                    + str(title_search_diagnostics.get("error"))[:220]
+                )
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": (
-                    "Google Lens returned no direct official TMDB movie URL or IMDb title URL "
-                    "with a usable numeric identifier; unresolved /goto wrappers are ignored and "
-                    "title and folder searches are disabled"
-                ),
+                "reason": reason,
+                "candidate_ids": [],
+            }, evidence
+
+        if self._stop_batch:
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": "Bright Data quota or request limit reached during official title search; batch stopped",
                 "candidate_ids": [],
             }, evidence
 
@@ -327,20 +428,37 @@ class MetadataEngine:
         selected = identities[0]
         selected_id = int(selected["tmdb_id"])
         selected_candidate = resolved[selected_id]
-        has_direct_tmdb_id = selected_id in lens_tmdb_ids
+        has_direct_tmdb_id = selected_id in lens_tmdb_ids_from_lens
+        has_title_search_tmdb_id = selected_id in title_search_tmdb_ids
         has_imdb_id = bool(expected_imdb_ids_by_tmdb.get(selected_id))
+        has_title_search_imdb_id = any(
+            value in title_search_imdb_ids
+            for value in expected_imdb_ids_by_tmdb.get(selected_id, [])
+        )
         if has_direct_tmdb_id and has_imdb_id:
             identity_source = "google_lens_official_tmdb_and_imdb_ids"
             identity_method = "lens_tmdb_and_imdb_id_lookup"
             verification = "official_tmdb_url_plus_tmdb_find_imdb_id_and_movie_details"
+        elif has_title_search_imdb_id:
+            identity_source = "google_serp_official_imdb_id_via_tmdb_find"
+            identity_method = "lens_title_search_imdb_id_tmdb_find"
+            verification = "official_imdb_url_from_lens_derived_search_then_tmdb_find_and_matching_movie_details"
         elif has_imdb_id:
             identity_source = "google_lens_official_imdb_id_via_tmdb_find"
             identity_method = "lens_imdb_id_tmdb_find"
             verification = "official_imdb_url_then_tmdb_find_and_matching_movie_details_external_id"
-        else:
+        elif has_direct_tmdb_id:
             identity_source = "google_lens_official_tmdb_movie_id"
             identity_method = "lens_tmdb_movie_id_lookup"
             verification = "tmdb_movie_details_id_equals_lens_movie_id"
+        elif has_title_search_tmdb_id:
+            identity_source = "google_serp_official_tmdb_movie_id"
+            identity_method = "lens_title_search_tmdb_movie_id_lookup"
+            verification = "official_tmdb_url_from_lens_derived_search_and_matching_tmdb_movie_details_id"
+        else:
+            identity_source = "google_official_tmdb_movie_id"
+            identity_method = "official_tmdb_movie_id_lookup"
+            verification = "official_tmdb_movie_details_id_verification"
 
         evidence["resolved_identity"] = {
             "tmdb_id": selected_id,
@@ -349,6 +467,8 @@ class MetadataEngine:
             "verification": verification,
             "official_tmdb_ids": list(lens_tmdb_ids),
             "official_imdb_ids": list(lens_imdb_ids),
+            "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
+            "google_title_search_imdb_ids": list(title_search_imdb_ids),
             "folder_name_used": False,
             "image_filename_used": False,
         }
@@ -455,11 +575,13 @@ class MetadataEngine:
                 if key in resolver_diagnostics:
                     lens_diagnostics[key] = resolver_diagnostics[key]
 
-        # Diagnostics are computed only from official TMDB destinations, never
-        # from Lens titles, snippets, image URLs, or folder labels.
-        lens_diagnostics.update(tmdb_movie_url_diagnostics(reverse_image_results))
-
         candidate, match, reverse_image_evidence = self._find_movie(reverse_image_results)
+        # Recompute after _find_movie: its official title-search fallback may
+        # append direct TMDB/IMDb URLs found from Lens-derived title hints.
+        lens_diagnostics.update(tmdb_movie_url_diagnostics(reverse_image_results))
+        lens_diagnostics.update(
+            getattr(self.reverse_image, "last_official_search_diagnostics", {}) or {}
+        )
         reverse_image_evidence["results_source"] = reverse_image_results_source
         reverse_image_evidence["lens_diagnostics"] = lens_diagnostics
 
@@ -712,7 +834,11 @@ class MetadataEngine:
                 f"lens_http={lens_diag.get('http_status', 'none')} "
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
-                f"official_tmdb_urls={lens_diag.get('official_tmdb_url_count', 0)} "
+                f"title_search_status={lens_diag.get('status', 'not_run')} "
+                f"title_search_attempts={lens_diag.get('attempts', 0)} "
+                f"title_search_results={lens_diag.get('organic_result_count', 0)} "
+                f"title_search_official_urls={lens_diag.get('official_url_count', 0)} "
+                f"official_tmdb_urls={lens_diag.get('official_tmdb_url_count', 0)} 
                 f"official_tmdb_ids={','.join(str(value) for value in (lens_diag.get('official_tmdb_ids') or [])[:10]) or 'none'} "
                 f"official_imdb_ids={','.join(str(value) for value in (lens_diag.get('official_imdb_ids') or [])[:10]) or 'none'} "
                 f"result_urls={lens_diag.get('result_url_count', 0)} "
