@@ -254,46 +254,102 @@ class BrightDataGoogleLensClient:
 
     @staticmethod
     def _rows_from_payload(payload: Any, depth: int = 0) -> list[dict[str, Any]] | None:
-        """Handle Lens arrays and Bright Data's occasional JSON/body wrappers."""
-        if depth > 6:
+        """Extract result rows from Bright Data's JSON response and known wrappers.
+
+        SERP API responses can be returned directly or inside JSON-encoded
+        body/data envelopes. Key casing and wrapper depth have varied between
+        API response modes, so normalize keys before looking for organic rows.
+        The final movie-identity filter remains separate and accepts only
+        official TMDB/IMDb destination URLs.
+        """
+        if depth > 10:
             return None
+
         if isinstance(payload, str):
-            text = payload.strip()
+            text = payload.strip().lstrip("\ufeff")
+            # Some upstream JSON responses carry Google's anti-XSSI prefix.
+            if text.startswith(")]}'"):
+                text = text.split("\n", 1)[1].lstrip() if "\n" in text else ""
             if text.startswith(("{", "[")):
                 try:
-                    return BrightDataGoogleLensClient._rows_from_payload(json.loads(text), depth + 1)
+                    return BrightDataGoogleLensClient._rows_from_payload(
+                        json.loads(text), depth + 1
+                    )
                 except (TypeError, ValueError):
                     return None
             return None
+
         if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)] if all(
-                isinstance(item, dict) for item in payload
-            ) else None
+            if all(isinstance(item, dict) for item in payload):
+                return payload
+            return None
+
         if not isinstance(payload, dict):
             return None
 
-        # Google Lens normally returns visual_matches. Bright Data's parsed image
-        # response can also expose the equivalent ranked items under images.
-        for key in (
-            "visual_matches", "exact_matches", "lens_results", "images",
-            "similar_images", "organic", "organic_results", "web_results",
-            "search_results",
-        ):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)] if all(
-                    isinstance(item, dict) for item in value
-                ) else None
+        def normalized_key(value: Any) -> str:
+            return re.sub(r"[^a-z0-9]", "", str(value).casefold())
 
-        # Handle structured wrappers and JSON-encoded body fields. results is
-        # a fallback for provider variants whose result list is generic.
-        for key in (
-            "data", "result", "results", "response", "body", "content",
-            "raw", "output", "payload", "lens",
-        ):
-            value = payload.get(key)
-            if isinstance(value, (dict, list, str)):
-                rows = BrightDataGoogleLensClient._rows_from_payload(value, depth + 1)
+        result_keys = {
+            "organic", "organicresults", "organicsearchresults",
+            "webresults", "searchresults", "exactmatches",
+            "visualmatches", "lensresults", "similarimages", "images",
+            "resultitems", "items", "matches", "results",
+        }
+        wrapper_keys = {
+            "data", "result", "response", "body", "content", "raw",
+            "output", "payload", "lens", "serp", "search",
+            "searchresponse", "responsebody", "parsed", "parsedresponse",
+        }
+        normalized_items = [
+            (normalized_key(key), value)
+            for key, value in payload.items()
+        ]
+
+        # Prefer explicit organic/Lens collections at any casing or nesting
+        # level before considering generic wrappers.
+        for key, value in normalized_items:
+            if key in result_keys and isinstance(value, list):
+                if all(isinstance(item, dict) for item in value):
+                    return value
+
+        # Bright Data format=json may return a SERP object directly, while
+        # some integrations wrap it as status_code/body JSON.
+        for key, value in normalized_items:
+            if key in wrapper_keys:
+                if isinstance(value, (dict, list, str)):
+                    rows = BrightDataGoogleLensClient._rows_from_payload(
+                        value, depth + 1
+                    )
+                    if rows is not None:
+                        return rows
+
+        # Last-resort compatibility for provider versions that rename the
+        # collection: only accept arrays that look like search-result rows.
+        url_fields = {
+            "link", "url", "href", "pageurl", "resulturl",
+            "destinationurl", "targeturl", "landingpage",
+        }
+        for _, value in normalized_items:
+            if not isinstance(value, list) or not value:
+                continue
+            if not all(isinstance(item, dict) for item in value):
+                continue
+            if any(
+                any(normalized_key(field) in url_fields for field in item)
+                and any(normalized_key(field) in {"title", "name"} for field in item)
+                for item in value
+            ):
+                return value
+
+        # Some provider envelopes introduce unlabelled object/string layers.
+        # Explore object/string children only; never treat metadata arrays as
+        # movie search results.
+        for _, value in normalized_items:
+            if isinstance(value, (dict, str)):
+                rows = BrightDataGoogleLensClient._rows_from_payload(
+                    value, depth + 1
+                )
                 if rows is not None:
                     return rows
         return None
@@ -399,9 +455,18 @@ class BrightDataGoogleLensClient:
 
     @staticmethod
     def _safe_json(response: httpx.Response) -> Any:
+        """Decode JSON whether the HTTP client or a wrapped text body supplies it."""
         try:
             return response.json()
         except (ValueError, TypeError):
+            raw_text = str(getattr(response, "text", "") or "").strip().lstrip("\ufeff")
+            if raw_text.startswith(")]}'"):
+                raw_text = raw_text.split("\n", 1)[1].lstrip() if "\n" in raw_text else ""
+            if raw_text.startswith(("{", "[")):
+                try:
+                    return json.loads(raw_text)
+                except (TypeError, ValueError):
+                    pass
             return None
 
     def _post_serp_with_retries(
@@ -410,6 +475,7 @@ class BrightDataGoogleLensClient:
         stage: str,
         *,
         parsed_light_header: bool = True,
+        response_format: str = "raw",
     ) -> tuple[httpx.Response, Any, int, int]:
         """POST one SERP request and retry transport or outer/inner transient failures.
 
@@ -417,6 +483,11 @@ class BrightDataGoogleLensClient:
         actual upstream HTTP status. Retry that status too; otherwise a wrapped
         Google 502 is incorrectly treated as a permanent per-film failure.
         """
+        if response_format not in {"raw", "json"}:
+            raise BrightDataAPIError(
+                f"Unsupported Bright Data response format for {stage}: {response_format}"
+            )
+
         for attempt in range(MAX_TRANSIENT_RETRIES + 1):
             try:
                 request_headers = (
@@ -429,7 +500,7 @@ class BrightDataGoogleLensClient:
                     json={
                         "zone": self.zone,
                         "url": target_url,
-                        "format": "raw",
+                        "format": response_format,
                     },
                 )
             except httpx.TransportError as exc:
@@ -600,7 +671,9 @@ class BrightDataGoogleLensClient:
         )
         if year:
             query += f" {int(year)}"
-        return f"{GOOGLE_SEARCH_URL}?{urlencode({'q': query, 'hl': 'en', 'brd_json': '1'})}"
+        # Use Bright Data's native structured SERP response format instead
+        # of asking Google for JSON inside a raw response body.
+        return f"{GOOGLE_SEARCH_URL}?{urlencode({'q': query, 'hl': 'en'})}"
 
     def search_official_movie_pages_from_lens(
         self,
@@ -613,6 +686,8 @@ class BrightDataGoogleLensClient:
             "query_count": 0,
             "title_hints": title_hints,
             "year_hint": year,
+            "response_format": "json",
+            "payload_shape": None,
             "http_status": None,
             "attempts": 0,
             "organic_result_count": 0,
@@ -628,6 +703,7 @@ class BrightDataGoogleLensClient:
                 target_url,
                 "Google official movie title search",
                 parsed_light_header=False,
+                response_format="json",
             )
         except BrightDataAPIError as exc:
             self.last_official_search_diagnostics.update({
@@ -644,6 +720,8 @@ class BrightDataGoogleLensClient:
             "query_count": 1,
             "http_status": effective_status,
             "attempts": attempts,
+            "response_format": "json",
+            "payload_shape": self._payload_shape(payload) if payload is not None else None,
         })
         if effective_status < 200 or effective_status >= 300:
             error_payload = payload.get("body") if (
