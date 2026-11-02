@@ -366,5 +366,123 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         result = api.search_by_image_url("https://example.com/poster.jpg")
         self.assertEqual(result[0]["url"], "https://www.themoviedb.org/movie/10754")
 
+    def test_title_hints_come_only_from_lens_titles_and_direct_play_urls(self):
+        hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results([
+            {
+                "title": "A Short Film About Killing (1988)",
+                "url": "https://play.google.com/store/movies/details/a_short_film_about_killing",
+                "url_candidates": [
+                    "https://play.google.com/store/movies/details/a_short_film_about_killing",
+                    "https://lens.google.com/goto?url=PRIVATE",
+                ],
+            },
+            {
+                "url": "https://play.google.com/store/movies/details/kr%C3%B3tki_film_o_zabijaniu",
+            },
+            {
+                "url": "https://play.google.com/store/movies/details/%C3%96ld%C3%BCrme_%C3%9Czerine_K%C4%B1sa_Bir_Film",
+            },
+        ])
+
+        self.assertEqual(year, 1988)
+        self.assertEqual(hints[0], "A Short Film About Killing")
+        self.assertIn("Krótki film o zabijaniu", hints)
+        self.assertIn("Öldürme Üzerine Kısa Bir Film", hints)
+        self.assertNotIn("PRIVATE", " ".join(hints))
+
+    def test_title_hint_year_is_not_guessed_from_play_store_slug(self):
+        hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results([
+            {
+                "url": "https://play.google.com/store/movies/details/a_short_film_about_killing_1988",
+            }
+        ])
+
+        self.assertIsNone(year)
+        self.assertEqual(hints, ["a short film about killing 1988"])
+
+    def test_searches_only_official_tmdb_and_imdb_pages_from_lens_titles(self):
+        api = self.make_client({
+            "organic": [
+                {
+                    "rank": 1,
+                    "title": "A Short Film About Killing (1988) — The Movie Database",
+                    "link": "https://www.themoviedb.org/movie/10754-a-short-film-about-killing",
+                    "description": "Crime, drama",
+                },
+                {
+                    "rank": 2,
+                    "title": "A Short Film About Killing (1988) - IMDb",
+                    "link": "https://www.imdb.com/title/tt0095468/",
+                    "description": "Official IMDb title page",
+                },
+                {
+                    "rank": 3,
+                    "title": "A Short Film About Killing - Wikipedia",
+                    "link": "https://en.wikipedia.org/wiki/A_Short_Film_About_Killing",
+                },
+            ]
+        })
+        lens_rows = [{
+            "title": "A Short Film About Killing (1988)",
+            "url": "https://play.google.com/store/movies/details/a_short_film_about_killing",
+        }]
+
+        rows = api.search_official_movie_pages_from_lens(lens_rows)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            {row["url"] for row in rows},
+            {
+                "https://www.themoviedb.org/movie/10754-a-short-film-about-killing",
+                "https://www.imdb.com/title/tt0095468/",
+            },
+        )
+        call = api.client.post.call_args
+        self.assertEqual(call.args[0], BRIGHTDATA_REQUEST_URL)
+        self.assertIsNone(call.kwargs["headers"])
+        self.assertEqual(call.kwargs["json"]["format"], "raw")
+        self.assertNotIn("data_format", call.kwargs["json"])
+        from urllib.parse import parse_qs, urlparse
+        query = parse_qs(urlparse(call.kwargs["json"]["url"]).query)
+        self.assertEqual(query["brd_json"], ["1"])
+        self.assertEqual(query["hl"], ["en"])
+        self.assertIn('"A Short Film About Killing"', query["q"][0])
+        self.assertIn("site:themoviedb.org/movie", query["q"][0])
+        self.assertIn("site:imdb.com/title", query["q"][0])
+        self.assertIn("1988", query["q"][0])
+        self.assertEqual(api.last_official_search_diagnostics["status"], "ok")
+        self.assertEqual(api.last_official_search_diagnostics["query_count"], 1)
+        self.assertEqual(api.last_official_search_diagnostics["official_url_count"], 2)
+
+    def test_official_title_search_does_not_return_untrusted_domains(self):
+        api = self.make_client({
+            "organic": [
+                {
+                    "title": "Wrong site",
+                    "link": "https://example.com/movie/10754",
+                },
+                {
+                    "title": "Unrelated TMDB route",
+                    "link": "https://www.themoviedb.org/tv/10754",
+                },
+            ]
+        })
+        rows = api.search_official_movie_pages_from_lens([
+            {"title": "A Short Film About Killing (1988)"}
+        ])
+        self.assertEqual(rows, [])
+        self.assertEqual(api.last_official_search_diagnostics["status"], "no_official_results")
+
+    def test_no_lens_title_hints_means_no_google_search_request(self):
+        api = self.make_client({"organic": []})
+        rows = api.search_official_movie_pages_from_lens([
+            {"url": "https://lens.google.com/goto?url=opaque"},
+            {"title": "Google Play"},
+        ])
+        self.assertEqual(rows, [])
+        api.client.post.assert_not_called()
+        self.assertEqual(api.last_official_search_diagnostics["status"], "no_title_hints")
+
+
 if __name__ == "__main__":
     unittest.main()
