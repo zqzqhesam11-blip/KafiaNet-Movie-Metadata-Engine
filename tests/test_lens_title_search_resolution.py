@@ -86,7 +86,10 @@ class LensDerivedOfficialTitleResolutionTests(unittest.TestCase):
 
         candidate, match, evidence = engine._find_movie(lens_rows)
 
-        searcher.assert_called_once_with(lens_rows[:1])
+        self.assertEqual(searcher.call_count, 1)
+        search_input = searcher.call_args.args[0]
+        self.assertEqual(len(search_input), 1)
+        self.assertTrue(search_input[0]["url"].startswith("https://play.google.com/"))
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["id"], tmdb_id)
         self.assertEqual(match["status"], "ready")
