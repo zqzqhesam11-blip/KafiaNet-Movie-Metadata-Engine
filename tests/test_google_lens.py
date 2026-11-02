@@ -398,7 +398,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         ])
 
         self.assertIsNone(year)
-        self.assertEqual(hints, ["a short film about killing 1988"])
+        self.assertEqual(hints, ["a short film about killing"])
 
     def test_searches_only_official_tmdb_and_imdb_pages_from_lens_titles(self):
         api = self.make_client({
