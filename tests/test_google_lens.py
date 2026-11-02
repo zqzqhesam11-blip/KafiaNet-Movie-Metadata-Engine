@@ -440,12 +440,15 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         call = api.client.post.call_args
         self.assertEqual(call.args[0], BRIGHTDATA_REQUEST_URL)
         self.assertIsNone(call.kwargs["headers"])
-        self.assertEqual(call.kwargs["json"]["format"], "raw")
+        self.assertEqual(call.kwargs["json"]["format"], "json")
         self.assertNotIn("data_format", call.kwargs["json"])
         from urllib.parse import parse_qs, urlparse
         query = parse_qs(urlparse(call.kwargs["json"]["url"]).query)
-        self.assertEqual(query["brd_json"], ["1"])
+        self.assertNotIn("brd_json", query)
         self.assertEqual(query["hl"], ["en"])
+        self.assertEqual(
+            api.last_official_search_diagnostics["response_format"], "json"
+        )
         self.assertIn('"A Short Film About Killing"', query["q"][0])
         self.assertIn("site:themoviedb.org/movie", query["q"][0])
         self.assertIn("site:imdb.com/title", query["q"][0])
@@ -453,6 +456,92 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_official_search_diagnostics["status"], "ok")
         self.assertEqual(api.last_official_search_diagnostics["query_count"], 1)
         self.assertEqual(api.last_official_search_diagnostics["official_url_count"], 2)
+
+    def test_title_search_parses_structured_json_inside_brightdata_body_envelope(self):
+        organic = [{
+            "title": "Apollo 10½: A Space Age Childhood - IMDb",
+            "link": "https://www.imdb.com/title/tt7978758/",
+        }]
+        envelope = {
+            "status_code": 200,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps({"Data": {"Organic_Results": organic}}),
+        }
+        api = self.make_client(envelope)
+
+        rows = api.search_official_movie_pages_from_lens([
+            {"title": "Apollo 10½ A Space Age Childhood (2022)"}
+        ])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["url"], "https://www.imdb.com/title/tt7978758/")
+        self.assertEqual(api.last_official_search_diagnostics["status"], "ok")
+        self.assertEqual(api.last_official_search_diagnostics["organic_result_count"], 1)
+        self.assertEqual(api.last_official_search_diagnostics["response_format"], "json")
+        self.assertIn("status_code=int", api.last_official_search_diagnostics["payload_shape"])
+
+    def test_title_search_falls_back_to_json_text_when_response_json_parser_fails(self):
+        response = Mock()
+        response.status_code = 200
+        response.text = json.dumps({
+            "organic": [{
+                "title": "A Short Film About Killing - IMDb",
+                "link": "https://www.imdb.com/title/tt0095468/",
+            }]
+        })
+        response.json.side_effect = ValueError("provider returned JSON as text")
+        response.headers = {"content-type": "application/json"}
+
+        api = self.make_client()
+        api.client.post.return_value = response
+
+        rows = api.search_official_movie_pages_from_lens([
+            {"title": "A Short Film About Killing (1988)"}
+        ])
+
+        self.assertEqual([row["url"] for row in rows], [
+            "https://www.imdb.com/title/tt0095468/"
+        ])
+        self.assertEqual(api.last_official_search_diagnostics["status"], "ok")
+
+    def test_title_search_supports_renamed_result_collection_without_trusting_metadata_arrays(self):
+        api = self.make_client({
+            "provider_payload": {
+                "items_v2": [{
+                    "title": "Breathless - TMDB",
+                    "destination_url": "https://www.themoviedb.org/movie/ ut? ",
+                }]
+            },
+            "metadata": [{
+                "title": "Not a result",
+                "source": "https://www.imdb.com/title/tt0000001/",
+            }],
+        })
+        rows = api.search_official_movie_pages_from_lens([
+            {"title": "Breathless (1960)"}
+        ])
+
+        # A malformed/non-official destination must never become an identity.
+        self.assertEqual(rows, [])
+        self.assertEqual(api.last_official_search_diagnostics["status"], "no_official_results")
+
+    def test_title_search_diagnostics_report_unrecognized_structured_payload_shape(self):
+        api = self.make_client({
+            "general": {"query": "redacted"},
+            "provider_metadata": {"version": 2},
+        })
+
+        with self.assertRaisesRegex(
+            BrightDataAPIError, "without a recognized organic result list"
+        ):
+            api.search_official_movie_pages_from_lens([
+                {"title": "Breathless (1960)"}
+            ])
+
+        diagnostics = api.last_official_search_diagnostics
+        self.assertEqual(diagnostics["status"], "unparsed_response")
+        self.assertEqual(diagnostics["response_format"], "json")
+        self.assertIn("general=object[query]", diagnostics["payload_shape"])
 
     def test_official_title_search_does_not_return_untrusted_domains(self):
         api = self.make_client({
