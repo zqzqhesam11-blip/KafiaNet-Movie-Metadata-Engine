@@ -441,6 +441,9 @@ class MetadataEngine:
                 "google_goto_candidates",
                 "google_goto_resolved",
                 "google_goto_failed",
+                "google_goto_http_statuses",
+                "google_goto_methods",
+                "google_goto_error_kinds",
                 "raw_result_fields",
                 "raw_result_field_types",
                 "raw_link_paths",
@@ -706,12 +709,17 @@ class MetadataEngine:
                 f"lens_results={lens_diag.get('result_count', 'none')} "
                 f"official_tmdb_urls={lens_diag.get('official_tmdb_url_count', 0)} "
                 f"official_tmdb_ids={','.join(str(value) for value in (lens_diag.get('official_tmdb_ids') or [])[:10]) or 'none'} "
+                f"official_imdb_ids={','.join(str(value) for value in (lens_diag.get('official_imdb_ids') or [])[:10]) or 'none'} "
                 f"result_urls={lens_diag.get('result_url_count', 0)} "
                 f"google_wrappers={lens_diag.get('google_wrapper_count', 0)} "
                 f"google_goto={lens_diag.get('google_goto_candidates', 0)}/{lens_diag.get('google_goto_resolved', 0)}/{lens_diag.get('google_goto_failed', 0)} "
+                f"google_goto_http='{safe_log_detail(','.join(f'{status}:{count}' for status, count in (lens_diag.get('google_goto_http_statuses') or {}).items()), 100)}' "
+                f"google_goto_methods='{safe_log_detail(','.join(f'{method}:{count}' for method, count in (lens_diag.get('google_goto_methods') or {}).items()), 100)}' "
+                f"google_goto_errors='{safe_log_detail(','.join(f'{kind}:{count}' for kind, count in (lens_diag.get('google_goto_error_kinds') or {}).items()), 140)} '
                 f"result_hosts='{safe_log_detail(','.join(f'{host}:{count}' for host, count in (lens_diag.get('result_hosts') or {}).items()), 220)}' "
                 f"result_paths='{safe_log_detail(','.join(f'{path}:{count}' for path, count in (lens_diag.get('result_url_paths') or {}).items()), 260)}' "
                 f"raw_fields='{safe_log_detail(','.join(lens_diag.get('raw_result_fields') or []), 240)}' "
+                f"raw_field_types='{safe_log_detail(','.join(f'{name}:{types}' for name, types in (lens_diag.get('raw_result_field_types') or {}).items()), 200)}' '
                 f"raw_link_paths='{safe_log_detail(','.join(f'{path}:{count}' for path, count in (lens_diag.get('raw_link_paths') or {}).items()), 260)}' "
                 f"lens_error='{lens_error}' "
                 f"tmdb_id_lookup={tmdb_lookup.get('status', 'unknown')} "
