@@ -527,9 +527,9 @@ class BrightDataGoogleLensClient:
         hints: list[str] = []
         years: set[int] = set()
 
-        def add(value: str) -> None:
+        def add(value: str, *, include_year: bool = True) -> None:
             title, year = cls._clean_title_hint(value)
-            if year:
+            if include_year and year:
                 years.add(year)
             if not title:
                 return
@@ -571,7 +571,7 @@ class BrightDataGoogleLensClient:
                     continue
                 slug = parsed.path[len(prefix):].split("/", 1)[0]
                 if slug and not slug.isdigit():
-                    add(slug)
+                    add(slug, include_year=False)
                 if len(hints) >= 3:
                     break
             if len(hints) >= 3:
