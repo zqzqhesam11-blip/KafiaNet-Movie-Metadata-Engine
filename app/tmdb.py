@@ -28,6 +28,21 @@ class TMDBClient:
         response.raise_for_status()
         return response.json()
 
+    def find_by_imdb_id(self, imdb_id: str) -> dict[str, Any]:
+        """Resolve an official IMDb title ID through TMDB's documented /find endpoint."""
+        import re
+
+        external_id = str(imdb_id or "").strip().lower()
+        if not re.fullmatch(r"tt\d+", external_id):
+            raise ValueError("A valid IMDb title ID (tt followed by digits) is required")
+        return self._get(
+            f"/find/{external_id}",
+            {
+                "external_source": "imdb_id",
+                "language": self.language,
+            },
+        )
+
     def movie_details(self, tmdb_id: int) -> dict[str, Any]:
         return self._get(
             f"/movie/{tmdb_id}",

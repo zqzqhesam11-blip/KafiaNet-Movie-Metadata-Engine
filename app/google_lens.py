@@ -56,8 +56,8 @@ class BrightDataGoogleLensClient:
         self.redirect_client = httpx.Client(
             headers={
                 "User-Agent": "Mozilla/5.0 (compatible; KafiaNetMetadata/1.0)",
-                "Referer": "https://lens.google.com/",
-                "Accept": "text/html,application/xhtml+xml",
+                "Referer": "https://www.google.com/search",
+                "Accept": "*/*",
             },
             timeout=12.0,
             follow_redirects=False,
@@ -82,36 +82,104 @@ class BrightDataGoogleLensClient:
             and parsed.path.rstrip("/") == "/goto"
         )
 
-    def _resolve_goto_target(self, value: str) -> tuple[str, str | None]:
-        if not self._is_google_goto_url(value):
-            return value, None
-        try:
-            response = self.redirect_client.get(value)
-            location = str(response.headers.get("location") or "").strip()
-            if location:
-                destination = urljoin(value, location)
-                parsed = urlparse(destination)
-                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                    return "", "Google /goto returned an invalid destination URL"
-                return destination, None
+    def _resolve_goto_target(
+        self, value: str
+    ) -> tuple[str, str | None, dict[str, Any]]:
+        """Resolve an opaque Google /goto URL from its HTTP Location header.
 
-            # A bounded fallback for Google edges that omit Location but still
-            # expose the final page when redirects are followed.
-            followed = self.redirect_client.get(value, follow_redirects=True)
-            final_url = str(getattr(followed, "url", "") or "").strip()
-            parsed = urlparse(final_url)
-            if (
-                parsed.scheme in {"http", "https"}
-                and parsed.netloc
-                and not self._is_google_goto_url(final_url)
-            ):
-                return final_url, None
-            return "", (
-                f"Google /goto returned HTTP {response.status_code} without a usable "
-                "Location or followed destination"
-            )
-        except httpx.HTTPError as exc:
-            return "", f"Google /goto resolution failed ({type(exc).__name__})"
+        Google owns the opaque token; it is not a URL that can be decoded.
+        Read the redirect response headers only. Never follow the destination
+        request, because the destination page itself is not needed for identity.
+        """
+        if not self._is_google_goto_url(value):
+            return value, None, {"outcome": "not_goto"}
+
+        parsed_input = urlparse(value)
+        input_host = (parsed_input.hostname or "").casefold().rstrip(".")
+        referer = (
+            "https://lens.google.com/"
+            if input_host == "lens.google.com"
+            else "https://www.google.com/search"
+        )
+        headers = {"Referer": referer}
+        attempts: list[str] = []
+        statuses: list[str] = []
+        for method in ("head", "get"):
+            try:
+                response = getattr(self.redirect_client, method)(
+                    value,
+                    headers=headers,
+                    follow_redirects=False,
+                )
+                status = int(getattr(response, "status_code", 0) or 0)
+                statuses.append(f"{method.upper()}:{status}")
+                location = str(response.headers.get("location") or "").strip()
+                if not location:
+                    attempts.append(f"{method.upper()}_HTTP_{status}_NO_LOCATION")
+                    continue
+
+                destination = urljoin(value, location)
+                try:
+                    parsed = urlparse(destination)
+                except ValueError:
+                    parsed = None
+                if (
+                    parsed is None
+                    or parsed.scheme not in {"http", "https"}
+                    or not parsed.netloc
+                ):
+                    return "", "Google /goto returned an invalid Location URL", {
+                        "outcome": "invalid_location",
+                        "method": method.upper(),
+                        "http_status": status,
+                        "attempts": attempts,
+                        "http_statuses": statuses,
+                    }
+                if self._is_google_goto_url(destination):
+                    attempts.append(f"{method.upper()}_HTTP_{status}_STILL_GOTO")
+                    continue
+
+                # A Location header is authoritative even when Google responds
+                # with a non-3xx status such as 402.
+                return destination, None, {
+                    "outcome": "resolved",
+                    "method": method.upper(),
+                    "http_status": status,
+                    "attempts": attempts,
+                    "http_statuses": statuses,
+                }
+            except httpx.HTTPError as exc:
+                attempts.append(f"{method.upper()}_{type(exc).__name__.upper()}")
+                continue
+
+        final_status: int | None = None
+        if statuses:
+            try:
+                final_status = int(statuses[-1].rsplit(":", 1)[-1])
+            except (TypeError, ValueError):
+                final_status = None
+        if any("TIMEOUT" in item for item in attempts):
+            outcome = "timeout"
+        elif any("CONNECTERROR" in item for item in attempts):
+            outcome = "connect_error"
+        elif any("STILL_GOTO" in item for item in attempts):
+            outcome = "still_google_goto"
+        elif any("NO_LOCATION" in item for item in attempts):
+            outcome = "no_location"
+        else:
+            outcome = "request_error"
+        safe_attempts = attempts[:4]
+        message = (
+            "Google /goto destination was not exposed in Location "
+            f"({';'.join(safe_attempts) or 'no_response'})"
+        )
+        return "", message, {
+            "outcome": outcome,
+            "method": "HEAD+GET",
+            "http_status": final_status,
+            "http_statuses": statuses,
+            "attempts": safe_attempts,
+        }
 
     def resolve_result_urls(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Resolve all URL candidates while preserving directly available official links."""
@@ -144,6 +212,10 @@ class BrightDataGoogleLensClient:
                 "google_goto_candidates": 0,
                 "google_goto_resolved": 0,
                 "google_goto_failed": 0,
+                "google_goto_http_statuses": {},
+                "google_goto_methods": {},
+                "google_goto_error_kinds": {},
+                "google_goto_error_samples": [],
             })
             return prepared
 
@@ -156,14 +228,27 @@ class BrightDataGoogleLensClient:
         destinations: dict[int, list[str]] = {}
         errors: dict[int, list[str]] = {}
         goto_candidates = goto_resolved = goto_failed = 0
-        for (index, original), (destination, error) in zip(work, resolved):
+        goto_http_statuses: dict[str, int] = {}
+        goto_methods: dict[str, int] = {}
+        goto_error_kinds: dict[str, int] = {}
+        goto_error_samples: list[str] = []
+        for (index, original), (destination, error, detail) in zip(work, resolved):
             is_goto = self._is_google_goto_url(original)
             if is_goto:
                 goto_candidates += 1
+                method = str(detail.get("method") or "unknown")
+                goto_methods[method] = goto_methods.get(method, 0) + 1
+                for status_item in detail.get("http_statuses") or []:
+                    status_key = str(status_item)
+                    goto_http_statuses[status_key] = goto_http_statuses.get(status_key, 0) + 1
                 if destination and not self._is_google_goto_url(destination):
                     goto_resolved += 1
-                elif error or not destination:
+                else:
                     goto_failed += 1
+                    kind = str(detail.get("outcome") or "unknown")
+                    goto_error_kinds[kind] = goto_error_kinds.get(kind, 0) + 1
+                    if error and len(goto_error_samples) < 4:
+                        goto_error_samples.append(str(error)[:180])
             if destination:
                 destinations.setdefault(index, []).append(destination)
             if error:
@@ -173,6 +258,10 @@ class BrightDataGoogleLensClient:
             "google_goto_candidates": goto_candidates,
             "google_goto_resolved": goto_resolved,
             "google_goto_failed": goto_failed,
+            "google_goto_http_statuses": dict(sorted(goto_http_statuses.items())),
+            "google_goto_methods": dict(sorted(goto_methods.items())),
+            "google_goto_error_kinds": dict(sorted(goto_error_kinds.items())),
+            "google_goto_error_samples": list(dict.fromkeys(goto_error_samples))[:4],
         })
 
         for index, item in enumerate(prepared):

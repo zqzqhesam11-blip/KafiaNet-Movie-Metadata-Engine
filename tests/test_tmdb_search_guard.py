@@ -27,6 +27,26 @@ class TMDBMovieDetailsArtworkTests(unittest.TestCase):
         self.assertIn("images", kwargs["params"]["append_to_response"])
         self.assertEqual(kwargs["params"]["include_image_language"], "en,null")
 
+    def test_find_by_imdb_id_uses_official_external_id_endpoint(self):
+        client = self.make_client()
+        response = Mock()
+        response.json.return_value = {"movie_results": [{"id": 10754}]}
+        client.client.get.return_value = response
+
+        result = client.find_by_imdb_id("tt0095468")
+
+        self.assertEqual(result["movie_results"][0]["id"], 10754)
+        args, kwargs = client.client.get.call_args
+        self.assertEqual(args[0], "https://api.themoviedb.org/3/find/tt0095468")
+        self.assertEqual(kwargs["params"]["external_source"], "imdb_id")
+        self.assertEqual(kwargs["params"]["language"], "en-US")
+
+    def test_find_by_imdb_id_rejects_untrusted_non_imdb_identifiers(self):
+        client = self.make_client()
+        with self.assertRaisesRegex(ValueError, "IMDb title ID"):
+            client.find_by_imdb_id("https://evil.example/movie/10754")
+        client.client.get.assert_not_called()
+
     def test_builds_safe_tmdb_poster_urls(self):
         self.assertEqual(
             TMDBClient.image_url("/poster.jpg", "w500"),
