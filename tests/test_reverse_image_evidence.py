@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.image_evidence import extract_tmdb_movie_ids, tmdb_movie_id_from_url, tmdb_movie_url_diagnostics
+from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, imdb_id_from_url, tmdb_movie_id_from_url, tmdb_movie_url_diagnostics
 
 
 class TMDBMovieIdExtractionTests(unittest.TestCase):
@@ -66,6 +66,24 @@ class TMDBMovieIdExtractionTests(unittest.TestCase):
         self.assertIn("lens.google.com/goto", diagnostics["result_url_paths"])
         self.assertIn("play.google.com/store/apps/details", diagnostics["result_url_paths"])
         self.assertEqual(diagnostics["official_tmdb_ids"], [])
+
+    def test_accepts_only_official_imdb_title_routes(self):
+        self.assertEqual(imdb_id_from_url("https://www.imdb.com/title/tt0095468/"), "tt0095468")
+        self.assertEqual(imdb_id_from_url("https://imdb.com/title/TT0095468"), "tt0095468")
+        self.assertIsNone(imdb_id_from_url("https://evil.example/title/tt0095468/"))
+        self.assertIsNone(imdb_id_from_url("https://www.imdb.com/name/nm0000123/"))
+        self.assertIsNone(imdb_id_from_url("javascript:alert(1)"))
+
+    def test_extracts_imdb_ids_only_from_resolved_official_destinations(self):
+        self.assertEqual(
+            extract_imdb_ids([
+                {"url": "https://lens.google.com/goto?url=CAESopaque"},
+                {"resolved_url": "https://www.imdb.com/title/tt0095468/"},
+                {"resolved_urls": ["https://www.imdb.com/title/tt0095468/", "https://evil.example/title/tt9999999/"]},
+                {"error": "ProviderError", "resolved_url": "https://www.imdb.com/title/tt1111111/"},
+            ]),
+            ["tt0095468"],
+        )
 
     def test_title_snippet_country_and_image_filename_never_create_id(self):
         ids = extract_tmdb_movie_ids([{
