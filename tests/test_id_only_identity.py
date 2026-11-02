@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from app.engine import MetadataEngine
 from app.tmdb import TMDBClient
-from app.image_evidence import extract_tmdb_movie_ids, tmdb_movie_url_diagnostics
+from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, tmdb_movie_url_diagnostics
 
 
 def movie_details(tmdb_id: int, imdb_id: str | None, title: str) -> dict:
@@ -54,6 +54,15 @@ class FakeTMDB:
             31056: movie_details(31056, "tt0095467", "A Short Film About Love"),
         }
         self.details_calls: list[int] = []
+        self.find_calls: list[str] = []
+        self.find_results = {
+            "tt0095468": {"movie_results": [{"id": 10754}]},
+            "tt0095467": {"movie_results": [{"id": 31056}]},
+        }
+
+    def find_by_imdb_id(self, imdb_id: str):
+        self.find_calls.append(imdb_id)
+        return self.find_results.get(imdb_id, {"movie_results": []})
 
     def movie_details(self, tmdb_id: int):
         self.details_calls.append(int(tmdb_id))
@@ -130,20 +139,54 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(match["tmdb_id"], 10754)
         self.assertIsNone(match["imdb_id"])
 
-    def test_lens_title_without_tmdb_movie_id_stays_in_review(self):
+    def test_official_imdb_title_id_resolves_via_tmdb_find_without_title_search(self):
         engine = self.make_engine()
 
         candidate, match, evidence = engine._find_movie([{
-            "title": "A Short Film About Killing (1988) - IMDb",
+            "title": "Wrong Lens title and year must be ignored",
             "url": "https://www.imdb.com/title/tt0095468/",
             "resolved_url": "https://www.imdb.com/title/tt0095468/",
         }])
 
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 10754)
+        self.assertEqual(match["imdb_id"], "tt0095468")
+        self.assertEqual(match["identity_method"], "lens_imdb_id_tmdb_find")
+        self.assertEqual(evidence["tmdb_ids"], [10754])
+        self.assertEqual(evidence["imdb_ids"], ["tt0095468"])
+        self.assertEqual(evidence["id_resolution"]["imdb_to_tmdb_ids"], {"tt0095468": [10754]})
+        self.assertEqual(engine.tmdb.find_calls, ["tt0095468"])
+        self.assertEqual(engine.tmdb.details_calls, [10754])
+
+    def test_official_imdb_id_without_tmdb_movie_match_stays_in_review(self):
+        engine = self.make_engine()
+        engine.tmdb.find_results["tt0000000"] = {"movie_results": []}
+
+        candidate, match, evidence = engine._find_movie([{
+            "url": "https://www.imdb.com/title/tt0000000/",
+        }])
+
         self.assertIsNone(candidate)
         self.assertEqual(match["status"], "review")
-        self.assertIn("numeric movie ID", match["reason"])
+        self.assertIn("could not be resolved", match["reason"])
         self.assertEqual(evidence["tmdb_ids"], [])
+        self.assertEqual(engine.tmdb.find_calls, ["tt0000000"])
         self.assertEqual(engine.tmdb.details_calls, [])
+
+    def test_tmdb_and_imdb_official_ids_must_resolve_to_same_movie(self):
+        engine = self.make_engine()
+        engine.tmdb.find_results["tt0095468"] = {"movie_results": [{"id": 31056}]}
+
+        candidate, match, evidence = engine._find_movie([
+            {"url": "https://www.themoviedb.org/movie/10754"},
+            {"url": "https://www.imdb.com/title/tt0095468/"},
+        ])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(set(match["candidate_ids"]), {10754, 31056})
+        self.assertEqual(set(engine.tmdb.details_calls), {10754, 31056})
 
     def test_title_only_result_does_not_call_tmdb_text_search(self):
         engine = self.make_engine()
