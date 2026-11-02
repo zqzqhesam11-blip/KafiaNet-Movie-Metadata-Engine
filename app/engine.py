@@ -153,7 +153,9 @@ class MetadataEngine:
             if callable(title_searcher):
                 title_search_rows: list[dict[str, Any]] = []
                 try:
-                    raw_title_search_rows = title_searcher(reverse_image_results)
+                    # Pass a snapshot: appending returned official rows must not mutate
+                    # the input evidence object supplied to the search client.
+                    raw_title_search_rows = title_searcher(list(reverse_image_results))
                     if isinstance(raw_title_search_rows, list):
                         title_search_rows = [
                             row for row in raw_title_search_rows if isinstance(row, dict)
