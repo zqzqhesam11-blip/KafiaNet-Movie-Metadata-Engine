@@ -484,5 +484,80 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_official_search_diagnostics["status"], "no_title_hints")
 
 
+    def test_unwraps_google_serp_redirects_before_official_domain_allowlist(self):
+        api = self.make_client({
+            "organic": [
+                {
+                    "rank": 1,
+                    "title": "A Short Film About Killing (1988) — TMDB",
+                    "link": (
+                        "https://www.google.com/url?q="
+                        "https%3A%2F%2Fwww.themoviedb.org%2Fmovie%2F10754-a-short-film-about-killing"
+                        "&sa=U"
+                    ),
+                },
+                {
+                    "rank": 2,
+                    "title": "A Short Film About Killing (1988) - IMDb",
+                    "link": (
+                        "https://www.google.com/url?url="
+                        "https%3A%2F%2Fwww.imdb.com%2Ftitle%2Ftt0095468%2F"
+                    ),
+                },
+                {
+                    "rank": 3,
+                    "title": "Untrusted result",
+                    "link": (
+                        "https://www.google.com/url?q="
+                        "https%3A%2F%2Fexample.com%2Fmovie%2F10754"
+                    ),
+                },
+            ]
+        })
+
+        rows = api.search_official_movie_pages_from_lens([
+            {"title": "A Short Film About Killing (1988)"}
+        ])
+
+        self.assertEqual(
+            {row["url"] for row in rows},
+            {
+                "https://www.themoviedb.org/movie/10754-a-short-film-about-killing",
+                "https://www.imdb.com/title/tt0095468/",
+            },
+        )
+        self.assertEqual(api.last_official_search_diagnostics["organic_result_count"], 3)
+        self.assertEqual(api.last_official_search_diagnostics["candidate_url_count"], 3)
+        self.assertEqual(api.last_official_search_diagnostics["google_redirect_count"], 3)
+        self.assertEqual(api.last_official_search_diagnostics["google_redirect_unwrapped_count"], 3)
+        self.assertEqual(api.last_official_search_diagnostics["official_url_count"], 2)
+        self.assertEqual(api.last_official_search_diagnostics["status"], "ok")
+
+    def test_google_redirect_to_non_movie_tmdb_page_is_rejected(self):
+        api = self.make_client({
+            "organic": [
+                {
+                    "title": "Wrong TMDB media type",
+                    "link": (
+                        "https://www.google.com/url?q="
+                        "https%3A%2F%2Fwww.themoviedb.org%2Ftv%2F10754"
+                    ),
+                },
+                {
+                    "title": "Untrusted external site",
+                    "link": "https://example.com/movie/10754",
+                },
+            ]
+        })
+
+        rows = api.search_official_movie_pages_from_lens([
+            {"title": "A Short Film About Killing (1988)"}
+        ])
+
+        self.assertEqual(rows, [])
+        self.assertEqual(api.last_official_search_diagnostics["status"], "no_official_results")
+        self.assertEqual(api.last_official_search_diagnostics["google_redirect_unwrapped_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

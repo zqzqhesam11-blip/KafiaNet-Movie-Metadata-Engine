@@ -8,6 +8,8 @@ from urllib.parse import unquote, urlencode, urlparse
 
 import httpx
 
+from app.image_evidence import _resolved_destination_url
+
 
 BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 GOOGLE_LENS_URL = "https://lens.google.com/uploadbyurl"
@@ -687,28 +689,76 @@ class BrightDataGoogleLensClient:
         normalized = self._normalize_matches(rows)
         official_rows: list[dict[str, Any]] = []
         seen: set[str] = set()
+        candidate_url_count = 0
+        google_redirect_count = 0
+        google_redirect_unwrapped_count = 0
+        candidate_domains: dict[str, int] = {}
+
         for result in normalized:
-            official_urls = [
-                value for value in (result.get("url_candidates") or [])
-                if isinstance(value, str) and self._official_movie_url(value)
-            ]
-            for official_url in official_urls:
-                if official_url in seen:
+            for value in (result.get("url_candidates") or []):
+                if not isinstance(value, str) or not value.strip():
                     continue
-                seen.add(official_url)
+                candidate_url_count += 1
+                raw_url = value.strip()
+                try:
+                    raw_parsed = urlparse(raw_url)
+                    raw_host = (raw_parsed.hostname or "").casefold().rstrip(".")
+                    raw_path = raw_parsed.path.rstrip("/").casefold()
+                except ValueError:
+                    raw_host = ""
+                    raw_path = ""
+
+                if (
+                    (raw_host == "google.com" or raw_host.endswith(".google.com"))
+                    and raw_path in {"/url", "/imgres"}
+                ):
+                    google_redirect_count += 1
+
+                # Google SERP may expose a click-tracking /url wrapper instead
+                # of the publisher URL. Unwrap only its explicit q/url/adurl/
+                # imgrefurl destination, then apply the same strict official
+                # TMDB movie / IMDb title URL allow-list.
+                destination_url = _resolved_destination_url(raw_url)
+                if destination_url != raw_url:
+                    google_redirect_unwrapped_count += 1
+
+                try:
+                    destination_host = (
+                        urlparse(destination_url).hostname or ""
+                    ).casefold().rstrip(".")
+                except ValueError:
+                    destination_host = ""
+                if destination_host:
+                    candidate_domains[destination_host] = (
+                        candidate_domains.get(destination_host, 0) + 1
+                    )
+
+                if not self._official_movie_url(destination_url):
+                    continue
+                if destination_url in seen:
+                    continue
+                seen.add(destination_url)
                 official_rows.append({
                     **result,
-                    "url": official_url,
-                    "url_candidates": [official_url],
-                    "resolved_urls": [official_url],
-                    "resolved_url": official_url,
+                    "url": destination_url,
+                    "url_candidates": [destination_url],
+                    "resolved_urls": [destination_url],
+                    "resolved_url": destination_url,
                     "provider": "google_serp_official_movie_title_search",
                     "search_source": "lens_result_title_or_direct_play_store_url",
+                    "original_search_url": raw_url if raw_url != destination_url else None,
                 })
 
+        top_candidate_domains = dict(
+            sorted(candidate_domains.items(), key=lambda item: (-item[1], item[0]))[:12]
+        )
         self.last_official_search_diagnostics.update({
             "status": "ok" if official_rows else "no_official_results",
             "organic_result_count": len(rows),
+            "candidate_url_count": candidate_url_count,
+            "google_redirect_count": google_redirect_count,
+            "google_redirect_unwrapped_count": google_redirect_unwrapped_count,
+            "candidate_domains": top_candidate_domains,
             "official_url_count": len(official_rows),
             "error": None,
         })
