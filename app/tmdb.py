@@ -33,7 +33,7 @@ class TMDBClient:
         import re
 
         external_id = str(imdb_id or "").strip().lower()
-        if not re.fullmatch(r"tt\\d+", external_id):
+        if not re.fullmatch(r"tt\d+", external_id):
             raise ValueError("A valid IMDb title ID (tt followed by digits) is required")
         return self._get(
             f"/find/{external_id}",
