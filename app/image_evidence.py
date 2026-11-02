@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 TMDB_MOVIE_RE = re.compile(r"^/movie/(\d+)(?:[-/]|$)", re.IGNORECASE)
+IMDB_TITLE_RE = re.compile(r"^/title/(tt\d+)(?:/|$)", re.IGNORECASE)
 
 
 def _allowed_host(url: str, root: str) -> bool:
@@ -30,6 +31,18 @@ def tmdb_movie_id_from_url(url: str) -> int | None:
         return int(match.group(1))
     except (TypeError, ValueError):
         return None
+
+
+def imdb_id_from_url(url: str) -> str | None:
+    """Accept an IMDb title identifier only from an official IMDb title URL."""
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except ValueError:
+        return None
+    if parsed.scheme not in {"https", "http"} or not _allowed_host(url, "imdb.com"):
+        return None
+    match = IMDB_TITLE_RE.match(parsed.path)
+    return match.group(1).lower() if match else None
 
 
 def _resolved_destination_url(value: str) -> str:
@@ -113,10 +126,28 @@ def extract_tmdb_movie_ids(results: list[dict]) -> list[int]:
                 movie_ids.append(movie_id)
     return movie_ids
 
+def extract_imdb_ids(results: list[dict]) -> list[str]:
+    """Extract unique IMDb title IDs only from resolved official IMDb title URLs."""
+    imdb_ids: list[str] = []
+    seen: set[str] = set()
+    for result in results or []:
+        if not isinstance(result, dict) or result.get("error"):
+            continue
+        for destination in _resolved_destination_urls(result):
+            imdb_id = imdb_id_from_url(destination)
+            if imdb_id and imdb_id not in seen:
+                seen.add(imdb_id)
+                imdb_ids.append(imdb_id)
+    return imdb_ids
+
+
 def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
     """Count official TMDB destinations and summarize result URL domains."""
     official_urls: set[str] = set()
+    official_imdb_urls: set[str] = set()
     movie_ids: list[int] = []
+    imdb_ids: list[str] = []
+    seen_imdb_ids: set[str] = set()
     seen_ids: set[int] = set()
     result_hosts: dict[str, int] = {}
     result_url_count = 0
@@ -170,12 +201,17 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
             if host:
                 result_hosts[host] = result_hosts.get(host, 0) + 1
             movie_id = tmdb_movie_id_from_url(destination)
-            if movie_id is None:
-                continue
-            official_urls.add(destination)
-            if movie_id not in seen_ids:
-                seen_ids.add(movie_id)
-                movie_ids.append(movie_id)
+            imdb_id = imdb_id_from_url(destination)
+            if movie_id is not None:
+                official_urls.add(destination)
+                if movie_id not in seen_ids:
+                    seen_ids.add(movie_id)
+                    movie_ids.append(movie_id)
+            if imdb_id is not None:
+                official_imdb_urls.add(destination)
+                if imdb_id not in seen_imdb_ids:
+                    seen_imdb_ids.add(imdb_id)
+                    imdb_ids.append(imdb_id)
 
     top_hosts = dict(
         sorted(result_hosts.items(), key=lambda item: (-item[1], item[0]))[:12]
@@ -183,6 +219,8 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
     return {
         "official_tmdb_url_count": len(official_urls),
         "official_tmdb_ids": movie_ids,
+        "official_imdb_url_count": len(official_imdb_urls),
+        "official_imdb_ids": imdb_ids,
         "result_url_count": result_url_count,
         "google_wrapper_count": google_wrapper_count,
         "google_goto_url_count": google_goto_url_count,
