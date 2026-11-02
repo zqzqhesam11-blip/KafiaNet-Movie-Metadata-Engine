@@ -298,7 +298,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         response.headers = {
             "location": "https://www.imdb.com/title/tt0095468/"
         }
-        api.redirect_client.get.return_value = response
+        api.redirect_client.head.return_value = response
 
         goto_url = "https://lens.google.com/goto?url=CAESopaque-token"
         rows = api.resolve_result_urls([{
@@ -310,20 +310,46 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             rows[0]["resolved_url"],
             "https://www.imdb.com/title/tt0095468/",
         )
-        api.redirect_client.get.assert_called_once_with(goto_url)
+        api.redirect_client.head.assert_called_once_with(
+            goto_url,
+            headers={"Referer": "https://www.google.com/search"},
+            follow_redirects=False,
+        )
+        api.redirect_client.get.assert_not_called()
         self.assertEqual(api.last_lens_diagnostics["google_goto_candidates"], 1)
         self.assertEqual(api.last_lens_diagnostics["google_goto_resolved"], 1)
         self.assertEqual(api.last_lens_diagnostics["google_goto_failed"], 0)
+        self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {"302": 1})
+        self.assertEqual(api.last_lens_diagnostics["google_goto_methods"], {"HEAD": 1})
+
+    def test_accepts_location_header_even_with_non_3xx_status(self):
+        api = self.make_client({"exact_matches": []})
+        api.redirect_client = Mock()
+        response = Mock()
+        response.status_code = 402
+        response.headers = {"location": "https://www.imdb.com/title/tt0095468/"}
+        api.redirect_client.head.return_value = response
+
+        rows = api.resolve_result_urls([{
+            "url": "https://lens.google.com/goto?url=CAESopaque",
+        }])
+
+        self.assertEqual(rows[0]["resolved_url"], "https://www.imdb.com/title/tt0095468/")
+        self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {"402": 1})
+        self.assertEqual(api.last_lens_diagnostics["google_goto_resolved"], 1)
+
 
     def test_counts_google_goto_resolution_failure(self):
         api = self.make_client({"exact_matches": []})
         api.redirect_client = Mock()
-        first = Mock()
-        first.status_code = 200
-        first.headers = {}
-        followed = Mock()
-        followed.url = "https://lens.google.com/goto?url=CAESopaque"
-        api.redirect_client.get.side_effect = [first, followed]
+        head_response = Mock()
+        head_response.status_code = 200
+        head_response.headers = {}
+        get_response = Mock()
+        get_response.status_code = 200
+        get_response.headers = {}
+        api.redirect_client.head.return_value = head_response
+        api.redirect_client.get.return_value = get_response
 
         rows = api.resolve_result_urls([{
             "url": "https://lens.google.com/goto?url=CAESopaque",
@@ -333,6 +359,14 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_lens_diagnostics["google_goto_candidates"], 1)
         self.assertEqual(api.last_lens_diagnostics["google_goto_resolved"], 0)
         self.assertEqual(api.last_lens_diagnostics["google_goto_failed"], 1)
+        self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {"200": 1})
+        self.assertEqual(api.last_lens_diagnostics["google_goto_methods"], {"HEAD+GET": 1})
+        self.assertEqual(api.last_lens_diagnostics["google_goto_error_kinds"], {"no_location": 1})
+        api.redirect_client.get.assert_called_once_with(
+            "https://lens.google.com/goto?url=CAESopaque",
+            headers={"Referer": "https://www.google.com/search"},
+            follow_redirects=False,
+        )
 
     def test_direct_official_links_do_not_trigger_google_redirect_requests(self):
         api = self.make_client({"exact_matches": []})
@@ -345,25 +379,27 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(rows[0]["resolved_urls"], [direct_url])
         api.redirect_client.get.assert_not_called()
 
-    def test_uses_followed_destination_when_location_header_is_missing(self):
+    def test_get_fallback_reads_location_without_following_destination(self):
         api = self.make_client({"exact_matches": []})
         api.redirect_client = Mock()
-        first = Mock()
-        first.status_code = 404
-        first.headers = {}
-        followed = Mock()
-        followed.url = "https://www.imdb.com/title/tt0095468/"
-        api.redirect_client.get.side_effect = [first, followed]
+        head = Mock()
+        head.status_code = 405
+        head.headers = {}
+        get = Mock()
+        get.status_code = 302
+        get.headers = {"location": "https://www.imdb.com/title/tt0095468/"}
+        api.redirect_client.head.return_value = head
+        api.redirect_client.get.return_value = get
 
         rows = api.resolve_result_urls([{
             "url": "https://lens.google.com/goto?url=CAESopaque",
         }])
 
         self.assertEqual(rows[0]["resolved_url"], "https://www.imdb.com/title/tt0095468/")
-        self.assertEqual(api.redirect_client.get.call_count, 2)
-        self.assertEqual(
-            api.redirect_client.get.call_args_list[1].kwargs,
-            {"follow_redirects": True},
+        api.redirect_client.get.assert_called_once_with(
+            "https://lens.google.com/goto?url=CAESopaque",
+            headers={"Referer": "https://www.google.com/search"},
+            follow_redirects=False,
         )
 
 
