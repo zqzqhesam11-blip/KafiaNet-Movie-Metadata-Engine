@@ -499,6 +499,7 @@ class BrightDataGoogleLensClient:
         year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", text)
         year = int(year_match.group(1)) if year_match else None
         text = re.sub(r"[\[(](?:19|20)\d{2}[\])]", " ", text)
+        text = re.sub(r"\s+(?:19|20)\d{2}\s*$", " ", text)
         text = re.sub(
             r"\s+(?:[-–—|:]\s*)?(?:google play|tmdb|the movie database|imdb|"
             r"wikipedia|youtube|official trailer|watch online)\s*$",
