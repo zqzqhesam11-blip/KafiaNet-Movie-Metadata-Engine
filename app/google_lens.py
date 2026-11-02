@@ -94,7 +94,14 @@ class BrightDataGoogleLensClient:
         if not self._is_google_goto_url(value):
             return value, None, {"outcome": "not_goto"}
 
-        headers = {"Referer": "https://www.google.com/search"}
+        parsed_input = urlparse(value)
+        input_host = (parsed_input.hostname or "").casefold().rstrip(".")
+        referer = (
+            "https://lens.google.com/"
+            if input_host == "lens.google.com"
+            else "https://www.google.com/search"
+        )
+        headers = {"Referer": referer}
         attempts: list[str] = []
         statuses: list[str] = []
         for method in ("head", "get"):
@@ -208,6 +215,7 @@ class BrightDataGoogleLensClient:
                 "google_goto_http_statuses": {},
                 "google_goto_methods": {},
                 "google_goto_error_kinds": {},
+                "google_goto_error_samples": [],
             })
             return prepared
 
@@ -223,6 +231,7 @@ class BrightDataGoogleLensClient:
         goto_http_statuses: dict[str, int] = {}
         goto_methods: dict[str, int] = {}
         goto_error_kinds: dict[str, int] = {}
+        goto_error_samples: list[str] = []
         for (index, original), (destination, error, detail) in zip(work, resolved):
             is_goto = self._is_google_goto_url(original)
             if is_goto:
@@ -238,6 +247,8 @@ class BrightDataGoogleLensClient:
                     goto_failed += 1
                     kind = str(detail.get("outcome") or "unknown")
                     goto_error_kinds[kind] = goto_error_kinds.get(kind, 0) + 1
+                    if error and len(goto_error_samples) < 4:
+                        goto_error_samples.append(str(error)[:180])
             if destination:
                 destinations.setdefault(index, []).append(destination)
             if error:
@@ -250,6 +261,7 @@ class BrightDataGoogleLensClient:
             "google_goto_http_statuses": dict(sorted(goto_http_statuses.items())),
             "google_goto_methods": dict(sorted(goto_methods.items())),
             "google_goto_error_kinds": dict(sorted(goto_error_kinds.items())),
+            "google_goto_error_samples": list(dict.fromkeys(goto_error_samples))[:4],
         })
 
         for index, item in enumerate(prepared):
