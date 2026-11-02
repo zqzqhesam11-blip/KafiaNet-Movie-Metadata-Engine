@@ -312,7 +312,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         )
         api.redirect_client.head.assert_called_once_with(
             goto_url,
-            headers={"Referer": "https://www.google.com/search"},
+            headers={"Referer": "https://lens.google.com/"},
             follow_redirects=False,
         )
         api.redirect_client.get.assert_not_called()
@@ -364,7 +364,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_lens_diagnostics["google_goto_error_kinds"], {"no_location": 1})
         api.redirect_client.get.assert_called_once_with(
             "https://lens.google.com/goto?url=CAESopaque",
-            headers={"Referer": "https://www.google.com/search"},
+            headers={"Referer": "https://lens.google.com/"},
             follow_redirects=False,
         )
 
@@ -398,7 +398,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(rows[0]["resolved_url"], "https://www.imdb.com/title/tt0095468/")
         api.redirect_client.get.assert_called_once_with(
             "https://lens.google.com/goto?url=CAESopaque",
-            headers={"Referer": "https://www.google.com/search"},
+            headers={"Referer": "https://lens.google.com/"},
             follow_redirects=False,
         )
 
