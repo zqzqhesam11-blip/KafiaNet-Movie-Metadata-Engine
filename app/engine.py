@@ -444,6 +444,7 @@ class MetadataEngine:
                 "google_goto_http_statuses",
                 "google_goto_methods",
                 "google_goto_error_kinds",
+                "google_goto_error_samples",
                 "raw_result_fields",
                 "raw_result_field_types",
                 "raw_link_paths",
@@ -716,6 +717,7 @@ class MetadataEngine:
                 f"google_goto_http='{safe_log_detail(','.join(f'{status}:{count}' for status, count in (lens_diag.get('google_goto_http_statuses') or {}).items()), 100)}' "
                 f"google_goto_methods='{safe_log_detail(','.join(f'{method}:{count}' for method, count in (lens_diag.get('google_goto_methods') or {}).items()), 100)}' "
                 f"google_goto_errors='{safe_log_detail(','.join(f'{kind}:{count}' for kind, count in (lens_diag.get('google_goto_error_kinds') or {}).items()), 140)}' "
+                f"google_goto_samples='{safe_log_detail(' || '.join(lens_diag.get('google_goto_error_samples') or []), 260)}' "
                 f"result_hosts='{safe_log_detail(','.join(f'{host}:{count}' for host, count in (lens_diag.get('result_hosts') or {}).items()), 220)}' "
                 f"result_paths='{safe_log_detail(','.join(f'{path}:{count}' for path, count in (lens_diag.get('result_url_paths') or {}).items()), 260)}' "
                 f"raw_fields='{safe_log_detail(','.join(lens_diag.get('raw_result_fields') or []), 240)}' "
