@@ -128,8 +128,9 @@ class MetadataEngine:
                 "status": "review",
                 "confidence": 0.0,
                 "reason": (
-                    "Google Lens returned no official TMDB movie URL or IMDb title URL "
-                    "with a usable numeric identifier; title and folder searches are disabled"
+                    "Google Lens returned no direct official TMDB movie URL or IMDb title URL "
+                    "with a usable numeric identifier; unresolved /goto wrappers are ignored and "
+                    "title and folder searches are disabled"
                 ),
                 "candidate_ids": [],
             }, evidence
@@ -441,6 +442,8 @@ class MetadataEngine:
                 "google_goto_candidates",
                 "google_goto_resolved",
                 "google_goto_failed",
+                "google_goto_skipped",
+                "google_goto_direct_urls_kept",
                 "google_goto_http_statuses",
                 "google_goto_methods",
                 "google_goto_error_kinds",
@@ -705,6 +708,7 @@ class MetadataEngine:
                 f"imdb_id={imdb_id if imdb_id is not None else 'none'} "
                 f"reverse_image={latest_query_status} evidence={reverse_image_source} "
                 f"lens_tab={lens_diag.get('lens_tab', 'unknown')} "
+                f"lens_data_format={lens_diag.get('data_format', 'unknown')} "
                 f"lens_http={lens_diag.get('http_status', 'none')} "
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
@@ -713,7 +717,8 @@ class MetadataEngine:
                 f"official_imdb_ids={','.join(str(value) for value in (lens_diag.get('official_imdb_ids') or [])[:10]) or 'none'} "
                 f"result_urls={lens_diag.get('result_url_count', 0)} "
                 f"google_wrappers={lens_diag.get('google_wrapper_count', 0)} "
-                f"google_goto={lens_diag.get('google_goto_candidates', 0)}/{lens_diag.get('google_goto_resolved', 0)}/{lens_diag.get('google_goto_failed', 0)} "
+                f"google_goto={lens_diag.get('google_goto_candidates', 0)}/{lens_diag.get('google_goto_resolved', 0)}/{lens_diag.get('google_goto_failed', 0)}/{lens_diag.get('google_goto_skipped', 0)} "
+                f"google_goto_direct_urls_kept={lens_diag.get('google_goto_direct_urls_kept', 0)} "
                 f"google_goto_http='{safe_log_detail(','.join(f'{status}:{count}' for status, count in (lens_diag.get('google_goto_http_statuses') or {}).items()), 100)}' "
                 f"google_goto_methods='{safe_log_detail(','.join(f'{method}:{count}' for method, count in (lens_diag.get('google_goto_methods') or {}).items()), 100)}' "
                 f"google_goto_errors='{safe_log_detail(','.join(f'{kind}:{count}' for kind, count in (lens_diag.get('google_goto_error_kinds') or {}).items()), 140)}' "
