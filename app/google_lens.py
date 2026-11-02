@@ -300,6 +300,7 @@ class BrightDataGoogleLensClient:
             "data", "result", "response", "body", "content", "raw",
             "output", "payload", "lens", "serp", "search",
             "searchresponse", "responsebody", "parsed", "parsedresponse",
+            "results",
         }
         normalized_items = [
             (normalized_key(key), value)
