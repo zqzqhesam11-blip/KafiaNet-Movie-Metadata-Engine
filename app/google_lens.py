@@ -672,9 +672,10 @@ class BrightDataGoogleLensClient:
         )
         if year:
             query += f" {int(year)}"
-        # Use Bright Data's native structured SERP response format instead
-        # of asking Google for JSON inside a raw response body.
-        return f"{GOOGLE_SEARCH_URL}?{urlencode({'q': query, 'hl': 'en'})}"
+        # Bright Data format=json wraps the upstream response in
+        # status_code/headers/body. The Google brd_json=1 flag is still
+        # required so that body contains the parsed SERP JSON (including organic).
+        return f"{GOOGLE_SEARCH_URL}?{urlencode({'q': query, 'hl': 'en', 'brd_json': '1'})}"
 
     def search_official_movie_pages_from_lens(
         self,

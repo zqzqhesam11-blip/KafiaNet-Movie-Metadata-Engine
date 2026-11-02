@@ -459,7 +459,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertNotIn("data_format", call.kwargs["json"])
         from urllib.parse import parse_qs, urlparse
         query = parse_qs(urlparse(call.kwargs["json"]["url"]).query)
-        self.assertNotIn("brd_json", query)
+        self.assertEqual(query["brd_json"], ["1"])
         self.assertEqual(query["hl"], ["en"])
         self.assertEqual(
             api.last_official_search_diagnostics["response_format"], "json"
@@ -471,6 +471,38 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_official_search_diagnostics["status"], "ok")
         self.assertEqual(api.last_official_search_diagnostics["query_count"], 1)
         self.assertEqual(api.last_official_search_diagnostics["official_url_count"], 2)
+
+    def test_title_search_parses_documented_brightdata_body_organic_shape(self):
+        body = {
+            "general": {
+                "search_engine": "google",
+                "query": '"A Short Film About Killing" site:imdb.com/title',
+            },
+            "organic": [{
+                "link": "https://www.imdb.com/title/tt0095468/",
+                "title": "A Short Film About Killing (1988) - IMDb",
+                "rank": 1,
+            }],
+        }
+        api = self.make_client({
+            "status_code": 200,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps(body),
+        })
+
+        rows = api.search_official_movie_pages_from_lens([
+            {"title": "A Short Film About Killing (1988)"}
+        ])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["url"], "https://www.imdb.com/title/tt0095468/")
+        self.assertEqual(api.last_official_search_diagnostics["status"], "ok")
+        self.assertEqual(api.last_official_search_diagnostics["organic_result_count"], 1)
+        call = api.client.post.call_args
+        from urllib.parse import parse_qs, urlparse
+        query = parse_qs(urlparse(call.kwargs["json"]["url"]).query)
+        self.assertEqual(call.kwargs["json"]["format"], "json")
+        self.assertEqual(query["brd_json"], ["1"])
 
     def test_title_search_parses_structured_json_inside_brightdata_body_envelope(self):
         organic = [{
