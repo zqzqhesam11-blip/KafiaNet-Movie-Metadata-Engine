@@ -509,7 +509,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             "provider_payload": {
                 "items_v2": [{
                     "title": "Breathless - TMDB",
-                    "destination_url": "https://www.themoviedb.org/movie/ ut? ",
+                    "destination_url": "https://www.imdb.com/title/tt0053472/",
                 }]
             },
             "metadata": [{
@@ -521,9 +521,12 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             {"title": "Breathless (1960)"}
         ])
 
-        # A malformed/non-official destination must never become an identity.
-        self.assertEqual(rows, [])
-        self.assertEqual(api.last_official_search_diagnostics["status"], "no_official_results")
+        # Unknown provider collection names are supported, but identity still
+        # requires an official IMDb/TMDB movie URL.
+        self.assertEqual([row["url"] for row in rows], [
+            "https://www.imdb.com/title/tt0053472/"
+        ])
+        self.assertEqual(api.last_official_search_diagnostics["status"], "ok")
 
     def test_title_search_diagnostics_report_unrecognized_structured_payload_shape(self):
         api = self.make_client({
