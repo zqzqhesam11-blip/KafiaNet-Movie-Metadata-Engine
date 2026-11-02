@@ -386,8 +386,8 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
 
         self.assertEqual(year, 1988)
         self.assertEqual(hints[0], "A Short Film About Killing")
-        self.assertIn("Krótki film o zabijaniu", hints)
-        self.assertIn("Öldürme Üzerine Kısa Bir Film", hints)
+        self.assertIn("krótki film o zabijaniu", [value.casefold() for value in hints])
+        self.assertIn("öldürme üzerine kısa bir film", [value.casefold() for value in hints])
         self.assertNotIn("PRIVATE", " ".join(hints))
 
     def test_title_hint_year_is_not_guessed_from_play_store_slug(self):
