@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
@@ -14,7 +13,6 @@ BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 GOOGLE_LENS_URL = "https://lens.google.com/uploadbyurl"
 LENS_TAB = "exact_matches"
 MAX_NORMALIZED_RESULTS = 80
-MAX_GOTO_RESOLUTION_WORKERS = 8
 MAX_TRANSIENT_RETRIES = 2
 TRANSIENT_HTTP_STATUSES = {500, 502, 503, 504}
 
@@ -50,24 +48,11 @@ class BrightDataGoogleLensClient:
             },
             timeout=max(15.0, float(timeout)),
         )
-        # Google Lens /goto links are opaque tokens. Resolve them with an
-        # unauthenticated client; never send the Bright Data API key to Google.
-        # First inspect Location, then use one bounded redirect-following fallback.
-        self.redirect_client = httpx.Client(
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; KafiaNetMetadata/1.0)",
-                "Referer": "https://www.google.com/search",
-                "Accept": "*/*",
-            },
-            timeout=12.0,
-            follow_redirects=False,
-        )
         self.last_lens_diagnostics: dict[str, Any] = {}
         self.last_official_search_diagnostics: dict[str, Any] = {}
 
     def close(self) -> None:
         self.client.close()
-        self.redirect_client.close()
 
     @staticmethod
     def _is_google_goto_url(value: str) -> bool:
@@ -82,199 +67,79 @@ class BrightDataGoogleLensClient:
             and parsed.path.rstrip("/") == "/goto"
         )
 
-    def _resolve_goto_target(
-        self, value: str
-    ) -> tuple[str, str | None, dict[str, Any]]:
-        """Resolve an opaque Google /goto URL from its HTTP Location header.
-
-        Google owns the opaque token; it is not a URL that can be decoded.
-        Read the redirect response headers only. Never follow the destination
-        request, because the destination page itself is not needed for identity.
-        """
-        if not self._is_google_goto_url(value):
-            return value, None, {"outcome": "not_goto"}
-
-        parsed_input = urlparse(value)
-        input_host = (parsed_input.hostname or "").casefold().rstrip(".")
-        referer = (
-            "https://lens.google.com/"
-            if input_host == "lens.google.com"
-            else "https://www.google.com/search"
-        )
-        headers = {"Referer": referer}
-        attempts: list[str] = []
-        statuses: list[str] = []
-        for method in ("head", "get"):
-            try:
-                response = getattr(self.redirect_client, method)(
-                    value,
-                    headers=headers,
-                    follow_redirects=False,
-                )
-                status = int(getattr(response, "status_code", 0) or 0)
-                statuses.append(f"{method.upper()}:{status}")
-                location = str(response.headers.get("location") or "").strip()
-                if not location:
-                    attempts.append(f"{method.upper()}_HTTP_{status}_NO_LOCATION")
-                    continue
-
-                destination = urljoin(value, location)
-                try:
-                    parsed = urlparse(destination)
-                except ValueError:
-                    parsed = None
-                if (
-                    parsed is None
-                    or parsed.scheme not in {"http", "https"}
-                    or not parsed.netloc
-                ):
-                    return "", "Google /goto returned an invalid Location URL", {
-                        "outcome": "invalid_location",
-                        "method": method.upper(),
-                        "http_status": status,
-                        "attempts": attempts,
-                        "http_statuses": statuses,
-                    }
-                if self._is_google_goto_url(destination):
-                    attempts.append(f"{method.upper()}_HTTP_{status}_STILL_GOTO")
-                    continue
-
-                # A Location header is authoritative even when Google responds
-                # with a non-3xx status such as 402.
-                return destination, None, {
-                    "outcome": "resolved",
-                    "method": method.upper(),
-                    "http_status": status,
-                    "attempts": attempts,
-                    "http_statuses": statuses,
-                }
-            except httpx.HTTPError as exc:
-                attempts.append(f"{method.upper()}_{type(exc).__name__.upper()}")
-                continue
-
-        final_status: int | None = None
-        if statuses:
-            try:
-                final_status = int(statuses[-1].rsplit(":", 1)[-1])
-            except (TypeError, ValueError):
-                final_status = None
-        if any("TIMEOUT" in item for item in attempts):
-            outcome = "timeout"
-        elif any("CONNECTERROR" in item for item in attempts):
-            outcome = "connect_error"
-        elif any("STILL_GOTO" in item for item in attempts):
-            outcome = "still_google_goto"
-        elif any("NO_LOCATION" in item for item in attempts):
-            outcome = "no_location"
-        else:
-            outcome = "request_error"
-        safe_attempts = attempts[:4]
-        message = (
-            "Google /goto destination was not exposed in Location "
-            f"({';'.join(safe_attempts) or 'no_response'})"
-        )
-        return "", message, {
-            "outcome": outcome,
-            "method": "HEAD+GET",
-            "http_status": final_status,
-            "http_statuses": statuses,
-            "attempts": safe_attempts,
-        }
-
     def resolve_result_urls(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Resolve all URL candidates while preserving directly available official links."""
+        """Keep direct page URLs and quarantine undocumented Google /goto wrappers.
+
+        Bright Data documents parsed Lens results, but Google does not publish a
+        /goto resolution API. In our live run every Lens /goto returned HTTP 404
+        for both HEAD and GET, without Location. Do not repeat those requests or
+        treat wrapper URLs as movie identity. Only direct HTTP(S) result URLs are
+        eligible for official IMDb/TMDB identifier extraction.
+        """
         if not isinstance(getattr(self, "last_lens_diagnostics", None), dict):
             self.last_lens_diagnostics = {}
+
         prepared = [dict(item) for item in (results or []) if isinstance(item, dict)]
-        work: list[tuple[int, str]] = []
-        for index, item in enumerate(prepared):
-            candidates = item.get("url_candidates")
-            if not isinstance(candidates, list):
-                candidates = []
-            original_url = str(item.get("url") or "").strip()
-            if original_url and original_url not in candidates:
-                candidates = [original_url, *candidates]
-            candidates = list(dict.fromkeys(
-                str(value).strip()
-                for value in candidates
-                if isinstance(value, str) and str(value).strip()
-            ))
-            item["url_candidates"] = candidates
-            if str(item.get("resolved_url") or "").strip() and not item.get("resolved_urls"):
-                item["resolved_urls"] = [str(item["resolved_url"]).strip()]
-            if item.get("resolved_urls"):
-                continue
-            for candidate in candidates:
-                work.append((index, candidate))
+        goto_skipped = 0
+        direct_urls_kept = 0
 
-        if not work:
-            self.last_lens_diagnostics.update({
-                "google_goto_candidates": 0,
-                "google_goto_resolved": 0,
-                "google_goto_failed": 0,
-                "google_goto_http_statuses": {},
-                "google_goto_methods": {},
-                "google_goto_error_kinds": {},
-                "google_goto_error_samples": [],
-            })
-            return prepared
+        for item in prepared:
+            candidates: list[str] = []
+            for key in ("url_candidates", "resolved_urls"):
+                values = item.get(key)
+                if isinstance(values, list):
+                    candidates.extend(
+                        str(value).strip()
+                        for value in values
+                        if isinstance(value, str) and str(value).strip()
+                    )
+            for key in ("url", "resolved_url"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.append(value.strip())
 
-        with ThreadPoolExecutor(max_workers=MAX_GOTO_RESOLUTION_WORKERS) as executor:
-            resolved = list(executor.map(
-                lambda pair: self._resolve_goto_target(pair[1]),
-                work,
-            ))
+            unique_candidates = list(dict.fromkeys(candidates))
+            direct_destinations: list[str] = []
+            for candidate in unique_candidates:
+                try:
+                    parsed = urlparse(candidate)
+                except ValueError:
+                    continue
+                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                    continue
+                if self._is_google_goto_url(candidate):
+                    goto_skipped += 1
+                    continue
+                direct_destinations.append(candidate)
 
-        destinations: dict[int, list[str]] = {}
-        errors: dict[int, list[str]] = {}
-        goto_candidates = goto_resolved = goto_failed = 0
-        goto_http_statuses: dict[str, int] = {}
-        goto_methods: dict[str, int] = {}
-        goto_error_kinds: dict[str, int] = {}
-        goto_error_samples: list[str] = []
-        for (index, original), (destination, error, detail) in zip(work, resolved):
-            is_goto = self._is_google_goto_url(original)
-            if is_goto:
-                goto_candidates += 1
-                method = str(detail.get("method") or "unknown")
-                goto_methods[method] = goto_methods.get(method, 0) + 1
-                for status_item in detail.get("http_statuses") or []:
-                    status_key = str(status_item)
-                    goto_http_statuses[status_key] = goto_http_statuses.get(status_key, 0) + 1
-                if destination and not self._is_google_goto_url(destination):
-                    goto_resolved += 1
-                else:
-                    goto_failed += 1
-                    kind = str(detail.get("outcome") or "unknown")
-                    goto_error_kinds[kind] = goto_error_kinds.get(kind, 0) + 1
-                    if error and len(goto_error_samples) < 4:
-                        goto_error_samples.append(str(error)[:180])
-            if destination:
-                destinations.setdefault(index, []).append(destination)
-            if error:
-                errors.setdefault(index, []).append(error)
+            direct_destinations = list(dict.fromkeys(direct_destinations))
+            direct_urls_kept += len(direct_destinations)
+            item["url_candidates"] = unique_candidates
+            item["resolved_urls"] = direct_destinations
+            item["resolved_url"] = direct_destinations[0] if direct_destinations else ""
+            if any(self._is_google_goto_url(value) for value in unique_candidates):
+                item["url_resolution_status"] = (
+                    "direct_urls_kept_goto_skipped"
+                    if direct_destinations
+                    else "google_goto_skipped_no_documented_destination"
+                )
+            else:
+                item.pop("url_resolution_status", None)
+            # Legacy error fields from earlier resolver versions must not survive.
+            item.pop("url_resolution_error", None)
+            item.pop("url_resolution_errors", None)
 
         self.last_lens_diagnostics.update({
-            "google_goto_candidates": goto_candidates,
-            "google_goto_resolved": goto_resolved,
-            "google_goto_failed": goto_failed,
-            "google_goto_http_statuses": dict(sorted(goto_http_statuses.items())),
-            "google_goto_methods": dict(sorted(goto_methods.items())),
-            "google_goto_error_kinds": dict(sorted(goto_error_kinds.items())),
-            "google_goto_error_samples": list(dict.fromkeys(goto_error_samples))[:4],
+            "google_goto_candidates": goto_skipped,
+            "google_goto_resolved": 0,
+            "google_goto_failed": 0,
+            "google_goto_skipped": goto_skipped,
+            "google_goto_direct_urls_kept": direct_urls_kept,
+            "google_goto_http_statuses": {},
+            "google_goto_methods": {},
+            "google_goto_error_kinds": {},
+            "google_goto_error_samples": [],
         })
-
-        for index, item in enumerate(prepared):
-            unique_destinations = list(dict.fromkeys(destinations.get(index, [])))
-            item["resolved_urls"] = unique_destinations
-            item["resolved_url"] = unique_destinations[0] if unique_destinations else ""
-            item_errors = errors.get(index, [])
-            if item_errors:
-                item["url_resolution_error"] = item_errors[0]
-                item["url_resolution_errors"] = item_errors[:10]
-            else:
-                item.pop("url_resolution_error", None)
-                item.pop("url_resolution_errors", None)
         return prepared
 
     @staticmethod
@@ -551,7 +416,12 @@ class BrightDataGoogleLensClient:
             try:
                 response = self.client.post(
                     BRIGHTDATA_REQUEST_URL,
-                    json={"zone": self.zone, "url": target_url, "format": "raw"},
+                    json={
+                        "zone": self.zone,
+                        "url": target_url,
+                        "format": "raw",
+                        "data_format": "parsed_light",
+                    },
                 )
             except httpx.TransportError as exc:
                 if attempt >= MAX_TRANSIENT_RETRIES:
@@ -616,6 +486,7 @@ class BrightDataGoogleLensClient:
         self.last_lens_diagnostics = {
             "status": "requesting",
             "lens_tab": LENS_TAB,
+            "data_format": "parsed_light",
             "http_status": None,
             "attempts": 0,
             "result_count": 0,
