@@ -105,7 +105,7 @@ class BrightDataGoogleLensClient:
                     follow_redirects=False,
                 )
                 status = int(getattr(response, "status_code", 0) or 0)
-                statuses.append(str(status))
+                statuses.append(f"{method.upper()}:{status}")
                 location = str(response.headers.get("location") or "").strip()
                 if not location:
                     attempts.append(f"{method.upper()}_HTTP_{status}_NO_LOCATION")
@@ -126,6 +126,7 @@ class BrightDataGoogleLensClient:
                         "method": method.upper(),
                         "http_status": status,
                         "attempts": attempts,
+                        "http_statuses": statuses,
                     }
                 if self._is_google_goto_url(destination):
                     attempts.append(f"{method.upper()}_HTTP_{status}_STILL_GOTO")
@@ -138,15 +139,18 @@ class BrightDataGoogleLensClient:
                     "method": method.upper(),
                     "http_status": status,
                     "attempts": attempts,
+                    "http_statuses": statuses,
                 }
             except httpx.HTTPError as exc:
                 attempts.append(f"{method.upper()}_{type(exc).__name__.upper()}")
                 continue
 
+        final_status: int | None = None
         if statuses:
-            final_status: int | None = int(statuses[-1])
-        else:
-            final_status = None
+            try:
+                final_status = int(statuses[-1].rsplit(":", 1)[-1])
+            except (TypeError, ValueError):
+                final_status = None
         if any("TIMEOUT" in item for item in attempts):
             outcome = "timeout"
         elif any("CONNECTERROR" in item for item in attempts):
@@ -166,6 +170,7 @@ class BrightDataGoogleLensClient:
             "outcome": outcome,
             "method": "HEAD+GET",
             "http_status": final_status,
+            "http_statuses": statuses,
             "attempts": safe_attempts,
         }
 
@@ -224,9 +229,8 @@ class BrightDataGoogleLensClient:
                 goto_candidates += 1
                 method = str(detail.get("method") or "unknown")
                 goto_methods[method] = goto_methods.get(method, 0) + 1
-                status = detail.get("http_status")
-                if status is not None:
-                    status_key = str(status)
+                for status_item in detail.get("http_statuses") or []:
+                    status_key = str(status_item)
                     goto_http_statuses[status_key] = goto_http_statuses.get(status_key, 0) + 1
                 if destination and not self._is_google_goto_url(destination):
                     goto_resolved += 1
