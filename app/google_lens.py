@@ -416,11 +416,11 @@ class BrightDataGoogleLensClient:
             try:
                 response = self.client.post(
                     BRIGHTDATA_REQUEST_URL,
+                    headers={"x-unblock-data-format": "parsed_light"},
                     json={
                         "zone": self.zone,
                         "url": target_url,
                         "format": "raw",
-                        "data_format": "parsed_light",
                     },
                 )
             except httpx.TransportError as exc:
@@ -533,7 +533,7 @@ class BrightDataGoogleLensClient:
             message = (
                 "Bright Data returned an empty or non-JSON response "
                 f"(HTTP {effective_status}, content-type={content_type}, "
-                f"content-length={content_length}); request uses format=raw and brd_json=1"
+                f"content-length={content_length}); request uses format=raw, brd_json=1, and x-unblock-data-format=parsed_light"
             )
             self.last_lens_diagnostics.update({"status": "invalid_response", "error": message})
             raise BrightDataAPIError(message)
