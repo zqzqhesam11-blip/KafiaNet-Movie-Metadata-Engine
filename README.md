@@ -7,6 +7,7 @@ Cloud worker for enriching the public KafiaNet poster catalog with verified TMDB
 - Source images: `zqzqhesam11-blip/KafiaNet-Movie-Posters` (public).
 - Engine code: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine`.
 - Reverse-image provider: Google Lens `exact_matches` tab through the Bright Data SERP API.
+- Optional independent provider: Google Cloud Vision Web Detection + OCR (disabled by default).
 - Metadata results are written to the poster repository only when APPLY is explicitly requested.
 
 ## Free-tier and no-payment setup
@@ -92,3 +93,19 @@ The `run --limit 1` command is a live **DRY RUN** unless `--apply` is supplied. 
 - `metadata/index.json`: source-folder to TMDB identity/status mapping.
 
 The metadata schema writes new provider evidence under `reverse_image` and can still read legacy `tineye` evidence saved by older runs.
+
+
+## Optional independent image evidence (Google Cloud Vision)
+
+Google Cloud Vision is **disabled by default**. It is not called and creates no Vision API usage unless both settings below are explicitly configured:
+
+- `GOOGLE_VISION_ENABLED=true`
+- `GOOGLE_VISION_API_KEY` stored as a Hostless secret (restrict this key to the Cloud Vision API).
+
+`GOOGLE_VISION_REQUIRE_CONFIRMATION` defaults to `true`. When Vision is enabled, an official candidate must also be supported by a Google Vision page that contains a **full image match** and an official TMDB/IMDb movie URL before it can become READY. Partial image matches, visually similar images, generic web entities, best-guess labels and OCR text are not identity proof.
+
+OCR title lines may be searched through TMDB to produce a small list of **unverified REVIEW suggestions**. Those candidates are never passed into the automatic identity resolver and can never set READY by themselves. The source-folder name and local image filename remain excluded from all matching/search inputs.
+
+The request combines `WEB_DETECTION` and `TEXT_DETECTION`. Google Cloud Vision may incur charges after its applicable free monthly allowance; consult the [current Cloud Vision pricing](https://cloud.google.com/vision/pricing) before enabling it. Do not enable it or add a key unless you have approved the Google Cloud project, API restrictions, budget and billing settings. The feature sends the public poster URL to Google; it does not upload or move catalog files.
+
+If Vision is enabled but credentials, quota or the provider are unavailable, the engine records diagnostics and stops the current batch rather than repeatedly calling a broken provider. The existing Lens-only behavior remains unchanged while Vision is disabled.
