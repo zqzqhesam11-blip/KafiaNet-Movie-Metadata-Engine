@@ -4,6 +4,13 @@ import os
 from dataclasses import dataclass
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().casefold() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     tmdb_bearer_token: str
@@ -15,6 +22,9 @@ class Settings:
     tmdb_language: str
     batch_limit: int
     http_timeout_seconds: float
+    google_vision_api_key: str = ""
+    google_vision_enabled: bool = False
+    google_vision_require_confirmation: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -28,6 +38,11 @@ class Settings:
             tmdb_language=os.getenv("TMDB_LANGUAGE", "en-US").strip(),
             batch_limit=max(1, int(os.getenv("BATCH_LIMIT", "5"))),
             http_timeout_seconds=max(5.0, float(os.getenv("HTTP_TIMEOUT_SECONDS", "60"))),
+            google_vision_api_key=os.getenv("GOOGLE_VISION_API_KEY", "").strip(),
+            google_vision_enabled=_env_bool("GOOGLE_VISION_ENABLED", False),
+            google_vision_require_confirmation=_env_bool(
+                "GOOGLE_VISION_REQUIRE_CONFIRMATION", True
+            ),
         )
 
     def validate_brightdata(self) -> None:
@@ -52,5 +67,7 @@ class Settings:
             missing.append("BRIGHTDATA_SERP_ZONE")
         if apply and not self.github_token:
             missing.append("GITHUB_TOKEN")
+        if self.google_vision_enabled and not self.google_vision_api_key:
+            missing.append("GOOGLE_VISION_API_KEY (required when GOOGLE_VISION_ENABLED=true)")
         if missing:
             raise RuntimeError("Missing required environment variable(s): " + ", ".join(missing))
