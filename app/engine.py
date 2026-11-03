@@ -9,6 +9,7 @@ from app.config import Settings
 from app.github_api import GitHubAPI
 from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, tmdb_movie_url_diagnostics
 from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
+from app.google_vision import GoogleVisionAPIError, GoogleVisionClient, GoogleVisionQuotaError
 from app.tmdb import TMDBClient
 
 
@@ -28,6 +29,7 @@ class MetadataEngine:
         self._stop_batch = False
         self._provider_stop_status: int | None = None
         self._provider_stop_reason: str | None = None
+        self._provider_stop_provider: str | None = None
         self._details_cache: dict[int, dict[str, Any]] = {}
         self.github = GitHubAPI(
             settings.posters_repo,
@@ -45,12 +47,21 @@ class MetadataEngine:
             settings.brightdata_serp_zone,
             timeout=max(45, settings.http_timeout_seconds),
         )
+        self.google_vision = (
+            GoogleVisionClient(
+                settings.google_vision_api_key,
+                timeout=max(45, settings.http_timeout_seconds),
+            )
+            if settings.google_vision_enabled else None
+        )
 
     def close(self) -> None:
         self.github.close()
         self.tmdb.close()
         if self.reverse_image:
             self.reverse_image.close()
+        if getattr(self, "google_vision", None):
+            self.google_vision.close()
 
     def _stop_for_provider_server_error(self, diagnostics: Any) -> bool:
         """Stop the remaining batch after an exhausted Bright Data 5xx response."""
@@ -66,6 +77,7 @@ class MetadataEngine:
         self._stop_batch = True
         self._provider_stop_status = status_code
         self._provider_stop_reason = "provider_server_error"
+        self._provider_stop_provider = "bright_data"
         return True
 
     def _reverse_image_results(self, image_url: str) -> list[dict[str, Any]]:
@@ -78,6 +90,7 @@ class MetadataEngine:
             self._stop_batch = True
             self._provider_stop_status = exc.status_code
             self._provider_stop_reason = "provider_quota_or_throttle"
+            self._provider_stop_provider = "bright_data"
             return [{
                 "error": type(exc).__name__,
                 "message": str(exc)[:300],
@@ -96,6 +109,7 @@ class MetadataEngine:
     def _find_movie(
         self,
         reverse_image_results: list[dict[str, Any]],
+        google_vision_results: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
         """Resolve only official TMDB/IMDb identifiers, with a Lens-derived title-search fallback.
 
@@ -105,12 +119,28 @@ class MetadataEngine:
         are never inputs. IMDb IDs are mapped through TMDB /find, then every
         candidate is verified through TMDB movie details.
         """
+        vision_rows = [
+            row for row in (google_vision_results or [])
+            if isinstance(row, dict) and not row.get("error")
+        ]
         reverse_image_failed = any(
             isinstance(item, dict) and item.get("error")
             for item in (reverse_image_results or [])
-        )
+        ) and not vision_rows
         lens_tmdb_ids = extract_tmdb_movie_ids(reverse_image_results)
         lens_imdb_ids = extract_imdb_ids(reverse_image_results)
+        lens_tmdb_ids_from_lens = list(lens_tmdb_ids)
+        lens_imdb_ids_from_lens = list(lens_imdb_ids)
+        vision_tmdb_ids = extract_tmdb_movie_ids(vision_rows)
+        vision_imdb_ids = extract_imdb_ids(vision_rows)
+        # The combined official ID set is resolved through TMDB below. Provider
+        # provenance is retained separately so an OCR/title hint is never proof.
+        lens_tmdb_ids = list(dict.fromkeys([*lens_tmdb_ids, *vision_tmdb_ids]))
+        lens_imdb_ids = list(dict.fromkeys([*lens_imdb_ids, *vision_imdb_ids]))
+        vision_required = bool(
+            getattr(getattr(self, "settings", None), "google_vision_enabled", False)
+            and getattr(getattr(self, "settings", None), "google_vision_require_confirmation", True)
+        )
         tmdb_id_lookup = {
             "status": "resolving" if (lens_tmdb_ids or lens_imdb_ids) else "no_tmdb_id",
             "tmdb_ids": list(lens_tmdb_ids),
@@ -127,6 +157,8 @@ class MetadataEngine:
             "strategy": "official_tmdb_or_imdb_url_identity_resolution",
             "tmdb_ids": list(lens_tmdb_ids),
             "imdb_ids": list(lens_imdb_ids),
+            "google_vision_tmdb_ids": list(vision_tmdb_ids),
+            "google_vision_imdb_ids": list(vision_imdb_ids),
             "tmdb_id_lookup": tmdb_id_lookup,
             "id_resolution": {
                 "strategy": "official_tmdb_or_imdb_url_then_tmdb_find",
@@ -149,8 +181,6 @@ class MetadataEngine:
                 "candidate_ids": [],
             }, evidence
 
-        lens_tmdb_ids_from_lens = list(lens_tmdb_ids)
-        lens_imdb_ids_from_lens = list(lens_imdb_ids)
         title_search_tmdb_ids: list[int] = []
         title_search_imdb_ids: list[str] = []
         title_search_diagnostics: dict[str, Any] = {
@@ -250,6 +280,8 @@ class MetadataEngine:
         )
         evidence["id_resolution"]["tmdb_ids_seen"] = list(lens_tmdb_ids)
         evidence["id_resolution"]["imdb_ids_seen"] = list(lens_imdb_ids)
+        evidence["id_resolution"]["google_vision_tmdb_ids"] = list(vision_tmdb_ids)
+        evidence["id_resolution"]["google_vision_imdb_ids"] = list(vision_imdb_ids)
         evidence["id_resolution"]["google_title_search_tmdb_ids"] = list(title_search_tmdb_ids)
         evidence["id_resolution"]["google_title_search_imdb_ids"] = list(title_search_imdb_ids)
         tmdb_id_lookup.update({
@@ -316,6 +348,10 @@ class MetadataEngine:
                 })
 
         evidence["id_resolution"]["imdb_to_tmdb_ids"] = imdb_to_tmdb_ids
+        vision_confirmed_tmdb_ids = set(vision_tmdb_ids)
+        for vision_imdb_id in vision_imdb_ids:
+            vision_confirmed_tmdb_ids.update(imdb_to_tmdb_ids.get(vision_imdb_id, []))
+        evidence["id_resolution"]["vision_confirmed_tmdb_ids"] = sorted(vision_confirmed_tmdb_ids)
         evidence["id_resolution"]["errors"] = imdb_find_errors
         tmdb_id_lookup["imdb_find_results"] = imdb_to_tmdb_ids
         tmdb_id_lookup["imdb_find_errors"] = imdb_find_errors
@@ -410,6 +446,18 @@ class MetadataEngine:
                 "details_errors": details_errors,
             }, evidence
 
+        if vision_required and not vision_confirmed_tmdb_ids:
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": (
+                    "Google Cloud Vision did not return a full-image matching page with an official "
+                    "TMDB/IMDb movie ID; OCR and title-search suggestions are not identity proof"
+                ),
+                "candidate_ids": sorted(candidate_tmdb_ids),
+                "vision_confirmation_required": True,
+            }, evidence
+
         identities: list[dict[str, Any]] = []
         for tmdb_id, details in sorted(resolved.items()):
             normalized = TMDBClient.normalize_details(details)
@@ -481,13 +529,44 @@ class MetadataEngine:
         selected_id = int(selected["tmdb_id"])
         selected_candidate = resolved[selected_id]
         has_direct_tmdb_id = selected_id in lens_tmdb_ids_from_lens
+        has_vision_tmdb_id = selected_id in vision_tmdb_ids
+        selected_imdb_ids = expected_imdb_ids_by_tmdb.get(selected_id, [])
+        has_imdb_id = bool(selected_imdb_ids)
+        has_vision_imdb_id = any(value in vision_imdb_ids for value in selected_imdb_ids)
         has_title_search_tmdb_id = selected_id in title_search_tmdb_ids
-        has_imdb_id = bool(expected_imdb_ids_by_tmdb.get(selected_id))
         has_title_search_imdb_id = any(
             value in title_search_imdb_ids
-            for value in expected_imdb_ids_by_tmdb.get(selected_id, [])
+            for value in selected_imdb_ids
         )
-        if has_direct_tmdb_id and has_imdb_id:
+        if vision_required and selected_id not in vision_confirmed_tmdb_ids:
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": (
+                    "The official ID resolved through TMDB, but Google Cloud Vision did not "
+                    "corroborate it with a full-image matching page"
+                ),
+                "candidate_ids": [selected_id],
+                "vision_confirmation_required": True,
+            }, evidence
+
+        if has_direct_tmdb_id and selected_id in vision_confirmed_tmdb_ids:
+            identity_source = "google_lens_and_google_vision_exact_match_agree"
+            identity_method = "independent_reverse_image_official_id_agreement"
+            verification = "Google Lens and Google Cloud Vision full-image page evidence agree; TMDB details verified the same ID"
+        elif has_vision_tmdb_id and has_vision_imdb_id:
+            identity_source = "google_cloud_vision_full_match_tmdb_and_imdb"
+            identity_method = "vision_full_image_page_match_with_tmdb_and_imdb_ids"
+            verification = "Google Cloud Vision full-image matching page returned official TMDB and IMDb URLs; TMDB details confirmed them"
+        elif has_vision_tmdb_id:
+            identity_source = "google_cloud_vision_full_match_tmdb_page"
+            identity_method = "vision_full_image_page_tmdb_id_lookup"
+            verification = "Google Cloud Vision linked a full-image match to an official TMDB movie page; TMDB details confirmed the ID"
+        elif has_vision_imdb_id:
+            identity_source = "google_cloud_vision_full_match_imdb_via_tmdb_find"
+            identity_method = "vision_full_image_page_imdb_id_tmdb_find"
+            verification = "Google Cloud Vision linked a full-image match to an official IMDb page; TMDB /find and movie details confirmed it"
+        elif has_direct_tmdb_id and has_imdb_id:
             identity_source = "google_lens_official_tmdb_and_imdb_ids"
             identity_method = "lens_tmdb_and_imdb_id_lookup"
             verification = "official_tmdb_url_plus_tmdb_find_imdb_id_and_movie_details"
@@ -523,6 +602,10 @@ class MetadataEngine:
             "verification": verification,
             "official_tmdb_ids": list(lens_tmdb_ids),
             "official_imdb_ids": list(lens_imdb_ids),
+            "google_lens_tmdb_ids": list(lens_tmdb_ids_from_lens),
+            "google_lens_imdb_ids": list(lens_imdb_ids_from_lens),
+            "google_vision_tmdb_ids": list(vision_tmdb_ids),
+            "google_vision_imdb_ids": list(vision_imdb_ids),
             "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
             "google_title_search_imdb_ids": list(title_search_imdb_ids),
             "folder_name_used": False,
@@ -547,6 +630,111 @@ class MetadataEngine:
             ),
         }, evidence
 
+
+    def _google_vision_result(self, image_url: str) -> dict[str, Any]:
+        client = getattr(self, "google_vision", None)
+        if client is None:
+            return {
+                "status": "disabled",
+                "official_page_matches": [],
+                "ocr_text": "",
+                "ocr_title_hints": [],
+                "diagnostics": {"status": "disabled"},
+            }
+        try:
+            return client.analyze_image_url(image_url)
+        except GoogleVisionQuotaError as exc:
+            self._stop_batch = True
+            self._provider_stop_status = exc.status_code or 429
+            self._provider_stop_reason = "google_vision_quota_or_throttle"
+            self._provider_stop_provider = "google_cloud_vision"
+            return {
+                "status": "quota_error",
+                "official_page_matches": [],
+                "ocr_text": "",
+                "ocr_title_hints": [],
+                "diagnostics": dict(getattr(client, "last_diagnostics", {}) or {}),
+                "error": str(exc)[:220],
+            }
+        except GoogleVisionAPIError as exc:
+            status_code = exc.status_code
+            if status_code in {400, 401, 403, 429, 500, 502, 503, 504} or status_code is None:
+                self._stop_batch = True
+                self._provider_stop_status = status_code
+                self._provider_stop_reason = "google_vision_provider_error"
+                self._provider_stop_provider = "google_cloud_vision"
+            return {
+                "status": "error",
+                "official_page_matches": [],
+                "ocr_text": "",
+                "ocr_title_hints": [],
+                "diagnostics": dict(getattr(client, "last_diagnostics", {}) or {}),
+                "error": str(exc)[:220],
+            }
+        except Exception as exc:
+            self._stop_batch = True
+            self._provider_stop_status = None
+            self._provider_stop_reason = "google_vision_unexpected_error"
+            self._provider_stop_provider = "google_cloud_vision"
+            return {
+                "status": "error",
+                "official_page_matches": [],
+                "ocr_text": "",
+                "ocr_title_hints": [],
+                "diagnostics": dict(getattr(client, "last_diagnostics", {}) or {}),
+                "error": f"{type(exc).__name__}: unexpected Google Vision failure",
+            }
+
+    def _search_ocr_title_candidates(self, vision_result: dict[str, Any]) -> dict[str, Any]:
+        """Build unverified TMDB candidates from poster OCR; never resolve identity."""
+        hints = [
+            str(value).strip()[:100]
+            for value in (vision_result.get("ocr_title_hints") or [])
+            if isinstance(value, str) and value.strip()
+        ][:3]
+        if not hints:
+            return {
+                "status": "no_ocr_title_hints",
+                "query_hints": [],
+                "candidates": [],
+                "identity_verified": False,
+            }
+
+        candidates: dict[int, dict[str, Any]] = {}
+        errors: list[dict[str, str]] = []
+        for hint in hints:
+            try:
+                payload = self.tmdb.search_movie(hint)
+                for row in (payload.get("results") or [])[:5]:
+                    if not isinstance(row, dict) or not str(row.get("id") or "").isdigit():
+                        continue
+                    tmdb_id = int(row["id"])
+                    candidate = candidates.setdefault(tmdb_id, {
+                        "tmdb_id": tmdb_id,
+                        "title": str(row.get("title") or "")[:180],
+                        "original_title": str(row.get("original_title") or "")[:180],
+                        "release_date": str(row.get("release_date") or "")[:20],
+                        "overview": str(row.get("overview") or "")[:500],
+                        "poster_path": row.get("poster_path"),
+                        "matched_queries": [],
+                    })
+                    if hint not in candidate["matched_queries"]:
+                        candidate["matched_queries"].append(hint)
+            except Exception as exc:
+                errors.append({
+                    "query": hint,
+                    "error_type": type(exc).__name__,
+                    "message": str(exc)[:180],
+                })
+        return {
+            "status": "partial_error" if errors and candidates else "error" if errors else "ok",
+            "query_hints": hints,
+            "candidates": list(candidates.values())[:10],
+            "errors": errors,
+            "identity_verified": False,
+            "warning": "OCR/TMDB title search results are suggestions only and cannot set READY.",
+        }
+
     def _record_for_folder(
         self,
         item: dict[str, str],
@@ -570,6 +758,17 @@ class MetadataEngine:
             (getattr(self.reverse_image, "last_lens_diagnostics", {}) or {})
             if self.reverse_image else {}
         )
+        if self._stop_batch:
+            google_vision_result = {
+                "status": "skipped_batch_stopped",
+                "official_page_matches": [],
+                "ocr_text": "",
+                "ocr_title_hints": [],
+                "diagnostics": {"status": "skipped_batch_stopped"},
+            }
+        else:
+            google_vision_result = self._google_vision_result(image_url)
+        google_vision_rows = list(google_vision_result.get("official_page_matches") or [])
 
         # A temporary empty/unresponsive Google Lens response must not erase useful
         # reverse-image evidence already stored for this exact poster.
@@ -633,7 +832,39 @@ class MetadataEngine:
                 if key in resolver_diagnostics:
                     lens_diagnostics[key] = resolver_diagnostics[key]
 
-        candidate, match, reverse_image_evidence = self._find_movie(reverse_image_results)
+        candidate, match, reverse_image_evidence = self._find_movie(
+            reverse_image_results,
+            google_vision_results=google_vision_rows,
+        )
+        ocr_candidate_search: dict[str, Any] = {
+            "status": "not_run",
+            "query_hints": [],
+            "candidates": [],
+            "identity_verified": False,
+        }
+        if (
+            not candidate
+            and match.get("status") == "review"
+            and not match.get("candidate_ids")
+            and google_vision_result.get("ocr_title_hints")
+            and not self._stop_batch
+        ):
+            ocr_candidate_search = self._search_ocr_title_candidates(google_vision_result)
+        reverse_image_evidence["google_vision"] = {
+            "status": google_vision_result.get("status", "unknown"),
+            "official_page_matches": google_vision_rows,
+            "ocr_text": google_vision_result.get("ocr_text", ""),
+            "ocr_title_hints": list(google_vision_result.get("ocr_title_hints") or [])[:6],
+            "ocr_language_codes": list(google_vision_result.get("ocr_language_codes") or [])[:12],
+            "best_guess_labels": list(google_vision_result.get("best_guess_labels") or [])[:10],
+            "web_entities": list(google_vision_result.get("web_entities") or [])[:20],
+            "full_matching_image_urls": list(google_vision_result.get("full_matching_image_urls") or [])[:20],
+            "partial_matching_images_are_identity_evidence": False,
+            "visually_similar_images_are_identity_evidence": False,
+            "diagnostics": google_vision_result.get("diagnostics") or {},
+            "error": google_vision_result.get("error"),
+        }
+        reverse_image_evidence["ocr_tmdb_candidates"] = ocr_candidate_search
         # Recompute after _find_movie: its official title-search fallback may
         # append direct TMDB/IMDb URLs found from Lens-derived title hints.
         lens_diagnostics.update(tmdb_movie_url_diagnostics(reverse_image_results))
@@ -676,6 +907,13 @@ class MetadataEngine:
                 "folder_name_used_for_matching": False,
             },
             "match": match,
+            "google_vision": {
+                "enabled": getattr(self, "google_vision", None) is not None,
+                "provider": "google_cloud_vision",
+                "status": google_vision_result.get("status", "unknown"),
+                "diagnostics": google_vision_result.get("diagnostics") or {},
+                "ocr_tmdb_candidates": ocr_candidate_search,
+            },
             "reverse_image": {
                 "enabled": self.reverse_image is not None,
                 "provider": "google_lens_brightdata",
@@ -762,6 +1000,7 @@ class MetadataEngine:
         self._stop_batch = False
         self._provider_stop_status = None
         self._provider_stop_reason = None
+        self._provider_stop_provider = None
         self.settings.validate_for_processing(apply=apply)
 
         print("[KafiaNet] Scanning poster repository...", flush=True)
@@ -972,8 +1211,8 @@ class MetadataEngine:
                 )
             if self._stop_batch:
                 print(
-                    f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status} "
-                    f"({self._provider_stop_reason or 'provider_limit'}); "
+                    f"[KafiaNet] STOP: {self._provider_stop_provider or 'external_provider'} "
+                    f"HTTP {self._provider_stop_status} ({self._provider_stop_reason or 'provider_limit'}); "
                     "remaining posters were not queried and this batch will not write catalog changes.",
                     flush=True,
                 )
@@ -1025,6 +1264,7 @@ class MetadataEngine:
                 "deleted_old_files": 0,
                 "provider_stop_status": self._provider_stop_status,
                 "provider_stop_reason": self._provider_stop_reason,
+                "provider_stop_provider": self._provider_stop_provider,
                 "records": records,
                 "next_pending_estimate": max(0, len(pending) - len(records)),
             }
