@@ -43,6 +43,21 @@ class TMDBClient:
             },
         )
 
+    def search_movies(self, query: str) -> dict[str, Any]:
+        """Return TMDB text-search candidates; these are suggestions, not identity proof."""
+        title_query = " ".join(str(query or "").split())
+        if not title_query:
+            return {"results": []}
+        return self._get(
+            "/search/movie",
+            {
+                "query": title_query,
+                "include_adult": "false",
+                "language": self.language,
+                "page": 1,
+            },
+        )
+
     def movie_details(self, tmdb_id: int) -> dict[str, Any]:
         return self._get(
             f"/movie/{tmdb_id}",
