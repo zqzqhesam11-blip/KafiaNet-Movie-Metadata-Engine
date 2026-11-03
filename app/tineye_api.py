@@ -144,11 +144,11 @@ class TinEyeAPIClient:
         if "://" in text:
             text = TinEyeAPIClient._image_name(text)
         text = text.rsplit("/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
-        text = re.sub(r"(?i)\\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)$", "", text)
+        text = re.sub(r"(?i)\.(?:jpe?g|png|webp|gif|bmp|tiff?|avif)$", "", text)
         text = re.sub(r"[_+]+", " ", text)
         text = re.sub(r"[-.]+", " ", text)
-        text = re.sub(r"\\s+", " ", text).strip(" _-.,()[]")
-        year_match = re.search(r"(?<!\\d)((?:18|19|20)\\d{2})(?!\\d)", text)
+        text = re.sub(r"\s+", " ", text).strip(" _-.,()[]")
+        year_match = re.search(r"(?<!\d)((?:18|19|20)\d{2})(?!\d)", text)
         year = int(year_match.group(1)) if year_match else None
         if year_match:
             text = text[:year_match.start()] + " " + text[year_match.end():]
@@ -174,7 +174,7 @@ class TinEyeAPIClient:
             title, year = cls._clean_external_image_name(str(row.get("title") or ""))
             if year:
                 years.add(year)
-            key = re.sub(r"\\W+", " ", title.casefold()).strip()
+            key = re.sub(r"\W+", " ", title.casefold()).strip()
             if not title or not key or key in seen:
                 continue
             seen.add(key)
