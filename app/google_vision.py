@@ -140,8 +140,17 @@ class GoogleVisionClient:
                 if isinstance(item, dict) and str(item.get("url") or "").startswith("https://")
             ]
             page_url = str(page.get("url") or "").strip()
-            parsed = urlparse(page_url)
-            if not full_matches or parsed.scheme != "https" or not parsed.netloc or page_url in seen:
+            try:
+                parsed = urlparse(page_url)
+            except ValueError:
+                continue
+            if (
+                not full_matches
+                or parsed.scheme != "https"
+                or not parsed.netloc
+                or not parsed.hostname
+                or page_url in seen
+            ):
                 continue
             seen.add(page_url)
             rows.append({
