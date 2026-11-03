@@ -86,10 +86,10 @@ class MetadataEngine:
             self.local_ocr.close()
 
     def _stop_for_provider_server_error(self, diagnostics: Any) -> bool:
-        """Stop the remaining batch after an exhausted Bright Data 5xx response."""
+        """Stop the remaining batch after a TinEye server-side failure."""
         if not isinstance(diagnostics, dict):
             return False
-        raw_status = diagnostics.get("http_status")
+        raw_status = diagnostics.get("api_code") or diagnostics.get("http_status")
         try:
             status_code = int(raw_status)
         except (TypeError, ValueError):
@@ -123,7 +123,7 @@ class MetadataEngine:
             stop_batch = (
                 status in {401, 402, 403, 429}
                 or status is None
-                or (isinstance(status, int) and status >= 500)
+                or (isinstance(status, int) and (status >= 500 or (status == 200 and exc.api_code is None)))
             )
             if stop_batch:
                 self._stop_batch = True
@@ -221,7 +221,7 @@ class MetadataEngine:
         title_search_imdb_ids: list[str] = []
         title_search_diagnostics: dict[str, Any] = {
             "status": "skipped_direct_official_id_present"
-            if (lens_tmdb_ids or lens_imdb_ids) else "unavailable",
+            if (lens_tmdb_ids or lens_imdb_ids) else "not_run_tineye_has_no_text_search",
             "query_count": 0,
             "title_hints": [],
             "year_hint": None,
@@ -295,7 +295,7 @@ class MetadataEngine:
         )
         evidence["official_title_search"] = {
             "source": "tineye_official_backlinks_and_matched_image_names",
-            "status": title_search_diagnostics.get("status", "unavailable"),
+            "status": title_search_diagnostics.get("status", "not_run_tineye_has_no_text_search"),
             "query_count": title_search_diagnostics.get("query_count", 0),
             "query_variants": list(title_search_diagnostics.get("query_variants") or []),
             "title_hints": list(title_search_diagnostics.get("title_hints") or [])[:5],
@@ -315,27 +315,27 @@ class MetadataEngine:
         )
         evidence["id_resolution"]["tmdb_ids_seen"] = list(lens_tmdb_ids)
         evidence["id_resolution"]["imdb_ids_seen"] = list(lens_imdb_ids)
-        evidence["id_resolution"]["google_title_search_tmdb_ids"] = list(title_search_tmdb_ids)
-        evidence["id_resolution"]["google_title_search_imdb_ids"] = list(title_search_imdb_ids)
+        evidence["id_resolution"]["provider_title_search_tmdb_ids"] = list(title_search_tmdb_ids)
+        evidence["id_resolution"]["provider_title_search_imdb_ids"] = list(title_search_imdb_ids)
         tmdb_id_lookup.update({
             "status": "resolving" if (lens_tmdb_ids or lens_imdb_ids) else "no_tmdb_id",
             "tmdb_ids": list(lens_tmdb_ids),
             "direct_tmdb_ids": list(lens_tmdb_ids_from_lens),
             "imdb_ids": list(lens_imdb_ids),
-            "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
-            "google_title_search_imdb_ids": list(title_search_imdb_ids),
+            "provider_title_search_tmdb_ids": list(title_search_tmdb_ids),
+            "provider_title_search_imdb_ids": list(title_search_imdb_ids),
         })
         evidence["tmdb_ids"] = list(lens_tmdb_ids)
         evidence["imdb_ids"] = list(lens_imdb_ids)
 
         if not lens_tmdb_ids and not lens_imdb_ids:
             reason = (
-                "Lens returned no direct official IDs and the Lens-derived Google title search "
-                "found no official TMDB/IMDb movie URL with a usable numeric identifier"
+                "TinEye returned no official TMDB/IMDb backlink; matched-image names are review-only "
+                "and cannot establish identity"
             )
             if title_search_diagnostics.get("error"):
                 reason = (
-                    "Lens returned no official IDs and the Lens-derived Google title search failed: "
+                     "TinEye returned no official backlink and the optional provider lookup failed: "
                     + str(title_search_diagnostics.get("error"))[:220]
                 )
             return None, {
@@ -349,7 +349,7 @@ class MetadataEngine:
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "Bright Data quota or request limit reached during official title search; batch stopped",
+                "reason": "TinEye API error stopped the batch before additional poster searches",
                 "candidate_ids": [],
             }, evidence
 
@@ -557,13 +557,13 @@ class MetadataEngine:
             identity_method = "tineye_tmdb_and_imdb_id_lookup"
             verification = "official_tmdb_url_plus_tmdb_find_imdb_id_and_movie_details"
         elif has_title_search_tmdb_id and has_title_search_imdb_id:
-            identity_source = "google_serp_official_tmdb_and_imdb_ids"
-            identity_method = "lens_title_search_tmdb_and_imdb_id_lookup"
-            verification = "official_tmdb_and_imdb_urls_from_lens_derived_search_then_tmdb_find_and_matching_movie_details"
+            identity_source = "tineye_official_tmdb_and_imdb_ids"
+            identity_method = "tineye_backlink_tmdb_and_imdb_id_lookup"
+            verification = "official_tmdb_and_imdb_backlinks_then_tmdb_find_and_matching_movie_details"
         elif has_title_search_imdb_id:
-            identity_source = "google_serp_official_imdb_id_via_tmdb_find"
-            identity_method = "lens_title_search_imdb_id_tmdb_find"
-            verification = "official_imdb_url_from_lens_derived_search_then_tmdb_find_and_matching_movie_details"
+            identity_source = "tineye_official_imdb_id_via_tmdb_find"
+            identity_method = "tineye_imdb_id_tmdb_find"
+            verification = "official_imdb_backlink_then_tmdb_find_and_matching_movie_details"
         elif has_imdb_id:
             identity_source = "tineye_official_imdb_id_via_tmdb_find"
             identity_method = "tineye_imdb_id_tmdb_find"
@@ -571,11 +571,11 @@ class MetadataEngine:
         elif has_direct_tmdb_id:
             identity_source = "tineye_official_tmdb_movie_id"
             identity_method = "tineye_tmdb_movie_id_lookup"
-            verification = "tmdb_movie_details_id_equals_lens_movie_id"
+            verification = "tmdb_movie_details_id_equals_tineye_movie_id"
         elif has_title_search_tmdb_id:
-            identity_source = "google_serp_official_tmdb_movie_id"
-            identity_method = "lens_title_search_tmdb_movie_id_lookup"
-            verification = "official_tmdb_url_from_lens_derived_search_and_matching_tmdb_movie_details_id"
+            identity_source = "tineye_official_tmdb_movie_id"
+            identity_method = "tineye_tmdb_movie_id_lookup"
+            verification = "official_tmdb_backlink_and_matching_tmdb_movie_details_id"
         else:
             identity_source = "tineye_official_tmdb_movie_id"
             identity_method = "tineye_official_tmdb_movie_id_lookup"
@@ -588,8 +588,8 @@ class MetadataEngine:
             "verification": verification,
             "official_tmdb_ids": list(lens_tmdb_ids),
             "official_imdb_ids": list(lens_imdb_ids),
-            "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
-            "google_title_search_imdb_ids": list(title_search_imdb_ids),
+            "provider_title_search_tmdb_ids": list(title_search_tmdb_ids),
+            "provider_title_search_imdb_ids": list(title_search_imdb_ids),
             "folder_name_used": False,
             "image_filename_used": False,
         }
@@ -1464,7 +1464,7 @@ class MetadataEngine:
                 )
             if self._stop_batch:
                 print(
-                    f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status} "
+                    f"[KafiaNet] STOP: TinEye API status {self._provider_stop_status} 
                     f"({self._provider_stop_reason or 'provider_limit'}); "
                     "remaining posters were not queried and this batch will not write catalog changes.",
                     flush=True,
