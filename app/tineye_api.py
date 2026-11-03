@@ -10,7 +10,6 @@ import httpx
 TINEYE_API_BASE_URL = "https://api.tineye.com/rest/"
 HTTP_OK = 200
 MAX_NORMALIZED_RESULTS = 300
-MAX_BACKLINKS_PER_MATCH = 3
 MAX_TITLE_HINTS = 5
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif")
 GENERIC_FILENAME_WORDS = {
@@ -207,6 +206,17 @@ class TinEyeAPIClient:
 
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
         """Search a public HTTPS poster URL and normalize official API backlinks."""
+        self.last_search_diagnostics = {
+            "provider": "tineye_official_api",
+            "status": "validating",
+            "http_status": None,
+            "attempts": 1,
+            "match_count": 0,
+            "backlink_count": 0,
+            "result_count": 0,
+        }
+        self.last_lens_diagnostics = dict(self.last_search_diagnostics)
+
         parsed = urlparse(str(image_url or "").strip())
         if (
             parsed.scheme != "https"
@@ -214,21 +224,20 @@ class TinEyeAPIClient:
             or parsed.username
             or parsed.password
         ):
-            raise TinEyeAPIError(
-                "TinEye requires a publicly reachable HTTPS image URL without embedded credentials",
-                status_code=400,
-                api_code=400,
+            message = (
+                "TinEye requires a publicly reachable HTTPS image URL "
+                "without embedded credentials"
             )
+            self.last_search_diagnostics.update({
+                "status": "error",
+                "http_status": 400,
+                "api_code": 400,
+                "error": message,
+            })
+            self.last_lens_diagnostics = dict(self.last_search_diagnostics)
+            raise TinEyeAPIError(message, status_code=400, api_code=400)
 
-        self.last_search_diagnostics = {
-            "provider": "tineye_official_api",
-            "status": "requesting",
-            "http_status": None,
-            "attempts": 1,
-            "match_count": 0,
-            "backlink_count": 0,
-            "result_count": 0,
-        }
+        self.last_search_diagnostics["status"] = "requesting"
         self.last_lens_diagnostics = dict(self.last_search_diagnostics)
         try:
             payload = self._get("search", {
@@ -250,64 +259,89 @@ class TinEyeAPIClient:
 
         data = payload.get("results")
         if not isinstance(data, dict):
+            message = "TinEye API response field 'results' is missing or is not an object"
             self.last_search_diagnostics.update({
                 "status": "error",
                 "http_status": HTTP_OK,
                 "api_code": HTTP_OK,
-                "error": "TinEye API response field 'results' is missing or is not an object",
+                "error": message,
             })
             self.last_lens_diagnostics = dict(self.last_search_diagnostics)
-            raise TinEyeAPIError(
-                "TinEye API response field 'results' is missing or is not an object",
-                status_code=HTTP_OK,
-                api_code=None,
-            )
+            raise TinEyeAPIError(message, status_code=HTTP_OK, api_code=None)
+
         matches = data.get("matches")
         if not isinstance(matches, list):
+            message = "TinEye API response field 'results.matches' is missing or is not a list"
             self.last_search_diagnostics.update({
                 "status": "error",
                 "http_status": HTTP_OK,
                 "api_code": HTTP_OK,
-                "error": "TinEye API response field 'results.matches' is missing or is not a list",
+                "error": message,
             })
             self.last_lens_diagnostics = dict(self.last_search_diagnostics)
-            raise TinEyeAPIError(
-                "TinEye API response field 'results.matches' is missing or is not a list",
-                status_code=HTTP_OK,
-                api_code=HTTP_OK,
-            )
+            raise TinEyeAPIError(message, status_code=HTTP_OK, api_code=None)
 
         normalized: list[dict[str, Any]] = []
         backlink_count = 0
+
+        def append_result(
+            match: dict[str, Any],
+            *,
+            source_url: str,
+            page_url: str,
+            crawl_date: Any = None,
+        ) -> None:
+            image_name = self._image_name(source_url)
+            normalized.append({
+                "title": image_name,
+                # Only the original webpage backlink is exposed to the identity
+                # resolver. A matched image URL is stored separately as source.
+                "url": page_url,
+                "url_candidates": [page_url] if page_url else [],
+                "resolved_url": page_url,
+                "resolved_urls": [page_url] if page_url else [],
+                "source": source_url,
+                "content": "",
+                "provider": "tineye_official_api",
+                "match_score": match.get("score"),
+                "match_domain": match.get("domain"),
+                "crawl_date": crawl_date,
+            })
+
         for match in matches:
             if not isinstance(match, dict):
                 continue
             backlinks = match.get("backlinks") or []
             if not isinstance(backlinks, list):
+                backlinks = []
+            valid_backlinks = [
+                backlink for backlink in backlinks if isinstance(backlink, dict)
+            ]
+
+            # Even when TinEye has no backlink page, retain the externally
+            # matched image filename as a review-only hint. Its URL is never
+            # passed to the official-ID extractor as a webpage destination.
+            if not valid_backlinks:
+                source_url = str(match.get("image_url") or "").strip()
+                if source_url:
+                    append_result(match, source_url=source_url, page_url="")
+                if len(normalized) >= MAX_NORMALIZED_RESULTS:
+                    break
                 continue
-            for backlink in backlinks[:MAX_BACKLINKS_PER_MATCH]:
-                if not isinstance(backlink, dict):
-                    continue
-                source_url = str(backlink.get("url") or match.get("image_url") or "").strip()
+
+            for backlink in valid_backlinks:
+                source_url = str(
+                    backlink.get("url") or match.get("image_url") or ""
+                ).strip()
                 page_url = str(backlink.get("backlink") or "").strip()
                 if not source_url and not page_url:
                     continue
-                image_name = str(
-                    backlink.get("image_name") or self._image_name(source_url)
-                ).strip()
-                normalized.append({
-                    "title": image_name,
-                    "url": page_url or source_url,
-                    "url_candidates": [page_url] if page_url else ([source_url] if source_url else []),
-                    "resolved_url": page_url or "",
-                    "resolved_urls": [page_url] if page_url else [],
-                    "source": source_url,
-                    "content": "",
-                    "provider": "tineye_official_api",
-                    "match_score": match.get("score"),
-                    "match_domain": match.get("domain"),
-                    "crawl_date": backlink.get("crawl_date"),
-                })
+                append_result(
+                    match,
+                    source_url=source_url,
+                    page_url=page_url,
+                    crawl_date=backlink.get("crawl_date"),
+                )
                 backlink_count += 1
                 if len(normalized) >= MAX_NORMALIZED_RESULTS:
                     break
