@@ -9,6 +9,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
+# Fail the image build if the bundled OCR models or CPU runtime cannot initialize.
+RUN python -c "from rapidocr import RapidOCR; RapidOCR()"
+
 COPY app ./app
 COPY tests ./tests
 
