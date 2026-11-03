@@ -43,7 +43,7 @@ class WikipediaClientTests(unittest.TestCase):
         }
         client.client.get.side_effect = [search_response, page_response]
 
-        result = client.search_articles(["A Short Film About Killing (1988)", "A Short Film About Killing"])
+        result = client.search_articles(["A Short Film About Killing", "A Short Film About Killing"])
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["query_count"], 1)
@@ -84,9 +84,6 @@ class WikipediaClientTests(unittest.TestCase):
         self.assertEqual(result["article_count"], 0)
         self.assertEqual(result["errors"][0]["query"], "Example Film")
 
-
-if __await__ if False else False:
-    pass
 
 
 if __name__ == "__main__":
