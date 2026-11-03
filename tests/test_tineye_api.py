@@ -150,5 +150,30 @@ class TinEyeAPIClientTests(unittest.TestCase):
             api.search_by_image_url("https://example.com/poster.jpg")
 
 
+    def test_match_without_backlinks_is_hint_only_and_never_an_identity_url(self):
+        api = self.make_client({
+            "code": 200,
+            "results": {"matches": [{
+                "image_url": "https://images.example/The.Matrix.1999.poster.jpg",
+                "domain": "images.example",
+                "score": 94,
+                "backlinks": [],
+            }]},
+        })
+
+        rows = api.search_by_image_url("https://example.com/poster.jpg")
+        resolved = api.resolve_result_urls(rows)
+        hints, year = api.title_hints_from_reverse_image_results(resolved)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "The.Matrix.1999.poster.jpg")
+        self.assertEqual(rows[0]["source"], "https://images.example/The.Matrix.1999.poster.jpg")
+        self.assertEqual(rows[0]["url"], "")
+        self.assertEqual(rows[0]["resolved_urls"], [])
+        self.assertEqual(extract_tmdb_movie_ids(resolved), [])
+        self.assertEqual(extract_imdb_ids(resolved), [])
+        self.assertEqual(hints, ["The Matrix"])
+        self.assertEqual(year, 1999)
+
 if __name__ == "__main__":
     unittest.main()
