@@ -317,7 +317,7 @@ class MetadataEngine:
                 "candidate_ids": [],
             }, evidence
 
-        if self._stop_batch:
+        if getattr(self, "_stop_batch", False):
             return None, {
                 "status": "review",
                 "confidence": 0.0,
