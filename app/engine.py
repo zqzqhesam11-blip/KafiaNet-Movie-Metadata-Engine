@@ -946,6 +946,34 @@ class MetadataEngine:
         image_path = item["image_path"]
         image_url = self.github.raw_url(image_path)
 
+        # Reset per-item provider diagnostics before every poster so a failed
+        # or skipped lookup cannot inherit counters/title hints from the prior film.
+        reverse_image_client = getattr(self, "reverse_image", None)
+        if reverse_image_client is not None:
+            try:
+                reverse_image_client.last_lens_diagnostics = {
+                    "provider": "tineye_official_api",
+                    "status": "not_run",
+                    "http_status": None,
+                    "api_code": None,
+                    "attempts": 0,
+                    "match_count": 0,
+                    "backlink_count": 0,
+                    "result_count": 0,
+                }
+                reverse_image_client.last_official_search_diagnostics = {
+                    "status": "not_run",
+                    "query_count": 0,
+                    "query_variants": [],
+                    "title_hints": [],
+                    "attempts": 0,
+                    "organic_result_count": 0,
+                    "official_url_count": 0,
+                }
+            except (AttributeError, TypeError):
+                # Lightweight immutable test doubles may not allow diagnostic state.
+                pass
+
         latest_reverse_image_results = self._reverse_image_results(image_url)
         latest_errors = [
             item for item in latest_reverse_image_results
