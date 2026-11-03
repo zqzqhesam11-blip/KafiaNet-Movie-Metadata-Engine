@@ -711,7 +711,7 @@ class MetadataEngine:
         })
         return output
 
-    def _wikipedia_tmdb_suggestions_from_reverse_image(
+    def _wikipedia_tmdb_suggestions_from_lens(
         self,
         reverse_image_results: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -741,11 +741,14 @@ class MetadataEngine:
             isinstance(row, dict) and row.get("error")
             for row in (reverse_image_results or [])
         ):
-            output["status"] = "skipped_reverse_image_error"
+            output["status"] = "skipped_lens_error"
             return output
 
         reverse_image_client = getattr(self, "reverse_image", None)
         hint_extractor = getattr(reverse_image_client, "title_hints_from_reverse_image_results", None)
+        if not callable(hint_extractor):
+            # Transitional adapter for unit tests and records produced by the former Lens client.
+            hint_extractor = getattr(reverse_image_client, "title_hints_from_lens_results", None)
         if not callable(hint_extractor):
             output["status"] = "title_hints_unavailable"
             return output
@@ -1059,7 +1062,7 @@ class MetadataEngine:
 
         candidate, match, reverse_image_evidence = self._find_movie(reverse_image_results)
         wikipedia_tmdb_suggestions = (
-            self._wikipedia_tmdb_suggestions_from_reverse_image(reverse_image_results)
+            self._wikipedia_tmdb_suggestions_from_lens(reverse_image_results)
             if not candidate
             else {
                 "provider": "wikipedia_mediawiki_api",
