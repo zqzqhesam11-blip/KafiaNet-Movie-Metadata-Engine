@@ -260,7 +260,7 @@ class TinEyeAPIClient:
             raise TinEyeAPIError(
                 "TinEye API response field 'results' is missing or is not an object",
                 status_code=HTTP_OK,
-                api_code=HTTP_OK,
+                api_code=None,
             )
         matches = data.get("matches")
         if not isinstance(matches, list):
