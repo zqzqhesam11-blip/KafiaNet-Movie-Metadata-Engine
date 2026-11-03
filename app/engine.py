@@ -14,6 +14,7 @@ from app.tmdb import TMDBClient
 
 SCHEMA_VERSION = 3
 MAX_LENS_TMDB_ID_CANDIDATES = 10
+TRANSIENT_PROVIDER_HTTP_STATUSES = {500, 502, 503, 504}
 
 
 def safe_segment(value: str) -> str:
@@ -26,6 +27,7 @@ class MetadataEngine:
         self.settings = settings
         self._stop_batch = False
         self._provider_stop_status: int | None = None
+        self._provider_stop_reason: str | None = None
         self._details_cache: dict[int, dict[str, Any]] = {}
         self.github = GitHubAPI(
             settings.posters_repo,
@@ -50,6 +52,22 @@ class MetadataEngine:
         if self.reverse_image:
             self.reverse_image.close()
 
+    def _stop_for_provider_server_error(self, diagnostics: Any) -> bool:
+        """Stop the remaining batch after an exhausted Bright Data 5xx response."""
+        if not isinstance(diagnostics, dict):
+            return False
+        raw_status = diagnostics.get("http_status")
+        try:
+            status_code = int(raw_status)
+        except (TypeError, ValueError):
+            return False
+        if status_code not in TRANSIENT_PROVIDER_HTTP_STATUSES:
+            return False
+        self._stop_batch = True
+        self._provider_stop_status = status_code
+        self._provider_stop_reason = "provider_server_error"
+        return True
+
     def _reverse_image_results(self, image_url: str) -> list[dict[str, Any]]:
         if not self.reverse_image:
             return []
@@ -59,14 +77,21 @@ class MetadataEngine:
             # Free quota exhaustion and provider throttling stop the whole batch.
             self._stop_batch = True
             self._provider_stop_status = exc.status_code
+            self._provider_stop_reason = "provider_quota_or_throttle"
             return [{
                 "error": type(exc).__name__,
                 "message": str(exc)[:300],
                 "stop_batch": True,
             }]
         except Exception as exc:
-            # A reverse-image provider failure must never invent or block TMDB identity.
-            return [{"error": type(exc).__name__, "message": str(exc)[:300]}]
+            # Exhausted upstream 5xx retries indicate a provider-side failure.
+            # Stop before querying every remaining poster and burning more quota.
+            diagnostics = getattr(self.reverse_image, "last_lens_diagnostics", {})
+            stop_batch = self._stop_for_provider_server_error(diagnostics)
+            result = {"error": type(exc).__name__, "message": str(exc)[:300]}
+            if stop_batch:
+                result["stop_batch"] = True
+            return [result]
 
     def _find_movie(
         self,
@@ -179,10 +204,19 @@ class MetadataEngine:
                         "error": str(exc)[:300],
                     })
                 except Exception as exc:
+                    provider_diagnostics = getattr(
+                        getattr(self, "reverse_image", None),
+                        "last_official_search_diagnostics",
+                        {},
+                    )
+                    if isinstance(provider_diagnostics, dict):
+                        title_search_diagnostics = dict(provider_diagnostics)
                     title_search_diagnostics.update({
-                        "status": "error",
-                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                        "status": title_search_diagnostics.get("status") or "error",
+                        "error": title_search_diagnostics.get("error")
+                        or f"{type(exc).__name__}: {str(exc)[:300]}",
                     })
+                    self._stop_for_provider_server_error(provider_diagnostics)
 
                 title_search_tmdb_ids = extract_tmdb_movie_ids(title_search_rows)
                 title_search_imdb_ids = extract_imdb_ids(title_search_rows)
@@ -727,6 +761,7 @@ class MetadataEngine:
     def run_batch(self, limit: int, apply: bool) -> dict[str, Any]:
         self._stop_batch = False
         self._provider_stop_status = None
+        self._provider_stop_reason = None
         self.settings.validate_for_processing(apply=apply)
 
         print("[KafiaNet] Scanning poster repository...", flush=True)
@@ -937,7 +972,8 @@ class MetadataEngine:
                 )
             if self._stop_batch:
                 print(
-                    f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status}; "
+                    f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status} "
+                    f"({self._provider_stop_reason or 'provider_limit'}); "
                     "remaining posters were not queried and this batch will not write catalog changes.",
                     flush=True,
                 )
@@ -988,6 +1024,7 @@ class MetadataEngine:
                 "moved_image_files": 0,
                 "deleted_old_files": 0,
                 "provider_stop_status": self._provider_stop_status,
+                "provider_stop_reason": self._provider_stop_reason,
                 "records": records,
                 "next_pending_estimate": max(0, len(pending) - len(records)),
             }
