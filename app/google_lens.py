@@ -687,9 +687,9 @@ class BrightDataGoogleLensClient:
     ) -> str:
         """Build explicit, independently-scoped IMDb/TMDB branches from Lens titles.
 
-        The exact pass keeps phrases intact and does not make the year mandatory.
-        Only if it finds no official movie URL do we retry with unquoted title
-        terms and the Lens-observed year as a disambiguator.
+        The exact pass keeps phrases intact and applies the year when Lens supplied one.
+        Only if it finds no official movie URL do we retry with unquoted title terms
+        and without the year, allowing alternate title/index variants to surface.
         """
         domains = ("imdb.com/title", "themoviedb.org/movie")
         branches: list[str] = []
@@ -700,10 +700,10 @@ class BrightDataGoogleLensClient:
                 continue
             if broad:
                 title_expression = f"({title})"
-                if year:
-                    title_expression += f" {int(year)}"
             else:
                 title_expression = f'"{title.replace(chr(34), " ").strip()}"'
+                if year:
+                    title_expression += f" {int(year)}"
             for domain in domains:
                 branches.append(f"(site:{domain} {title_expression})")
 
