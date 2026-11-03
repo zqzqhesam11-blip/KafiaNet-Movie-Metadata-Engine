@@ -7,6 +7,7 @@ Cloud worker for enriching the public KafiaNet poster catalog with verified TMDB
 - Source images: `zqzqhesam11-blip/KafiaNet-Movie-Posters` (public).
 - Engine code: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine`.
 - Reverse-image provider: Google Lens `exact_matches` tab through the Bright Data SERP API.
+- Local poster OCR: RapidOCR with ONNX Runtime CPU; no external OCR API or OCR secret.
 - Metadata results are written to the poster repository only when APPLY is explicitly requested.
 
 ## Free-tier and no-payment setup
@@ -18,7 +19,8 @@ To keep this project free:
 - Do not add a payment card, deposit funds, or activate a paid plan.
 - Do not configure automatic top-ups or any paid balance.
 - If Bright Data reports HTTP 402 or 429, stop the batch. Do not retry repeatedly and do not add funds.
-- Each poster uses the Google Lens `exact_matches` tab. The engine extracts only numeric movie IDs from official `themoviedb.org/movie/<id>` result destinations. It does not use Lens titles, snippets, countries, years, IMDb URLs, image URLs, poster filenames or source-folder names as identity inputs. No TMDB text search is performed.
+- Google Lens `exact_matches` is the reverse-image identity source. Official TMDB movie URLs and IMDb title URLs are the only external identifier inputs accepted by the automatic identity resolver.
+- Separately, the poster image bytes are OCR-processed locally by RapidOCR. Up to three OCR text hints may be sent to TMDB `/search/movie`; returned rows are saved only as manual-review suggestions under `ocr.tmdb_suggestions` and are never fed into identity resolution or automatic READY decisions.
 - At most two bounded retries are made for transient 5xx gateway errors, transport failures, and 5xx statuses inside Bright Data's HTTP-200 response envelope. HTTP 402/429 quota responses are never retried and stop the batch.
 - Bright Data free credits may be shared with other products or tools using the same account. Keep the key private.
 
@@ -35,17 +37,25 @@ References:
 - The source movie-folder name is never changed. Only the JSON basename changes to the movie title and release year returned by TMDB.
 - Image filenames, extensions, bytes, and Git blob SHAs are preserved.
 - Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
-- Movie identity starts with the poster image in Google Lens. The only accepted identity signal is a numeric movie ID parsed from an official TMDB movie destination URL returned by Lens.
+- Automatic movie identity is based on official TMDB movie IDs or IMDb title IDs returned by Lens and its Lens-derived official-page search, followed by TMDB `/find` and/or `/movie/{id}` verification. Local OCR text is not an identity signal.
 - The engine calls TMDB `/movie/{movie_id}` for every distinct official TMDB movie ID found. A single valid ID is accepted only after TMDB returns a movie record whose `id` exactly equals the Lens ID. Distinct competing TMDB movie IDs, an unresolved ID, or no official TMDB movie ID result in REVIEW. IMDb-only links do not trigger a text or IMDb fallback.
 - Movie title, release date/year, country, director, cast, overview, ratings, external IMDb ID and other metadata are read from the verified TMDB movie record. The title saved for catalog naming is the title returned by TMDB; Lens title text and country clues are not used.
 - TMDB movie images are requested with `append_to_response=images` and a language fallback. Poster paths are saved with their TMDB image CDN URLs (including w500 and original sizes).
 - Folder names, folder years, poster filenames, image URLs, Lens text, snippets and catalog labels are never used as movie identity inputs.
-- No movie-title search, country search, title similarity scoring, metadata fingerprint comparison, or IMDb-only identity resolution is performed.
+- TMDB text search is used only for OCR-derived review suggestions. Its candidates, OCR confidence, poster text, and title similarity are not accepted as proof of identity. No country search, title-similarity scoring, or metadata fingerprint comparison is used for automatic matching.
 - Every READY JSON and `metadata/index.json` row records the `tmdb_id` explicitly. The `imdb_id` is also saved when TMDB supplies it; otherwise it remains null. TMDB IDs are never invented.
 - A failed, blocked, or unparsed live response is recorded as an error, not as a successful empty result. Previously saved results are reusable only when their stored diagnostics explicitly identify the `exact_matches` tab; older `visual_matches` evidence is ignored.
 - Each per-film terminal result reports the Lens tab, HTTP status, retry count, result count and error, the count of official TMDB movie URLs, their distinct numeric movie IDs, and the TMDB details-resolution outcome. These diagnostics do not include API secrets.
 - Duplicate identity is based on TMDB movie ID, not title spelling.
 - API keys and tokens are read only from Hostless environment variables. Never commit secrets.
+
+## Local poster OCR
+
+- Runtime: pinned `rapidocr[rtl]==3.10.0` with `onnxruntime==1.31.1` CPU inference.
+- RapidOCR's small ONNX models are bundled in its wheel. The Docker build initializes the OCR runtime as a smoke test, so model initialization is checked during CI/build rather than deferred to the first catalog batch.
+- OCR downloads only the poster pixels from the public `raw.githubusercontent.com` URL generated by the engine, enforces a 12 MiB image limit, and runs inference inside the worker. It does not send images or text to a cloud OCR provider.
+- OCR output and up to three TMDB text-search suggestion sets are recorded under `ocr`. These are reviewer aids only: they do not add IDs to the identity resolver, cannot produce READY, and cannot change the verified TMDB title.
+- The source-folder name, poster filename, and folder year are never passed as OCR text or search inputs.
 
 ## Hostless setup
 
