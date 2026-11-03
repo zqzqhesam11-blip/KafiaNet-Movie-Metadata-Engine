@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
@@ -11,18 +12,37 @@ from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, tmdb_mo
 from app.local_ocr import LocalPosterOCR
 from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
 from app.tmdb import TMDBClient
+from app.wikipedia import WikipediaClient
 
 
 SCHEMA_VERSION = 3
 MAX_LENS_TMDB_ID_CANDIDATES = 10
 MAX_OCR_TMDB_QUERIES = 3
 MAX_OCR_TMDB_RESULTS_PER_QUERY = 5
+MAX_WIKIPEDIA_TITLE_HINTS = 5
+MAX_WIKIPEDIA_ARTICLES = 8
+MAX_WIKIPEDIA_TMDB_RESULTS_PER_ARTICLE = 5
 TRANSIENT_PROVIDER_HTTP_STATUSES = {500, 502, 503, 504}
 
 
 def safe_segment(value: str) -> str:
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" .")
     return (value or "untitled")[:140]
+
+
+def _comparison_title_key(value: str | None) -> str:
+    """Normalize a display title for conservative Wikipedia/TMDB comparison."""
+    title = " ".join(str(value or "").split()).strip()
+    title = re.sub(
+        r"\s*\(\s*(?:(?:18|19|20)\d{2}\s+)?film\s*\)\s*$",
+        "",
+        title,
+        flags=re.I,
+    )
+    title = re.sub(r"\s*\(\s*(?:18|19|20)\d{2}\s*\)\s*$", "", title)
+    title = unicodedata.normalize("NFKD", title)
+    title = "".join(char for char in title if not unicodedata.combining(char))
+    return re.sub(r"[^\w]+", " ", title.casefold(), flags=re.UNICODE).strip()
 
 
 class MetadataEngine:
@@ -43,6 +63,7 @@ class MetadataEngine:
             settings.tmdb_language,
             settings.http_timeout_seconds,
         )
+        self.wikipedia = WikipediaClient(timeout=settings.http_timeout_seconds)
         self.reverse_image = BrightDataGoogleLensClient(
             settings.brightdata_api_key,
             settings.brightdata_serp_zone,
@@ -57,6 +78,8 @@ class MetadataEngine:
     def close(self) -> None:
         self.github.close()
         self.tmdb.close()
+        if getattr(self, "wikipedia", None):
+            self.wikipedia.close()
         if self.reverse_image:
             self.reverse_image.close()
         if getattr(self, "local_ocr", None):
@@ -656,6 +679,220 @@ class MetadataEngine:
         })
         return output
 
+    def _wikipedia_tmdb_suggestions_from_lens(
+        self,
+        lens_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Use Lens titles -> Wikipedia lead/year -> TMDB search, for review only.
+
+        This pathway deliberately cannot return a candidate identity or set READY.
+        The folder name and local image filename are never accepted as inputs.
+        """
+        output: dict[str, Any] = {
+            "provider": "wikipedia_mediawiki_api",
+            "tmdb_provider": "tmdb_search_movie",
+            "status": "not_run",
+            "identity_evidence": False,
+            "automatic_match_allowed": False,
+            "title_hints": [],
+            "wikipedia_query_count": 0,
+            "wikipedia_article_count": 0,
+            "tmdb_query_count": 0,
+            "tmdb_result_count": 0,
+            "exact_title_year_match_count": 0,
+            "wikipedia": {},
+            "queries": [],
+            "errors": [],
+        }
+
+        if any(
+            isinstance(row, dict) and row.get("error")
+            for row in (lens_results or [])
+        ):
+            output["status"] = "skipped_lens_error"
+            return output
+
+        lens_client = getattr(self, "reverse_image", None)
+        hint_extractor = getattr(lens_client, "title_hints_from_lens_results", None)
+        if not callable(hint_extractor):
+            output["status"] = "title_hints_unavailable"
+            return output
+        try:
+            raw_hints, _lens_year_hint = hint_extractor(list(lens_results or []))
+            title_hints: list[str] = []
+            seen_hints: set[str] = set()
+            for value in raw_hints or []:
+                title = " ".join(str(value or "").split()).strip()
+                key = _comparison_title_key(title)
+                if not key or key in seen_hints:
+                    continue
+                seen_hints.add(key)
+                title_hints.append(title[:180])
+                if len(title_hints) >= MAX_WIKIPEDIA_TITLE_HINTS:
+                    break
+            output["title_hints"] = title_hints
+        except Exception as exc:
+            output["status"] = "title_hint_error"
+            output["errors"].append({
+                "stage": "lens_title_hints",
+                "type": type(exc).__name__,
+                "message": str(exc).replace("\n", " ")[:220],
+            })
+            return output
+
+        if not title_hints:
+            output["status"] = "no_title_hints"
+            return output
+
+        wikipedia = getattr(self, "wikipedia", None)
+        if wikipedia is None:
+            output["status"] = "wikipedia_unavailable"
+            return output
+
+        try:
+            wiki_result = wikipedia.search_articles(
+                title_hints,
+                max_queries=MAX_WIKIPEDIA_TITLE_HINTS,
+                results_per_query=3,
+                max_articles=MAX_WIKIPEDIA_ARTICLES,
+            )
+            if not isinstance(wiki_result, dict):
+                raise ValueError("Wikipedia client returned an invalid result")
+        except Exception as exc:
+            output["status"] = "wikipedia_error"
+            output["errors"].append({
+                "stage": "wikipedia_search",
+                "type": type(exc).__name__,
+                "message": str(exc).replace("\n", " ")[:220],
+            })
+            return output
+
+        raw_articles = wiki_result.get("articles") or []
+        articles = [
+            row for row in raw_articles
+            if isinstance(row, dict) and row.get("is_movie_article")
+        ][:MAX_WIKIPEDIA_ARTICLES]
+        output["wikipedia_query_count"] = int(wiki_result.get("query_count") or 0)
+        output["wikipedia_article_count"] = len(articles)
+        output["wikipedia"] = {
+            "provider": wiki_result.get("provider", "wikipedia_mediawiki_api"),
+            "language": wiki_result.get("language", "en"),
+            "status": wiki_result.get("status", "unknown"),
+            "query_count": output["wikipedia_query_count"],
+            "search_result_count": int(wiki_result.get("search_result_count") or 0),
+            "articles": [
+                {
+                    "pageid": row.get("pageid"),
+                    "title": row.get("title"),
+                    "url": row.get("url"),
+                    "year": row.get("year"),
+                    "year_candidates": row.get("year_candidates") or [],
+                    "is_movie_article": bool(row.get("is_movie_article")),
+                    "matched_query": row.get("matched_query"),
+                    "snippet": row.get("snippet"),
+                    "extract": str(row.get("extract") or "")[:700],
+                }
+                for row in articles
+            ],
+            "errors": list(wiki_result.get("errors") or [])[:8],
+        }
+
+        if not articles:
+            output["status"] = (
+                "wikipedia_error"
+                if wiki_result.get("status") == "error"
+                else "no_movie_articles"
+            )
+            return output
+
+        successful_tmdb_queries = 0
+        failed_tmdb_queries = 0
+        for article in articles:
+            wiki_title = " ".join(str(article.get("title") or "").split()).strip()
+            raw_year = article.get("year")
+            year = int(raw_year) if str(raw_year or "").isdigit() else None
+            query_row: dict[str, Any] = {
+                "wikipedia_title": wiki_title,
+                "wikipedia_url": article.get("url"),
+                "wikipedia_year": year,
+                "query": wiki_title,
+                "year_filter": year,
+                "status": "skipped_missing_unambiguous_wikipedia_year",
+                "results": [],
+                "exact_title_year_match_count": 0,
+            }
+            if not wiki_title or year is None or not 1870 <= year <= 2100:
+                output["queries"].append(query_row)
+                continue
+
+            try:
+                payload = self.tmdb.search_movies(wiki_title, year=year)
+                successful_tmdb_queries += 1
+                raw_rows = payload.get("results") or []
+                compact_results: list[dict[str, Any]] = []
+                for row in raw_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    raw_id = row.get("id")
+                    if not str(raw_id or "").isdigit():
+                        continue
+                    release_date = str(row.get("release_date") or "")
+                    tmdb_year = (
+                        int(release_date[:4])
+                        if release_date[:4].isdigit()
+                        else None
+                    )
+                    comparison_key = _comparison_title_key(wiki_title)
+                    title_match = comparison_key in {
+                        _comparison_title_key(row.get("title")),
+                        _comparison_title_key(row.get("original_title")),
+                    }
+                    year_match = tmdb_year == year
+                    exact_match = bool(title_match and year_match)
+                    compact_results.append({
+                        "tmdb_id": int(raw_id),
+                        "title": row.get("title"),
+                        "original_title": row.get("original_title"),
+                        "release_date": release_date or None,
+                        "year": tmdb_year,
+                        "title_match": title_match,
+                        "year_match": year_match,
+                        "exact_title_year_match": exact_match,
+                        "vote_average": row.get("vote_average"),
+                        "poster_path": row.get("poster_path"),
+                    })
+                    if exact_match:
+                        query_row["exact_title_year_match_count"] += 1
+                    if len(compact_results) >= MAX_WIKIPEDIA_TMDB_RESULTS_PER_ARTICLE:
+                        break
+                query_row["results"] = compact_results
+                query_row["status"] = "suggestions_only" if compact_results else "no_candidates"
+                output["tmdb_result_count"] += len(compact_results)
+                output["exact_title_year_match_count"] += query_row["exact_title_year_match_count"]
+            except Exception as exc:
+                failed_tmdb_queries += 1
+                query_row["status"] = "error"
+                query_row["error"] = f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')[:220]}"
+                output["errors"].append({
+                    "stage": "tmdb_search",
+                    "wikipedia_title": wiki_title,
+                    "wikipedia_year": year,
+                    "type": type(exc).__name__,
+                    "message": str(exc).replace("\n", " ")[:220],
+                })
+            output["queries"].append(query_row)
+
+        output["tmdb_query_count"] = successful_tmdb_queries + failed_tmdb_queries
+        if output["tmdb_result_count"]:
+            output["status"] = "suggestions_only"
+        elif output["tmdb_query_count"] and failed_tmdb_queries == output["tmdb_query_count"]:
+            output["status"] = "tmdb_error"
+        elif any(row.get("status") == "skipped_missing_unambiguous_wikipedia_year" for row in output["queries"]):
+            output["status"] = "no_reliable_wikipedia_year"
+        else:
+            output["status"] = "no_tmdb_candidates"
+        return output
+
     def _record_for_folder(
         self,
         item: dict[str, str],
@@ -785,6 +1022,35 @@ class MetadataEngine:
                 }
 
         candidate, match, reverse_image_evidence = self._find_movie(reverse_image_results)
+        wikipedia_tmdb_suggestions = (
+            self._wikipedia_tmdb_suggestions_from_lens(reverse_image_results)
+            if not candidate
+            else {
+                "provider": "wikipedia_mediawiki_api",
+                "tmdb_provider": "tmdb_search_movie",
+                "status": "skipped_official_identity_resolved",
+                "identity_evidence": False,
+                "automatic_match_allowed": False,
+                "title_hints": [],
+                "wikipedia_query_count": 0,
+                "wikipedia_article_count": 0,
+                "tmdb_query_count": 0,
+                "tmdb_result_count": 0,
+                "exact_title_year_match_count": 0,
+                "wikipedia": {},
+                "queries": [],
+                "errors": [],
+            }
+        )
+        if not candidate and wikipedia_tmdb_suggestions.get("status") == "suggestions_only":
+            match["wikipedia_tmdb_suggestion_count"] = wikipedia_tmdb_suggestions.get("tmdb_result_count", 0)
+            match["wikipedia_tmdb_exact_title_year_matches"] = wikipedia_tmdb_suggestions.get(
+                "exact_title_year_match_count", 0
+            )
+            match["review_note"] = (
+                "Wikipedia title/year and TMDB text-search results are reviewer suggestions only; "
+                "they do not prove poster identity or authorize READY status."
+            )
         ocr_tmdb_suggestions = (
             self._tmdb_suggestions_from_ocr(ocr_result)
             if not candidate
@@ -821,8 +1087,26 @@ class MetadataEngine:
             "title_search_unwrapped_redirects": title_search_diag.get("google_redirect_unwrapped_count", 0),
             "title_search_candidate_domains": dict(title_search_diag.get("candidate_domains") or {}),
         })
+        lens_diagnostics.update({
+            "wikipedia_status": wikipedia_tmdb_suggestions.get("status", "not_run"),
+            "wikipedia_query_count": wikipedia_tmdb_suggestions.get("wikipedia_query_count", 0),
+            "wikipedia_article_count": wikipedia_tmdb_suggestions.get("wikipedia_article_count", 0),
+            "wikipedia_tmdb_query_count": wikipedia_tmdb_suggestions.get("tmdb_query_count", 0),
+            "wikipedia_tmdb_result_count": wikipedia_tmdb_suggestions.get("tmdb_result_count", 0),
+            "wikipedia_tmdb_exact_title_year_matches": wikipedia_tmdb_suggestions.get(
+                "exact_title_year_match_count", 0
+            ),
+        })
         reverse_image_evidence["results_source"] = reverse_image_results_source
         reverse_image_evidence["lens_diagnostics"] = lens_diagnostics
+        reverse_image_evidence["wikipedia_tmdb_suggestions"] = {
+            "status": wikipedia_tmdb_suggestions.get("status"),
+            "identity_evidence": False,
+            "automatic_match_allowed": False,
+            "exact_title_year_match_count": wikipedia_tmdb_suggestions.get(
+                "exact_title_year_match_count", 0
+            ),
+        }
 
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -839,6 +1123,7 @@ class MetadataEngine:
                 "folder_name_used_for_matching": False,
             },
             "match": match,
+            "wikipedia": wikipedia_tmdb_suggestions,
             "ocr": {
                 **ocr_result,
                 "tmdb_suggestions": ocr_tmdb_suggestions,
