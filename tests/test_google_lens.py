@@ -400,10 +400,34 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         ])
 
         self.assertEqual(year, 1988)
-        self.assertEqual(hints[0], "A Short Film About Killing")
+        # A distinct direct Play Store title is prioritized as a useful alias.
+        self.assertEqual(hints[0].casefold(), "krótki film o zabijaniu")
+        self.assertIn("a short film about killing", [value.casefold() for value in hints])
         self.assertIn("krótki film o zabijaniu", [value.casefold() for value in hints])
         self.assertIn("öldürme üzerine kısa bir film", [value.casefold() for value in hints])
         self.assertNotIn("PRIVATE", " ".join(hints))
+
+    def test_late_play_store_title_is_not_lost_after_early_lens_hints(self):
+        lens_rows = [
+            {"title": "Unrelated poster caption number one"},
+            {"title": "Unrelated poster caption number two"},
+            {"title": "Unrelated poster caption number three"},
+            {"title": "Unrelated poster caption number four"},
+            {"title": "Google Play"},
+            {
+                "title": "Google Play",
+                "url": (
+                    "https://play.google.com/store/movies/details/"
+                    "Apollo_10_e_meio_aventura_na_era_espacial"
+                ),
+            },
+        ]
+
+        hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results(lens_rows)
+
+        self.assertEqual(hints[0], "Apollo 10 e meio aventura na era espacial")
+        self.assertIn("Unrelated poster caption number one", hints)
+        self.assertIsNone(year)
 
     def test_title_hint_year_is_not_guessed_from_play_store_slug(self):
         hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results([
@@ -464,13 +488,61 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(
             api.last_official_search_diagnostics["response_format"], "json"
         )
-        self.assertIn('"A Short Film About Killing"', query["q"][0])
-        self.assertIn("site:themoviedb.org/movie", query["q"][0])
-        self.assertIn("site:imdb.com/title", query["q"][0])
+        self.assertIn('(site:imdb.com/title "A Short Film About Killing" 1988)', query["q"][0])
+        self.assertIn('(site:themoviedb.org/movie "A Short Film About Killing" 1988)', query["q"][0])
         self.assertIn("1988", query["q"][0])
         self.assertEqual(api.last_official_search_diagnostics["status"], "ok")
         self.assertEqual(api.last_official_search_diagnostics["query_count"], 1)
+        self.assertEqual(api.last_official_search_diagnostics["query_variants"], ["exact_site_scoped"])
         self.assertEqual(api.last_official_search_diagnostics["official_url_count"], 2)
+        self.assertEqual(
+            api.last_official_search_diagnostics["title_hints"],
+            ["A Short Film About Killing"],
+        )
+
+    def test_title_search_uses_broader_site_scoped_query_only_when_exact_query_has_no_official_page(self):
+        first = Mock()
+        first.status_code = 200
+        first.text = ""
+        first.json.return_value = {
+            "organic": [{
+                "title": "Untrusted publisher result",
+                "link": "https://example.com/review/a-short-film",
+            }]
+        }
+        second = Mock()
+        second.status_code = 200
+        second.text = ""
+        second.json.return_value = {
+            "organic": [{
+                "title": "A Short Film About Killing (1988) - IMDb",
+                "link": "https://www.imdb.com/title/tt0095468/",
+            }]
+        }
+        api = self.make_client()
+        api.client.post.side_effect = [first, second]
+
+        rows = api.search_official_movie_pages_from_lens([
+            {"title": "A Short Film About Killing (1988)"}
+        ])
+
+        self.assertEqual([row["url"] for row in rows], [
+            "https://www.imdb.com/title/tt0095468/"
+        ])
+        self.assertEqual(rows[0]["search_query_variant"], "broad_site_scoped")
+        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(api.last_official_search_diagnostics["query_count"], 2)
+        self.assertEqual(
+            api.last_official_search_diagnostics["query_variants"],
+            ["exact_site_scoped", "broad_site_scoped"],
+        )
+        from urllib.parse import parse_qs, urlparse
+        broad_query = parse_qs(
+            urlparse(api.client.post.call_args_list[1].kwargs["json"]["url"]).query
+        )["q"][0]
+        self.assertIn("(site:imdb.com/title (A Short Film About Killing))", broad_query)
+        self.assertIn("(site:themoviedb.org/movie (A Short Film About Killing))", broad_query)
+        self.assertNotIn("1988", broad_query)
 
     def test_title_search_parses_documented_brightdata_body_organic_shape(self):
         body = {
@@ -695,7 +767,9 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
 
         self.assertEqual(rows, [])
         self.assertEqual(api.last_official_search_diagnostics["status"], "no_official_results")
-        self.assertEqual(api.last_official_search_diagnostics["google_redirect_unwrapped_count"], 1)
+        # Both bounded title-search passes see the same Google tracking result.
+        self.assertEqual(api.last_official_search_diagnostics["google_redirect_unwrapped_count"], 2)
+        self.assertEqual(api.last_official_search_diagnostics["query_count"], 2)
 
 
 if __name__ == "__main__":
