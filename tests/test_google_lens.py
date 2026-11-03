@@ -742,7 +742,9 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
 
         self.assertEqual(rows, [])
         self.assertEqual(api.last_official_search_diagnostics["status"], "no_official_results")
-        self.assertEqual(api.last_official_search_diagnostics["google_redirect_unwrapped_count"], 1)
+        # Both bounded title-search passes see the same Google tracking result.
+        self.assertEqual(api.last_official_search_diagnostics["google_redirect_unwrapped_count"], 2)
+        self.assertEqual(api.last_official_search_diagnostics["query_count"], 2)
 
 
 if __name__ == "__main__":
