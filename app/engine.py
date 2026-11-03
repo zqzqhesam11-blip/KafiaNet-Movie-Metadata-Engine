@@ -10,7 +10,8 @@ from app.config import Settings
 from app.github_api import GitHubAPI
 from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, tmdb_movie_url_diagnostics
 from app.local_ocr import LocalPosterOCR
-from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
+from app.google_lens import BrightDataQuotaError  # legacy exception compatibility
+from app.tineye_api import TinEyeAPIClient, TinEyeAPIError
 from app.tmdb import TMDBClient
 from app.wikipedia import WikipediaClient
 
@@ -64,9 +65,8 @@ class MetadataEngine:
             settings.http_timeout_seconds,
         )
         self.wikipedia = WikipediaClient(timeout=settings.http_timeout_seconds)
-        self.reverse_image = BrightDataGoogleLensClient(
-            settings.brightdata_api_key,
-            settings.brightdata_serp_zone,
+        self.reverse_image = TinEyeAPIClient(
+            settings.tineye_api_key,
             timeout=max(45, settings.http_timeout_seconds),
         )
         self.local_ocr = (
@@ -86,10 +86,10 @@ class MetadataEngine:
             self.local_ocr.close()
 
     def _stop_for_provider_server_error(self, diagnostics: Any) -> bool:
-        """Stop the remaining batch after an exhausted Bright Data 5xx response."""
+        """Stop the remaining batch after a TinEye server-side failure."""
         if not isinstance(diagnostics, dict):
             return False
-        raw_status = diagnostics.get("http_status")
+        raw_status = diagnostics.get("api_code") or diagnostics.get("http_status")
         try:
             status_code = int(raw_status)
         except (TypeError, ValueError):
@@ -107,7 +107,8 @@ class MetadataEngine:
         try:
             return self.reverse_image.search_by_image_url(image_url)
         except BrightDataQuotaError as exc:
-            # Free quota exhaustion and provider throttling stop the whole batch.
+            # Retained only for tests/legacy injected providers; TinEye uses its
+            # own typed errors below.
             self._stop_batch = True
             self._provider_stop_status = exc.status_code
             self._provider_stop_reason = "provider_quota_or_throttle"
@@ -116,9 +117,41 @@ class MetadataEngine:
                 "message": str(exc)[:300],
                 "stop_batch": True,
             }]
+        except TinEyeAPIError as exc:
+            diagnostics = getattr(self.reverse_image, "last_lens_diagnostics", {})
+            status = exc.api_code or exc.status_code
+            stop_batch = (
+                status in {401, 402, 403, 429}
+                or status is None
+                or (isinstance(status, int) and (status >= 500 or (status == 200 and exc.api_code is None)))
+            )
+            if stop_batch:
+                self._stop_batch = True
+                self._provider_stop_status = status
+                self._provider_stop_reason = (
+                    "tineye_auth_quota_or_throttle"
+                    if status in {401, 402, 403, 429}
+                    else "provider_server_error"
+                    if isinstance(status, int) and status >= 500
+                    else "provider_network_error"
+                )
+            result = {
+                "error": type(exc).__name__,
+                "message": str(exc)[:300],
+                "provider": "tineye_official_api",
+            }
+            if isinstance(diagnostics, dict):
+                result["diagnostics"] = {
+                    key: diagnostics.get(key)
+                    for key in ("http_status", "api_code", "status")
+                    if diagnostics.get(key) is not None
+                }
+            if stop_batch:
+                result["stop_batch"] = True
+            return [result]
         except Exception as exc:
-            # Exhausted upstream 5xx retries indicate a provider-side failure.
-            # Stop before querying every remaining poster and burning more quota.
+            # Stop after exhausted provider server failures; a failed request is
+            # never converted into a successful empty match list.
             diagnostics = getattr(self.reverse_image, "last_lens_diagnostics", {})
             stop_batch = self._stop_for_provider_server_error(diagnostics)
             result = {"error": type(exc).__name__, "message": str(exc)[:300]}
@@ -130,13 +163,13 @@ class MetadataEngine:
         self,
         reverse_image_results: list[dict[str, Any]],
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
-        """Resolve only official TMDB/IMDb identifiers, with a Lens-derived title-search fallback.
+        """Resolve only official TMDB/IMDb identifiers found in TinEye backlinks.
 
-        Direct Lens links are preferred. If Lens exposes no official movie ID,
-        one Google SERP query is built only from Lens result titles and direct
-        Google Play movie URLs. The source-folder name and local image filename
-        are never inputs. IMDb IDs are mapped through TMDB /find, then every
-        candidate is verified through TMDB movie details.
+        Direct TinEye backlinks are the only automatic identity inputs. Matched-image
+        names can support review suggestions, but never establish identity. The
+        source-folder name and local image filename are never inputs. IMDb IDs
+        are mapped through TMDB /find, then every candidate is verified through
+        TMDB movie details.
         """
         reverse_image_failed = any(
             isinstance(item, dict) and item.get("error")
@@ -178,7 +211,7 @@ class MetadataEngine:
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "Google Lens image lookup or URL resolution failed; no movie identity was guessed",
+                "reason": "TinEye image lookup failed; no movie identity was guessed",
                 "candidate_ids": [],
             }, evidence
 
@@ -188,7 +221,7 @@ class MetadataEngine:
         title_search_imdb_ids: list[str] = []
         title_search_diagnostics: dict[str, Any] = {
             "status": "skipped_direct_official_id_present"
-            if (lens_tmdb_ids or lens_imdb_ids) else "unavailable",
+            if (lens_tmdb_ids or lens_imdb_ids) else "not_run_tineye_has_no_text_search",
             "query_count": 0,
             "title_hints": [],
             "year_hint": None,
@@ -199,15 +232,23 @@ class MetadataEngine:
             "error": None,
         }
 
-        # Fallback only when Lens itself returned no official TMDB/IMDb ID.
-        # Its single query is derived exclusively from Lens result titles and
-        # direct Google Play movie URLs, never from the source folder or filename.
+        # Optional provider-specific official-page fallback. TinEye does not
+        # implement a text search; matched-image names remain review-only.
         if not lens_tmdb_ids and not lens_imdb_ids:
+            reverse_image_client = getattr(self, "reverse_image", None)
             title_searcher = getattr(
-                getattr(self, "reverse_image", None),
-                "search_official_movie_pages_from_lens",
+                reverse_image_client,
+                "search_official_movie_pages_from_reverse_image",
                 None,
             )
+            if not callable(title_searcher):
+                # Compatibility for injected legacy Lens clients only. The
+                # active TinEye REST client intentionally has no text search.
+                title_searcher = getattr(
+                    reverse_image_client,
+                    "search_official_movie_pages_from_lens",
+                    None,
+                )
             if callable(title_searcher):
                 title_search_rows: list[dict[str, Any]] = []
                 try:
@@ -257,13 +298,13 @@ class MetadataEngine:
                 lens_imdb_ids = list(dict.fromkeys([*lens_imdb_ids, *title_search_imdb_ids]))
 
         evidence["strategy"] = (
-            "google_lens_official_id"
+            "tineye_official_id"
             if (lens_tmdb_ids_from_lens or lens_imdb_ids_from_lens)
-            else "lens_derived_google_official_title_search"
+            else "tineye_image_name_review_suggestion"
         )
         evidence["official_title_search"] = {
-            "source": "google_lens_result_titles_and_direct_play_store_urls",
-            "status": title_search_diagnostics.get("status", "unavailable"),
+            "source": "tineye_official_backlinks_and_matched_image_names",
+            "status": title_search_diagnostics.get("status", "not_run_tineye_has_no_text_search"),
             "query_count": title_search_diagnostics.get("query_count", 0),
             "query_variants": list(title_search_diagnostics.get("query_variants") or []),
             "title_hints": list(title_search_diagnostics.get("title_hints") or [])[:5],
@@ -279,31 +320,31 @@ class MetadataEngine:
             "imdb_ids": list(title_search_imdb_ids),
         }
         evidence["id_resolution"]["strategy"] = (
-            "lens_official_id_or_lens_derived_google_official_title_search_then_tmdb_find"
+            "tineye_official_id_then_tmdb_find"
         )
         evidence["id_resolution"]["tmdb_ids_seen"] = list(lens_tmdb_ids)
         evidence["id_resolution"]["imdb_ids_seen"] = list(lens_imdb_ids)
-        evidence["id_resolution"]["google_title_search_tmdb_ids"] = list(title_search_tmdb_ids)
-        evidence["id_resolution"]["google_title_search_imdb_ids"] = list(title_search_imdb_ids)
+        evidence["id_resolution"]["provider_title_search_tmdb_ids"] = list(title_search_tmdb_ids)
+        evidence["id_resolution"]["provider_title_search_imdb_ids"] = list(title_search_imdb_ids)
         tmdb_id_lookup.update({
             "status": "resolving" if (lens_tmdb_ids or lens_imdb_ids) else "no_tmdb_id",
             "tmdb_ids": list(lens_tmdb_ids),
             "direct_tmdb_ids": list(lens_tmdb_ids_from_lens),
             "imdb_ids": list(lens_imdb_ids),
-            "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
-            "google_title_search_imdb_ids": list(title_search_imdb_ids),
+            "provider_title_search_tmdb_ids": list(title_search_tmdb_ids),
+            "provider_title_search_imdb_ids": list(title_search_imdb_ids),
         })
         evidence["tmdb_ids"] = list(lens_tmdb_ids)
         evidence["imdb_ids"] = list(lens_imdb_ids)
 
         if not lens_tmdb_ids and not lens_imdb_ids:
             reason = (
-                "Lens returned no direct official IDs and the Lens-derived Google title search "
-                "found no official TMDB/IMDb movie URL with a usable numeric identifier"
+                "TinEye returned no official TMDB/IMDb backlink; matched-image names are review-only "
+                "and cannot establish identity"
             )
             if title_search_diagnostics.get("error"):
                 reason = (
-                    "Lens returned no official IDs and the Lens-derived Google title search failed: "
+                    "TinEye returned no official backlink and the optional provider lookup failed: "
                     + str(title_search_diagnostics.get("error"))[:220]
                 )
             return None, {
@@ -317,7 +358,7 @@ class MetadataEngine:
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "Bright Data quota or request limit reached during official title search; batch stopped",
+                "reason": "TinEye API error stopped the batch before additional poster searches",
                 "candidate_ids": [],
             }, evidence
 
@@ -389,7 +430,7 @@ class MetadataEngine:
                 "status": "review",
                 "confidence": 0.0,
                 "reason": (
-                    f"Google Lens official links resolved to {len(candidate_tmdb_ids)} different "
+                    f"TinEye official links resolved to {len(candidate_tmdb_ids)} different "
                     f"TMDB movie IDs; the safe lookup limit is {MAX_LENS_TMDB_ID_CANDIDATES}"
                 ),
                 "candidate_ids": candidate_tmdb_ids,
@@ -488,14 +529,14 @@ class MetadataEngine:
         evidence["candidate_identities"] = identities
 
         # Multiple different official TMDB movie IDs remain a conflict. Never
-        # select one using Lens captions, snippets, folder names, or filenames.
+        # select one using matched-image captions, snippets, folder names, or filenames.
         if len(identities) != 1:
             tmdb_id_lookup["status"] = "ambiguous_multiple_tmdb_ids"
             return None, {
                 "status": "review",
                 "confidence": 0.0,
                 "reason": (
-                    "Google Lens official TMDB/IMDb links resolved to multiple different "
+                     "TinEye official TMDB/IMDb backlinks resolved to multiple different "
                     "TMDB movie IDs; the image identity is ambiguous"
                 ),
                 "candidate_ids": sorted(resolved),
@@ -521,32 +562,32 @@ class MetadataEngine:
             for value in expected_imdb_ids_by_tmdb.get(selected_id, [])
         )
         if has_direct_tmdb_id and has_imdb_id:
-            identity_source = "google_lens_official_tmdb_and_imdb_ids"
-            identity_method = "lens_tmdb_and_imdb_id_lookup"
+            identity_source = "tineye_official_tmdb_and_imdb_ids"
+            identity_method = "tineye_tmdb_and_imdb_id_lookup"
             verification = "official_tmdb_url_plus_tmdb_find_imdb_id_and_movie_details"
         elif has_title_search_tmdb_id and has_title_search_imdb_id:
-            identity_source = "google_serp_official_tmdb_and_imdb_ids"
-            identity_method = "lens_title_search_tmdb_and_imdb_id_lookup"
-            verification = "official_tmdb_and_imdb_urls_from_lens_derived_search_then_tmdb_find_and_matching_movie_details"
+            identity_source = "tineye_official_tmdb_and_imdb_ids"
+            identity_method = "tineye_backlink_tmdb_and_imdb_id_lookup"
+            verification = "official_tmdb_and_imdb_backlinks_then_tmdb_find_and_matching_movie_details"
         elif has_title_search_imdb_id:
-            identity_source = "google_serp_official_imdb_id_via_tmdb_find"
-            identity_method = "lens_title_search_imdb_id_tmdb_find"
-            verification = "official_imdb_url_from_lens_derived_search_then_tmdb_find_and_matching_movie_details"
+            identity_source = "tineye_official_imdb_id_via_tmdb_find"
+            identity_method = "tineye_imdb_id_tmdb_find"
+            verification = "official_imdb_backlink_then_tmdb_find_and_matching_movie_details"
         elif has_imdb_id:
-            identity_source = "google_lens_official_imdb_id_via_tmdb_find"
-            identity_method = "lens_imdb_id_tmdb_find"
+            identity_source = "tineye_official_imdb_id_via_tmdb_find"
+            identity_method = "tineye_imdb_id_tmdb_find"
             verification = "official_imdb_url_then_tmdb_find_and_matching_movie_details_external_id"
         elif has_direct_tmdb_id:
-            identity_source = "google_lens_official_tmdb_movie_id"
-            identity_method = "lens_tmdb_movie_id_lookup"
-            verification = "tmdb_movie_details_id_equals_lens_movie_id"
+            identity_source = "tineye_official_tmdb_movie_id"
+            identity_method = "tineye_tmdb_movie_id_lookup"
+            verification = "tmdb_movie_details_id_equals_tineye_movie_id"
         elif has_title_search_tmdb_id:
-            identity_source = "google_serp_official_tmdb_movie_id"
-            identity_method = "lens_title_search_tmdb_movie_id_lookup"
-            verification = "official_tmdb_url_from_lens_derived_search_and_matching_tmdb_movie_details_id"
+            identity_source = "tineye_official_tmdb_movie_id"
+            identity_method = "tineye_tmdb_movie_id_lookup"
+            verification = "official_tmdb_backlink_and_matching_tmdb_movie_details_id"
         else:
-            identity_source = "google_official_tmdb_movie_id"
-            identity_method = "official_tmdb_movie_id_lookup"
+            identity_source = "tineye_official_tmdb_movie_id"
+            identity_method = "tineye_official_tmdb_movie_id_lookup"
             verification = "official_tmdb_movie_details_id_verification"
 
         evidence["resolved_identity"] = {
@@ -556,8 +597,8 @@ class MetadataEngine:
             "verification": verification,
             "official_tmdb_ids": list(lens_tmdb_ids),
             "official_imdb_ids": list(lens_imdb_ids),
-            "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
-            "google_title_search_imdb_ids": list(title_search_imdb_ids),
+            "provider_title_search_tmdb_ids": list(title_search_tmdb_ids),
+            "provider_title_search_imdb_ids": list(title_search_imdb_ids),
             "folder_name_used": False,
             "image_filename_used": False,
         }
@@ -570,9 +611,9 @@ class MetadataEngine:
             "imdb_id": selected["imdb_id"],
             "folder_name_used_for_matching": False,
             "reason": (
-                "TMDB movie details confirmed official TMDB and IMDb links returned by the Lens-derived Google search"
+                "TMDB movie details confirmed official TMDB and IMDb IDs from TinEye backlinks"
                 if has_title_search_tmdb_id and has_title_search_imdb_id
-                else "TMDB confirmed the movie ID from an official TMDB link"
+                else "TMDB confirmed the movie ID from an official TinEye TMDB backlink"
                 if has_direct_tmdb_id and not has_imdb_id
                 else "TMDB /find mapped an official IMDb title ID to a movie and movie details confirmed the same IMDb ID"
                 if has_imdb_id and not has_direct_tmdb_id
@@ -681,9 +722,9 @@ class MetadataEngine:
 
     def _wikipedia_tmdb_suggestions_from_lens(
         self,
-        lens_results: list[dict[str, Any]],
+        reverse_image_results: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Use Lens titles -> Wikipedia lead/year -> TMDB search, for review only.
+        """Use TinEye matched-image names -> Wikipedia lead/year -> TMDB search, for review only.
 
         This pathway deliberately cannot return a candidate identity or set READY.
         The folder name and local image filename are never accepted as inputs.
@@ -707,18 +748,21 @@ class MetadataEngine:
 
         if any(
             isinstance(row, dict) and row.get("error")
-            for row in (lens_results or [])
+            for row in (reverse_image_results or [])
         ):
             output["status"] = "skipped_lens_error"
             return output
 
-        lens_client = getattr(self, "reverse_image", None)
-        hint_extractor = getattr(lens_client, "title_hints_from_lens_results", None)
+        reverse_image_client = getattr(self, "reverse_image", None)
+        hint_extractor = getattr(reverse_image_client, "title_hints_from_reverse_image_results", None)
+        if not callable(hint_extractor):
+            # Transitional adapter for unit tests and records produced by the former Lens client.
+            hint_extractor = getattr(reverse_image_client, "title_hints_from_lens_results", None)
         if not callable(hint_extractor):
             output["status"] = "title_hints_unavailable"
             return output
         try:
-            raw_hints, _lens_year_hint = hint_extractor(list(lens_results or []))
+            raw_hints, _tineye_year_hint = hint_extractor(list(reverse_image_results or []))
             title_hints: list[str] = []
             seen_hints: set[str] = set()
             for value in raw_hints or []:
@@ -734,7 +778,7 @@ class MetadataEngine:
         except Exception as exc:
             output["status"] = "title_hint_error"
             output["errors"].append({
-                "stage": "lens_title_hints",
+                "stage": "tineye_image_name_hints",
                 "type": type(exc).__name__,
                 "message": str(exc).replace("\n", " ")[:220],
             })
@@ -902,6 +946,34 @@ class MetadataEngine:
         image_path = item["image_path"]
         image_url = self.github.raw_url(image_path)
 
+        # Reset per-item provider diagnostics before every poster so a failed
+        # or skipped lookup cannot inherit counters/title hints from the prior film.
+        reverse_image_client = getattr(self, "reverse_image", None)
+        if reverse_image_client is not None:
+            try:
+                reverse_image_client.last_lens_diagnostics = {
+                    "provider": "tineye_official_api",
+                    "status": "not_run",
+                    "http_status": None,
+                    "api_code": None,
+                    "attempts": 0,
+                    "match_count": 0,
+                    "backlink_count": 0,
+                    "result_count": 0,
+                }
+                reverse_image_client.last_official_search_diagnostics = {
+                    "status": "not_run",
+                    "query_count": 0,
+                    "query_variants": [],
+                    "title_hints": [],
+                    "attempts": 0,
+                    "organic_result_count": 0,
+                    "official_url_count": 0,
+                }
+            except (AttributeError, TypeError):
+                # Lightweight immutable test doubles may not allow diagnostic state.
+                pass
+
         latest_reverse_image_results = self._reverse_image_results(image_url)
         latest_errors = [
             item for item in latest_reverse_image_results
@@ -917,8 +989,8 @@ class MetadataEngine:
             if self.reverse_image else {}
         )
 
-        # A temporary empty/unresponsive Google Lens response must not erase useful
-        # reverse-image evidence already stored for this exact poster.
+        # A temporary empty/unresponsive TinEye response must not erase useful
+        # same-provider evidence already stored for this exact poster.
         reverse_image_results = latest_reverse_image_results
         reverse_image_results_source = "live"
         if not latest_reverse_image_results or latest_errors:
@@ -937,11 +1009,15 @@ class MetadataEngine:
                 or (previous_reverse_image.get("evidence") or {}).get("lens_diagnostics")
                 or {}
             )
-            # Evidence from the former visual_matches tab is deliberately stale:
-            # only results explicitly tagged as exact_matches may be reused.
+            # Reuse current TinEye API evidence, or previously saved Lens
+            # exact_matches evidence from the documented transitional schema.
+            # Old SearXNG/scraped TinEye rows and visual_matches are not trusted.
+            saved_provider = str(previous_reverse_image.get("provider") or "").casefold()
+            saved_tineye_results = saved_provider == "tineye_official_api"
+            saved_exact_lens_results = saved_query_diagnostics.get("lens_tab") == "exact_matches"
             saved_results = (
                 previous_reverse_image.get("results") or []
-                if saved_query_diagnostics.get("lens_tab") == "exact_matches"
+                if saved_tineye_results or saved_exact_lens_results
                 else []
             )
             reusable_results = [
@@ -954,8 +1030,8 @@ class MetadataEngine:
                 reverse_image_results = reusable_results
                 reverse_image_results_source = "previous_saved"
 
-        # Google /goto links hide the real page behind an opaque token. Resolve
-        # all Lens result URLs before extracting official IMDb/TMDB identifiers.
+        # Normalize provider backlink URLs before extracting official IMDb/TMDB
+        # identifiers; the TinEye client does not unwrap third-party redirects.
         resolver = getattr(self.reverse_image, "resolve_result_urls", None)
         if callable(resolver):
             reverse_image_results = resolver(reverse_image_results)
@@ -1063,8 +1139,8 @@ class MetadataEngine:
                 "queries": [],
             }
         )
-        # Recompute after _find_movie: its official title-search fallback may
-        # append direct TMDB/IMDb URLs found from Lens-derived title hints.
+        # Recompute after _find_movie so final diagnostics include the provider
+        # supplied official backlinks.
         lens_diagnostics.update(tmdb_movie_url_diagnostics(reverse_image_results))
         title_search_diag = getattr(
             self.reverse_image, "last_official_search_diagnostics", {}
@@ -1098,7 +1174,8 @@ class MetadataEngine:
             ),
         })
         reverse_image_evidence["results_source"] = reverse_image_results_source
-        reverse_image_evidence["lens_diagnostics"] = lens_diagnostics
+        reverse_image_evidence["provider_diagnostics"] = lens_diagnostics
+        reverse_image_evidence["lens_diagnostics"] = lens_diagnostics  # legacy schema compatibility
         reverse_image_evidence["wikipedia_tmdb_suggestions"] = {
             "status": wikipedia_tmdb_suggestions.get("status"),
             "identity_evidence": False,
@@ -1130,7 +1207,7 @@ class MetadataEngine:
             },
             "reverse_image": {
                 "enabled": self.reverse_image is not None,
-                "provider": "google_lens_brightdata",
+                "provider": "tineye_official_api",
                 "results": reverse_image_results,
                 "results_source": reverse_image_results_source,
                 "latest_query": {
@@ -1150,7 +1227,7 @@ class MetadataEngine:
                 self._details_cache[tmdb_id] = details
             normalized = self.tmdb.normalize_details(details)
             # Use the title returned by the verified TMDB movie record as-is.
-            # Do not infer or select a title from Lens text, countries or market counts.
+            # Do not infer or select a title from TinEye matched-image names, countries or market counts.
             canonical_title = (
                 str(normalized.get("title") or normalized.get("original_title") or "").strip()
                 or f"TMDB Movie {tmdb_id}"
@@ -1249,7 +1326,7 @@ class MetadataEngine:
                 )
             except Exception as exc:
                 # Isolate failures to this film. Persist it as REVIEW so a later
-                # batch can retry it; one invalid Lens backlink or API response
+                # batch can retry it; one invalid TinEye backlink or API response
                 # must not abort the remaining films in the batch.
                 folder = item["folder"]
                 image_path = item["image_path"]
@@ -1290,7 +1367,7 @@ class MetadataEngine:
                     },
                     "reverse_image": {
                         "enabled": self.reverse_image is not None,
-                "provider": "google_lens_brightdata",
+                "provider": "tineye_official_api",
                         "results": previous_reverse_image_results,
                         "results_source": "previous_saved" if previous_reverse_image_results else "none",
                         "latest_query": {
@@ -1428,7 +1505,7 @@ class MetadataEngine:
                 )
             if self._stop_batch:
                 print(
-                    f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status} "
+                    f"[KafiaNet] STOP: TinEye API status {self._provider_stop_status} "
                     f"({self._provider_stop_reason or 'provider_limit'}); "
                     "remaining posters were not queried and this batch will not write catalog changes.",
                     flush=True,

@@ -118,7 +118,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(match["status"], "ready")
         self.assertEqual(match["tmdb_id"], 10754)
         self.assertEqual(match["imdb_id"], "tt0095468")
-        self.assertEqual(match["identity_method"], "lens_tmdb_movie_id_lookup")
+        self.assertEqual(match["identity_method"], "tineye_tmdb_movie_id_lookup")
         self.assertEqual(evidence["tmdb_ids"], [10754])
         self.assertEqual(evidence["tmdb_id_lookup"]["status"], "resolved")
         self.assertEqual(engine.tmdb.details_calls, [10754])
@@ -152,7 +152,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(match["status"], "ready")
         self.assertEqual(match["tmdb_id"], 10754)
         self.assertEqual(match["imdb_id"], "tt0095468")
-        self.assertEqual(match["identity_method"], "lens_imdb_id_tmdb_find")
+        self.assertEqual(match["identity_method"], "tineye_imdb_id_tmdb_find")
         self.assertEqual(evidence["tmdb_ids"], [10754])
         self.assertEqual(evidence["imdb_ids"], ["tt0095468"])
         self.assertEqual(evidence["id_resolution"]["imdb_to_tmdb_ids"], {"tt0095468": [10754]})
@@ -282,7 +282,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         )
         self.assertEqual(
             record["identity"]["source"],
-            "google_lens_official_tmdb_movie_id",
+            "tineye_official_tmdb_movie_id",
         )
         self.assertFalse(record["original"]["folder_name_used_for_matching"])
 

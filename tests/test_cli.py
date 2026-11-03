@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from app.cli import format_summary
+from app.cli import check_tineye, format_summary
 
 
 class CliSummaryTests(unittest.TestCase):
@@ -57,6 +59,29 @@ class CliSummaryTests(unittest.TestCase):
         self.assertIn("planned_image_moves=3", output)
         self.assertIn("planned_deletes=1", output)
         self.assertNotIn("a.json", output)
+
+    def test_check_tineye_reads_remaining_credits_without_searching_a_poster(self):
+        settings = SimpleNamespace(
+            tineye_api_key="test-key",
+            http_timeout_seconds=60,
+            validate_tineye=lambda: None,
+        )
+        fake_client = SimpleNamespace(
+            remaining_searches=lambda: {
+                "total_remaining_searches": 37,
+                "bundles": [{"remaining_searches": 37, "expire_date": "2026-12-01"}],
+            },
+            close=lambda: None,
+        )
+        with patch("app.cli.TinEyeAPIClient", return_value=fake_client) as client_factory:
+            with patch("builtins.print") as printed:
+                result = check_tineye(settings)
+
+        self.assertEqual(result, 0)
+        client_factory.assert_called_once()
+        output = "\\n".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn("remaining_searches=37", output)
+        self.assertIn("No image search was performed", output)
 
 
 if __name__ == "__main__":
