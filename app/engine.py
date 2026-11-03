@@ -618,7 +618,7 @@ class MetadataEngine:
             "title_search_official_urls": title_search_diag.get("official_url_count", 0),
             "title_search_query_count": title_search_diag.get("query_count", 0),
             "title_search_query_variants": list(title_search_diag.get("query_variants") or []),
-            "title_search_hints": list(title_search_diag.get("title_hints") or [])[:3],
+            "title_search_hints": list(title_search_diag.get("title_hints") or [])[:5],
             "title_search_candidate_urls": title_search_diag.get("candidate_url_count", 0),
             "title_search_google_redirects": title_search_diag.get("google_redirect_count", 0),
             "title_search_unwrapped_redirects": title_search_diag.get("google_redirect_unwrapped_count", 0),
