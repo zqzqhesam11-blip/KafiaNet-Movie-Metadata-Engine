@@ -8,12 +8,15 @@ from typing import Any
 from app.config import Settings
 from app.github_api import GitHubAPI
 from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, tmdb_movie_url_diagnostics
+from app.local_ocr import LocalPosterOCR
 from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
 from app.tmdb import TMDBClient
 
 
 SCHEMA_VERSION = 3
 MAX_LENS_TMDB_ID_CANDIDATES = 10
+MAX_OCR_TMDB_QUERIES = 3
+MAX_OCR_TMDB_RESULTS_PER_QUERY = 5
 TRANSIENT_PROVIDER_HTTP_STATUSES = {500, 502, 503, 504}
 
 
@@ -45,12 +48,15 @@ class MetadataEngine:
             settings.brightdata_serp_zone,
             timeout=max(45, settings.http_timeout_seconds),
         )
+        self.local_ocr = LocalPosterOCR(timeout=settings.http_timeout_seconds)
 
     def close(self) -> None:
         self.github.close()
         self.tmdb.close()
         if self.reverse_image:
             self.reverse_image.close()
+        if getattr(self, "local_ocr", None):
+            self.local_ocr.close()
 
     def _stop_for_provider_server_error(self, diagnostics: Any) -> bool:
         """Stop the remaining batch after an exhausted Bright Data 5xx response."""
@@ -547,6 +553,105 @@ class MetadataEngine:
             ),
         }, evidence
 
+    def _tmdb_suggestions_from_ocr(
+        self,
+        ocr_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Search TMDB from poster OCR text for reviewer suggestions only.
+
+        These results are deliberately isolated from _find_movie and can never
+        supply an identity, candidate ID, READY status, or catalog filename.
+        """
+        output: dict[str, Any] = {
+            "provider": "tmdb_search_movie",
+            "status": "not_run",
+            "identity_evidence": False,
+            "automatic_match_allowed": False,
+            "query_count": 0,
+            "queries": [],
+        }
+        if not isinstance(ocr_result, dict) or ocr_result.get("status") != "ok":
+            output["status"] = str((ocr_result or {}).get("status") or "unavailable")
+            return output
+
+        hints = ocr_result.get("title_hints") or []
+        queries: list[str] = []
+        seen: set[str] = set()
+        for hint in hints:
+            if not isinstance(hint, dict):
+                continue
+            query = " ".join(str(hint.get("text") or "").split())
+            key = query.casefold()
+            if len(query) < 2 or key in seen:
+                continue
+            seen.add(key)
+            queries.append(query)
+            if len(queries) >= MAX_OCR_TMDB_QUERIES:
+                break
+
+        if not queries:
+            output["status"] = "no_title_hints"
+            return output
+
+        search_rows: list[dict[str, Any]] = []
+        failed_queries = 0
+        for query in queries:
+            hint = next(
+                (
+                    row for row in hints
+                    if isinstance(row, dict)
+                    and " ".join(str(row.get("text") or "").split()).casefold() == query.casefold()
+                ),
+                {},
+            )
+            try:
+                payload = self.tmdb.search_movies(query)
+                results = payload.get("results") or []
+                compact_results: list[dict[str, Any]] = []
+                for row in results:
+                    if not isinstance(row, dict):
+                        continue
+                    raw_id = row.get("id")
+                    if not str(raw_id or "").isdigit():
+                        continue
+                    release_date = str(row.get("release_date") or "")
+                    compact_results.append({
+                        "tmdb_id": int(raw_id),
+                        "title": row.get("title"),
+                        "original_title": row.get("original_title"),
+                        "release_date": release_date or None,
+                        "year": int(release_date[:4]) if release_date[:4].isdigit() else None,
+                        "vote_average": row.get("vote_average"),
+                        "poster_path": row.get("poster_path"),
+                    })
+                    if len(compact_results) >= MAX_OCR_TMDB_RESULTS_PER_QUERY:
+                        break
+                search_rows.append({
+                    "query": query,
+                    "ocr_confidence": hint.get("confidence"),
+                    "results": compact_results,
+                })
+            except Exception as exc:
+                failed_queries += 1
+                search_rows.append({
+                    "query": query,
+                    "ocr_confidence": hint.get("confidence"),
+                    "results": [],
+                    "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                })
+
+        output.update({
+            "status": (
+                "suggestions_only"
+                if any(row.get("results") for row in search_rows)
+                else "error" if failed_queries == len(queries)
+                else "no_candidates"
+            ),
+            "query_count": len(queries),
+            "queries": search_rows,
+        })
+        return output
+
     def _record_for_folder(
         self,
         item: dict[str, str],
@@ -633,7 +738,57 @@ class MetadataEngine:
                 if key in resolver_diagnostics:
                     lens_diagnostics[key] = resolver_diagnostics[key]
 
+        # OCR receives only the public poster image URL generated from the GitHub image path.
+        # Folder names and local filenames are never passed to OCR or title search.
+        ocr_result: dict[str, Any] = {
+            "provider": "rapidocr_onnxruntime_cpu",
+            "source": "poster_image_pixels",
+            "identity_evidence": False,
+            "status": "skipped_official_id_present",
+            "text_lines": [],
+            "title_hints": [],
+        }
+        has_lens_official_id = bool(
+            extract_tmdb_movie_ids(reverse_image_results)
+            or extract_imdb_ids(reverse_image_results)
+        )
+        local_ocr = getattr(self, "local_ocr", None)
+        if not has_lens_official_id and local_ocr is not None:
+            try:
+                ocr_result = local_ocr.extract_from_url(image_url)
+                if not isinstance(ocr_result, dict):
+                    ocr_result = {
+                        "provider": "rapidocr_onnxruntime_cpu",
+                        "source": "poster_image_pixels",
+                        "identity_evidence": False,
+                        "status": "invalid_result",
+                        "text_lines": [],
+                        "title_hints": [],
+                    }
+            except Exception as exc:
+                ocr_result = {
+                    "provider": "rapidocr_onnxruntime_cpu",
+                    "source": "poster_image_pixels",
+                    "identity_evidence": False,
+                    "status": "error",
+                    "text_lines": [],
+                    "title_hints": [],
+                    "error": f"{type(exc).__name__}: {str(exc)[:240]}",
+                }
+
         candidate, match, reverse_image_evidence = self._find_movie(reverse_image_results)
+        ocr_tmdb_suggestions = (
+            self._tmdb_suggestions_from_ocr(ocr_result)
+            if not candidate
+            else {
+                "provider": "tmdb_search_movie",
+                "status": "skipped_official_identity_resolved",
+                "identity_evidence": False,
+                "automatic_match_allowed": False,
+                "query_count": 0,
+                "queries": [],
+            }
+        )
         # Recompute after _find_movie: its official title-search fallback may
         # append direct TMDB/IMDb URLs found from Lens-derived title hints.
         lens_diagnostics.update(tmdb_movie_url_diagnostics(reverse_image_results))
@@ -676,6 +831,10 @@ class MetadataEngine:
                 "folder_name_used_for_matching": False,
             },
             "match": match,
+            "ocr": {
+                **ocr_result,
+                "tmdb_suggestions": ocr_tmdb_suggestions,
+            },
             "reverse_image": {
                 "enabled": self.reverse_image is not None,
                 "provider": "google_lens_brightdata",
