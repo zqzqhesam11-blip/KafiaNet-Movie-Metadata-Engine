@@ -596,16 +596,18 @@ class BrightDataGoogleLensClient:
         cls,
         results: list[dict[str, Any]],
     ) -> tuple[list[str], int | None]:
-        """Collect search phrases only from Lens result titles and direct Play Store URLs.
+        """Collect title hints from all Lens rows, prioritizing useful Play Store aliases.
 
-        Source-folder labels and local image filenames are not accepted by this API.
-        Google /goto wrappers are deliberately excluded because their destinations
-        are not known.
+        Source-folder labels and local image filenames are never accepted. Lens
+        sometimes places direct Google Play movie pages near the end of a long
+        exact-matches response, so scan every returned row before applying the
+        bounded hint limit.
         """
-        hints: list[str] = []
+        lens_hints: list[str] = []
+        play_hints: list[str] = []
         years: set[int] = set()
 
-        def add(value: str, *, include_year: bool = True) -> None:
+        def add(target: list[str], value: str, *, include_year: bool = True) -> None:
             title, year = cls._clean_title_hint(value)
             if include_year and year:
                 years.add(year)
@@ -614,17 +616,17 @@ class BrightDataGoogleLensClient:
             key = re.sub(r"\W+", " ", title.casefold()).strip()
             if not key or any(
                 re.sub(r"\W+", " ", old.casefold()).strip() == key
-                for old in hints
+                for old in target
             ):
                 return
-            hints.append(title)
+            target.append(title)
 
         for item in results or []:
             if not isinstance(item, dict) or item.get("error"):
                 continue
             title_value = item.get("title")
             if isinstance(title_value, str):
-                add(title_value)
+                add(lens_hints, title_value)
 
             urls: list[str] = []
             for key in ("url", "resolved_url", "url_candidates", "resolved_urls"):
@@ -649,15 +651,32 @@ class BrightDataGoogleLensClient:
                     continue
                 slug = parsed.path[len(prefix):].split("/", 1)[0]
                 if slug and not slug.isdigit():
-                    add(slug, include_year=False)
-                if len(hints) >= 3:
-                    break
-            if len(hints) >= 3:
-                break
+                    add(play_hints, slug, include_year=False)
 
-        # Only use a year explicitly present in the Lens result title text.
-        # A year embedded in a Play Store slug is not considered a release year.
-        return hints[:3], next(iter(years)) if len(years) == 1 else None
+        # Put a Play Store alias first only when it contributes a distinct title.
+        # If it merely repeats a Lens title, preserve Lens casing/order instead.
+        ordered_hints: list[str] = []
+        for play_title in play_hints:
+            play_key = re.sub(r"\W+", " ", play_title.casefold()).strip()
+            duplicates_lens = any(
+                re.sub(r"\W+", " ", lens_title.casefold()).strip() == play_key
+                for lens_title in lens_hints
+            )
+            if not duplicates_lens:
+                ordered_hints.append(play_title)
+
+        ordered_hints.extend(lens_hints)
+        for play_title in play_hints:
+            play_key = re.sub(r"\W+", " ", play_title.casefold()).strip()
+            if not any(
+                re.sub(r"\W+", " ", old.casefold()).strip() == play_key
+                for old in ordered_hints
+            ):
+                ordered_hints.append(play_title)
+
+        # Year evidence is accepted only from Lens result title text, never from
+        # a Play Store slug or any local folder/image name.
+        return ordered_hints[:5], next(iter(years)) if len(years) == 1 else None
 
     @staticmethod
     def _google_official_title_search_url(
