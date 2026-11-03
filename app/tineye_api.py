@@ -248,12 +248,34 @@ class TinEyeAPIClient:
             self.last_lens_diagnostics = dict(self.last_search_diagnostics)
             raise
 
-        data = payload.get("results") or {}
+        data = payload.get("results")
         if not isinstance(data, dict):
-            raise TinEyeAPIError("TinEye API response field 'results' is not an object")
-        matches = data.get("matches") or []
+            self.last_search_diagnostics.update({
+                "status": "error",
+                "http_status": HTTP_OK,
+                "api_code": HTTP_OK,
+                "error": "TinEye API response field 'results' is missing or is not an object",
+            })
+            self.last_lens_diagnostics = dict(self.last_search_diagnostics)
+            raise TinEyeAPIError(
+                "TinEye API response field 'results' is missing or is not an object",
+                status_code=HTTP_OK,
+                api_code=HTTP_OK,
+            )
+        matches = data.get("matches")
         if not isinstance(matches, list):
-            raise TinEyeAPIError("TinEye API response field 'results.matches' is not a list")
+            self.last_search_diagnostics.update({
+                "status": "error",
+                "http_status": HTTP_OK,
+                "api_code": HTTP_OK,
+                "error": "TinEye API response field 'results.matches' is missing or is not a list",
+            })
+            self.last_lens_diagnostics = dict(self.last_search_diagnostics)
+            raise TinEyeAPIError(
+                "TinEye API response field 'results.matches' is missing or is not a list",
+                status_code=HTTP_OK,
+                api_code=HTTP_OK,
+            )
 
         normalized: list[dict[str, Any]] = []
         backlink_count = 0
