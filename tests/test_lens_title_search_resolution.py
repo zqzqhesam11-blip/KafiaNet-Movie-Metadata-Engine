@@ -8,6 +8,42 @@ from app.engine import MetadataEngine
 
 
 class LensDerivedOfficialTitleResolutionTests(unittest.TestCase):
+    def test_official_title_search_5xx_stops_batch(self):
+        engine = MetadataEngine.__new__(MetadataEngine)
+        engine._details_cache = {}
+        engine._stop_batch = False
+        engine._provider_stop_status = None
+        searcher = Mock(side_effect=RuntimeError("Bright Data upstream HTTP 502"))
+        engine.reverse_image = SimpleNamespace(
+            search_official_movie_pages_from_lens=searcher,
+            last_official_search_diagnostics={
+                "status": "http_error",
+                "http_status": 502,
+                "query_count": 1,
+                "attempts": 3,
+                "error": "Bright Data service error HTTP 502",
+            },
+        )
+        engine.tmdb = Mock()
+
+        candidate, match, evidence = engine._find_movie([
+            {"title": "Movie title from Lens"}
+        ])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertTrue(engine._stop_batch)
+        self.assertEqual(engine._provider_stop_status, 502)
+        self.assertEqual(
+            evidence["official_title_search"]["status"],
+            "http_error",
+        )
+        self.assertEqual(
+            evidence["official_title_search"]["error"],
+            "Bright Data service error HTTP 502",
+        )
+        engine.tmdb.find_by_imdb_id.assert_not_called()
+
     def test_official_search_urls_are_resolved_and_verified_through_tmdb(self):
         tmdb_id = 10754
         imdb_id = "tt0095468"
