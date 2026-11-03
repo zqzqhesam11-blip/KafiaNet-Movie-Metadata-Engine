@@ -1468,7 +1468,7 @@ class MetadataEngine:
                 )
             if self._stop_batch:
                 print(
-                    f"[KafiaNet] STOP: TinEye API status {self._provider_stop_status} 
+                    f"[KafiaNet] STOP: TinEye API status {self._provider_stop_status} "
                     f"({self._provider_stop_reason or 'provider_limit'}); "
                     "remaining posters were not queried and this batch will not write catalog changes.",
                     flush=True,
