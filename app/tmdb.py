@@ -43,6 +43,22 @@ class TMDBClient:
             },
         )
 
+
+    def search_movie(self, query: str) -> dict[str, Any]:
+        """Search TMDB by an OCR-derived hint for REVIEW suggestions only."""
+        value = str(query or "").strip()
+        if not value or len(value) > 100:
+            raise ValueError("TMDB movie search query must contain 1-100 characters")
+        return self._get(
+            "/search/movie",
+            {
+                "query": value,
+                "include_adult": "false",
+                "language": self.language,
+                "page": 1,
+            },
+        )
+
     def movie_details(self, tmdb_id: int) -> dict[str, Any]:
         return self._get(
             f"/movie/{tmdb_id}",
