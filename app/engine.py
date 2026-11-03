@@ -616,6 +616,8 @@ class MetadataEngine:
             "title_search_results": title_search_diag.get("organic_result_count", 0),
             "title_search_official_urls": title_search_diag.get("official_url_count", 0),
             "title_search_query_count": title_search_diag.get("query_count", 0),
+            "title_search_query_variants": list(title_search_diag.get("query_variants") or []),
+            "title_search_hints": list(title_search_diag.get("title_hints") or [])[:3],
             "title_search_candidate_urls": title_search_diag.get("candidate_url_count", 0),
             "title_search_google_redirects": title_search_diag.get("google_redirect_count", 0),
             "title_search_unwrapped_redirects": title_search_diag.get("google_redirect_unwrapped_count", 0),
@@ -881,6 +883,8 @@ class MetadataEngine:
                 f"title_search_results={lens_diag.get('title_search_results', 0)} "
                 f"title_search_official_urls={lens_diag.get('title_search_official_urls', 0)} "
                 f"title_search_query_count={lens_diag.get('title_search_query_count', 0)} "
+                f"title_search_query_variants='{','.join(lens_diag.get('title_search_query_variants') or []) or 'none'}' "
+                f"title_search_hints='{safe_log_detail(' || '.join(lens_diag.get('title_search_hints') or []), 170)}' "
                 f"title_search_candidate_urls={lens_diag.get('title_search_candidate_urls', 0)} "
                 f"title_search_google_redirects={lens_diag.get('title_search_google_redirects', 0)} "
                 f"title_search_unwrapped_redirects={lens_diag.get('title_search_unwrapped_redirects', 0)} "
