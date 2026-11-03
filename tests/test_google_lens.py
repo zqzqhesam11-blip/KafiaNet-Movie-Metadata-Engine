@@ -405,6 +405,28 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertIn("öldürme üzerine kısa bir film", [value.casefold() for value in hints])
         self.assertNotIn("PRIVATE", " ".join(hints))
 
+    def test_late_play_store_title_is_not_lost_after_early_lens_hints(self):
+        lens_rows = [
+            {"title": "Unrelated poster caption number one"},
+            {"title": "Unrelated poster caption number two"},
+            {"title": "Unrelated poster caption number three"},
+            {"title": "Unrelated poster caption number four"},
+            {"title": "Google Play"},
+            {
+                "title": "Google Play",
+                "url": (
+                    "https://play.google.com/store/movies/details/"
+                    "Apollo_10_e_meio_aventura_na_era_espacial"
+                ),
+            },
+        ]
+
+        hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results(lens_rows)
+
+        self.assertEqual(hints[0], "Apollo 10 e meio aventura na era espacial")
+        self.assertIn("Unrelated poster caption number one", hints)
+        self.assertIsNone(year)
+
     def test_title_hint_year_is_not_guessed_from_play_store_slug(self):
         hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results([
             {
