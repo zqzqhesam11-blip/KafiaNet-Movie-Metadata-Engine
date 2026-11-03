@@ -35,6 +35,10 @@ def format_summary(result: dict[str, Any]) -> str:
             "NOTE: DRY_RUN performs live Google Lens lookups and, when no official ID is found, "
             "one Google Search query for official TMDB/IMDb pages; these requests consume free-tier quota."
         )
+        lines.append(
+            "NOTE: Local poster OCR is disabled by default (LOCAL_OCR_ENABLED=false); "
+            "it is not initialized unless explicitly enabled."
+        )
     else:
         lines.append(
             f"written_files={result.get('written_files', 0)} "
