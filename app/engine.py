@@ -48,7 +48,11 @@ class MetadataEngine:
             settings.brightdata_serp_zone,
             timeout=max(45, settings.http_timeout_seconds),
         )
-        self.local_ocr = LocalPosterOCR(timeout=settings.http_timeout_seconds)
+        self.local_ocr = (
+            LocalPosterOCR(timeout=settings.http_timeout_seconds)
+            if bool(getattr(settings, "local_ocr_enabled", False))
+            else None
+        )
 
     def close(self) -> None:
         self.github.close()
@@ -740,11 +744,16 @@ class MetadataEngine:
 
         # OCR receives only the public poster image URL generated from the GitHub image path.
         # Folder names and local filenames are never passed to OCR or title search.
+        local_ocr = getattr(self, "local_ocr", None)
         ocr_result: dict[str, Any] = {
             "provider": "rapidocr_onnxruntime_cpu",
             "source": "poster_image_pixels",
             "identity_evidence": False,
-            "status": "skipped_official_id_present",
+            "status": (
+                "disabled_by_configuration"
+                if local_ocr is None
+                else "skipped_official_id_present"
+            ),
             "text_lines": [],
             "title_hints": [],
         }
@@ -752,7 +761,6 @@ class MetadataEngine:
             extract_tmdb_movie_ids(reverse_image_results)
             or extract_imdb_ids(reverse_image_results)
         )
-        local_ocr = getattr(self, "local_ocr", None)
         if not has_lens_official_id and local_ocr is not None:
             try:
                 ocr_result = local_ocr.extract_from_url(image_url)

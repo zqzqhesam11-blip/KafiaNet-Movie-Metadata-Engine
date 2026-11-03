@@ -15,6 +15,7 @@ class Settings:
     tmdb_language: str
     batch_limit: int
     http_timeout_seconds: float
+    local_ocr_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -28,6 +29,7 @@ class Settings:
             tmdb_language=os.getenv("TMDB_LANGUAGE", "en-US").strip(),
             batch_limit=max(1, int(os.getenv("BATCH_LIMIT", "5"))),
             http_timeout_seconds=max(5.0, float(os.getenv("HTTP_TIMEOUT_SECONDS", "60"))),
+            local_ocr_enabled=os.getenv("LOCAL_OCR_ENABLED", "false").strip().casefold() in {"1", "true", "yes", "on"},
         )
 
     def validate_brightdata(self) -> None:
