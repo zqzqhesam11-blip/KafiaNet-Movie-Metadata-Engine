@@ -125,6 +125,30 @@ class PreviousGoogleLensEvidenceTests(unittest.TestCase):
         self.assertEqual(record["reverse_image"]["latest_query"]["status"], "error")
 
 
+    def test_provider_5xx_stop_flag_prevents_more_poster_requests(self):
+        for status_code in (500, 502, 503, 504):
+            with self.subTest(status_code=status_code):
+                engine = MetadataEngine.__new__(MetadataEngine)
+                engine.reverse_image = Mock()
+                engine.reverse_image.search_by_image_url.side_effect = RuntimeError(
+                    f"Bright Data service error HTTP {status_code}"
+                )
+                engine.reverse_image.last_lens_diagnostics = {
+                    "http_status": status_code,
+                    "attempts": 3,
+                    "status": "error",
+                }
+                engine._stop_batch = False
+                engine._provider_stop_status = None
+
+                result = engine._reverse_image_results("https://example.com/poster.jpg")
+
+                self.assertTrue(engine._stop_batch)
+                self.assertEqual(engine._provider_stop_status, status_code)
+                self.assertEqual(engine._provider_stop_reason, "provider_server_error")
+                self.assertTrue(result[0]["stop_batch"])
+                self.assertEqual(engine.reverse_image.search_by_image_url.call_count, 1)
+
     def test_provider_quota_stop_flag_prevents_batch_continuation(self):
         for status_code in (402, 429):
             with self.subTest(status_code=status_code):
