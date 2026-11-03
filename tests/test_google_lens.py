@@ -400,7 +400,9 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         ])
 
         self.assertEqual(year, 1988)
-        self.assertEqual(hints[0], "A Short Film About Killing")
+        # A distinct direct Play Store title is prioritized as a useful alias.
+        self.assertEqual(hints[0].casefold(), "krótki film o zabijaniu")
+        self.assertIn("a short film about killing", [value.casefold() for value in hints])
         self.assertIn("krótki film o zabijaniu", [value.casefold() for value in hints])
         self.assertIn("öldürme üzerine kısa bir film", [value.casefold() for value in hints])
         self.assertNotIn("PRIVATE", " ".join(hints))
