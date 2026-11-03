@@ -235,11 +235,20 @@ class MetadataEngine:
         # Optional provider-specific official-page fallback. TinEye does not
         # implement a text search; matched-image names remain review-only.
         if not lens_tmdb_ids and not lens_imdb_ids:
+            reverse_image_client = getattr(self, "reverse_image", None)
             title_searcher = getattr(
-                getattr(self, "reverse_image", None),
+                reverse_image_client,
                 "search_official_movie_pages_from_reverse_image",
                 None,
             )
+            if not callable(title_searcher):
+                # Compatibility for injected legacy Lens clients only. The
+                # active TinEye REST client intentionally has no text search.
+                title_searcher = getattr(
+                    reverse_image_client,
+                    "search_official_movie_pages_from_lens",
+                    None,
+                )
             if callable(title_searcher):
                 title_search_rows: list[dict[str, Any]] = []
                 try:
