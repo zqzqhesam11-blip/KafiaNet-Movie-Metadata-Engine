@@ -83,9 +83,12 @@ class LocalPosterOCR:
         image_height: int = 0,
         min_confidence: float = MIN_TEXT_CONFIDENCE,
     ) -> dict[str, Any]:
-        texts = list(getattr(result, "txts", None) or [])
-        scores = list(getattr(result, "scores", None) or [])
-        boxes = list(getattr(result, "boxes", None) or [])
+        raw_texts = getattr(result, "txts", None)
+        raw_scores = getattr(result, "scores", None)
+        raw_boxes = getattr(result, "boxes", None)
+        texts = list(raw_texts) if raw_texts is not None else []
+        scores = list(raw_scores) if raw_scores is not None else []
+        boxes = list(raw_boxes) if raw_boxes is not None else []
         lines: list[dict[str, Any]] = []
 
         for index, raw_text in enumerate(texts):
