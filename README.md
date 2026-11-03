@@ -20,6 +20,7 @@ To keep this project free:
 - Do not configure automatic top-ups or any paid balance.
 - If Bright Data reports HTTP 402 or 429, stop the batch. Do not retry repeatedly and do not add funds.
 - Google Lens `exact_matches` is the reverse-image identity source. Official TMDB movie URLs and IMDb title URLs are the only external identifier inputs accepted by the automatic identity resolver.
+- When Lens returns useful titles but no official TMDB/IMDb identifier, the engine also searches English Wikipedia using Lens titles only, reads the article lead for an unambiguous film year, and queries TMDB `/search/movie` using the Wikipedia title plus that year. Results and source links are saved under `wikipedia` as manual-review suggestions only; even one exact title/year result cannot set READY. Folder names and image filenames are never used.
 - Separately, the poster image bytes are OCR-processed locally by RapidOCR. Up to three OCR text hints may be sent to TMDB `/search/movie`; returned rows are saved only as manual-review suggestions under `ocr.tmdb_suggestions` and are never fed into identity resolution or automatic READY decisions.
 - At most two bounded retries are made for transient 5xx gateway errors, transport failures, and 5xx statuses inside Bright Data's HTTP-200 response envelope. HTTP 402/429 quota responses are never retried and stop the batch.
 - Bright Data free credits may be shared with other products or tools using the same account. Keep the key private.
