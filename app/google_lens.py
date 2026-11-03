@@ -663,29 +663,44 @@ class BrightDataGoogleLensClient:
     def _google_official_title_search_url(
         title_hints: list[str],
         year: int | None,
+        *,
+        broad: bool = False,
     ) -> str:
-        quoted = [f'"{value.replace(chr(34), " ").strip()}"' for value in title_hints if value.strip()]
-        title_clause = " OR ".join(quoted)
-        query = (
-            f"({title_clause}) "
-            "(site:themoviedb.org/movie OR site:imdb.com/title)"
-        )
-        if year:
-            query += f" {int(year)}"
-        # Bright Data format=json wraps the upstream response in
-        # status_code/headers/body. The Google brd_json=1 flag is still
-        # required so that body contains the parsed SERP JSON (including organic).
+        """Build explicit, independently-scoped IMDb/TMDB branches from Lens titles.
+
+        The exact pass keeps phrases intact and does not make the year mandatory.
+        Only if it finds no official movie URL do we retry with unquoted title
+        terms and the Lens-observed year as a disambiguator.
+        """
+        domains = ("imdb.com/title", "themoviedb.org/movie")
+        branches: list[str] = []
+        for value in title_hints:
+            title = re.sub(r"[^\w\s'’\-]", " ", str(value or ""), flags=re.UNICODE)
+            title = re.sub(r"\s+", " ", title).strip()
+            if not title:
+                continue
+            if broad:
+                title_expression = f"({title})"
+                if year:
+                    title_expression += f" {int(year)}"
+            else:
+                title_expression = f'"{title.replace(chr(34), " ").strip()}"'
+            for domain in domains:
+                branches.append(f"(site:{domain} {title_expression})")
+
+        query = " OR ".join(branches)
         return f"{GOOGLE_SEARCH_URL}?{urlencode({'q': query, 'hl': 'en', 'brd_json': '1'})}"
 
     def search_official_movie_pages_from_lens(
         self,
         lens_results: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Search Google once for official TMDB/IMDb pages using Lens-derived titles only."""
+        """Find official movie pages from Lens-derived titles with one bounded fallback."""
         title_hints, year = self.title_hints_from_lens_results(lens_results)
         self.last_official_search_diagnostics = {
             "status": "no_title_hints" if not title_hints else "requesting",
             "query_count": 0,
+            "query_variants": [],
             "title_hints": title_hints,
             "year_hint": year,
             "response_format": "json",
@@ -693,156 +708,173 @@ class BrightDataGoogleLensClient:
             "http_status": None,
             "attempts": 0,
             "organic_result_count": 0,
+            "candidate_url_count": 0,
+            "google_redirect_count": 0,
+            "google_redirect_unwrapped_count": 0,
+            "candidate_domains": {},
             "official_url_count": 0,
             "error": None,
         }
         if not title_hints:
             return []
 
-        target_url = self._google_official_title_search_url(title_hints, year)
-        try:
-            response, payload, effective_status, attempts = self._post_serp_with_retries(
-                target_url,
-                "Google official movie title search",
-                parsed_light_header=False,
-                response_format="json",
-            )
-        except BrightDataAPIError as exc:
-            self.last_official_search_diagnostics.update({
-                "status": "error",
-                "query_count": 1,
-                "attempts": MAX_TRANSIENT_RETRIES + 1,
-                "error": f"{type(exc).__name__}: {str(exc)[:300]}",
-            })
-            raise
-
-        body = getattr(response, "text", "") or ""
-        self.last_official_search_diagnostics.update({
-            "status": "http_error" if effective_status < 200 or effective_status >= 300 else "parsing",
-            "query_count": 1,
-            "http_status": effective_status,
-            "attempts": attempts,
-            "response_format": "json",
-            "payload_shape": self._payload_shape(payload) if payload is not None else None,
-        })
-        if effective_status < 200 or effective_status >= 300:
-            error_payload = payload.get("body") if (
-                isinstance(payload, dict) and "status_code" in payload and "body" in payload
-            ) else payload
-            message = self._http_error(
-                effective_status,
-                self._error_detail(error_payload, str(error_payload or body)),
-            )
-            self.last_official_search_diagnostics["error"] = message
-            if effective_status in {402, 429}:
-                raise BrightDataQuotaError(effective_status, message)
-            raise BrightDataAPIError(message)
-
-        if payload is None:
-            headers = getattr(response, "headers", {}) or {}
-            content_type = headers.get("content-type", "unknown") if hasattr(headers, "get") else "unknown"
-            content_length = headers.get("content-length", "unknown") if hasattr(headers, "get") else "unknown"
-            message = (
-                "Bright Data Google title search returned an empty or non-JSON response "
-                f"(HTTP {effective_status}, content-type={content_type}, "
-                f"content-length={content_length})"
-            )
-            self.last_official_search_diagnostics.update({
-                "status": "invalid_response",
-                "error": message,
-            })
-            raise BrightDataAPIError(message)
-
-        rows = self._rows_from_payload(payload)
-        if rows is None:
-            shape = self._payload_shape(payload)
-            message = (
-                "Bright Data Google title search returned JSON without a recognized organic result list; "
-                + shape
-            )
-            self.last_official_search_diagnostics.update({
-                "status": "unparsed_response",
-                "error": message,
-            })
-            raise BrightDataAPIError(message)
-
-        normalized = self._normalize_matches(rows)
-        official_rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        candidate_url_count = 0
-        google_redirect_count = 0
-        google_redirect_unwrapped_count = 0
+        diagnostics = self.last_official_search_diagnostics
+        official_by_url: dict[str, dict[str, Any]] = {}
         candidate_domains: dict[str, int] = {}
+        total_organic = 0
+        total_candidates = 0
+        total_redirects = 0
+        total_unwrapped = 0
+        total_attempts = 0
 
-        for result in normalized:
-            for value in (result.get("url_candidates") or []):
-                if not isinstance(value, str) or not value.strip():
-                    continue
-                candidate_url_count += 1
-                raw_url = value.strip()
-                try:
-                    raw_parsed = urlparse(raw_url)
-                    raw_host = (raw_parsed.hostname or "").casefold().rstrip(".")
-                    raw_path = raw_parsed.path.rstrip("/").casefold()
-                except ValueError:
-                    raw_host = ""
-                    raw_path = ""
-
-                if (
-                    (raw_host == "google.com" or raw_host.endswith(".google.com"))
-                    and raw_path in {"/url", "/imgres"}
-                ):
-                    google_redirect_count += 1
-
-                # Google SERP may expose a click-tracking /url wrapper instead
-                # of the publisher URL. Unwrap only its explicit q/url/adurl/
-                # imgrefurl destination, then apply the same strict official
-                # TMDB movie / IMDb title URL allow-list.
-                destination_url = _resolved_destination_url(raw_url)
-                if destination_url != raw_url:
-                    google_redirect_unwrapped_count += 1
-
-                try:
-                    destination_host = (
-                        urlparse(destination_url).hostname or ""
-                    ).casefold().rstrip(".")
-                except ValueError:
-                    destination_host = ""
-                if destination_host:
-                    candidate_domains[destination_host] = (
-                        candidate_domains.get(destination_host, 0) + 1
-                    )
-
-                if not self._official_movie_url(destination_url):
-                    continue
-                if destination_url in seen:
-                    continue
-                seen.add(destination_url)
-                official_rows.append({
-                    **result,
-                    "url": destination_url,
-                    "url_candidates": [destination_url],
-                    "resolved_urls": [destination_url],
-                    "resolved_url": destination_url,
-                    "provider": "google_serp_official_movie_title_search",
-                    "search_source": "lens_result_title_or_direct_play_store_url",
-                    "original_search_url": raw_url if raw_url != destination_url else None,
-                })
-
-        top_candidate_domains = dict(
-            sorted(candidate_domains.items(), key=lambda item: (-item[1], item[0]))[:12]
+        # The first query is precise; the second is used only when Google returns
+        # a valid SERP but no official IMDb/TMDB movie URL.
+        query_specs = (
+            ("exact_site_scoped", False),
+            ("broad_site_scoped", True),
         )
-        self.last_official_search_diagnostics.update({
-            "status": "ok" if official_rows else "no_official_results",
-            "organic_result_count": len(rows),
-            "candidate_url_count": candidate_url_count,
-            "google_redirect_count": google_redirect_count,
-            "google_redirect_unwrapped_count": google_redirect_unwrapped_count,
-            "candidate_domains": top_candidate_domains,
-            "official_url_count": len(official_rows),
+        for variant, broad in query_specs:
+            target_url = self._google_official_title_search_url(
+                title_hints, year, broad=broad
+            )
+            diagnostics["query_count"] += 1
+            diagnostics["query_variants"].append(variant)
+
+            try:
+                response, payload, effective_status, attempts = self._post_serp_with_retries(
+                    target_url,
+                    "Google official movie title search",
+                    parsed_light_header=False,
+                    response_format="json",
+                )
+            except BrightDataAPIError as exc:
+                diagnostics.update({
+                    "status": "quota_error" if isinstance(exc, BrightDataQuotaError) else "error",
+                    "attempts": total_attempts + MAX_TRANSIENT_RETRIES + 1,
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                })
+                raise
+
+            total_attempts += attempts
+            body = getattr(response, "text", "") or ""
+            diagnostics.update({
+                "status": "http_error" if effective_status < 200 or effective_status >= 300 else "parsing",
+                "http_status": effective_status,
+                "attempts": total_attempts,
+                "response_format": "json",
+                "payload_shape": self._payload_shape(payload) if payload is not None else None,
+            })
+
+            if effective_status < 200 or effective_status >= 300:
+                error_payload = payload.get("body") if (
+                    isinstance(payload, dict) and "status_code" in payload and "body" in payload
+                ) else payload
+                message = self._http_error(
+                    effective_status,
+                    self._error_detail(error_payload, str(error_payload or body)),
+                )
+                diagnostics["status"] = "quota_error" if effective_status in {402, 429} else "http_error"
+                diagnostics["error"] = message
+                if effective_status in {402, 429}:
+                    raise BrightDataQuotaError(effective_status, message)
+                raise BrightDataAPIError(message)
+
+            if payload is None:
+                headers = getattr(response, "headers", {}) or {}
+                content_type = headers.get("content-type", "unknown") if hasattr(headers, "get") else "unknown"
+                content_length = headers.get("content-length", "unknown") if hasattr(headers, "get") else "unknown"
+                message = (
+                    "Bright Data Google title search returned an empty or non-JSON response "
+                    f"(HTTP {effective_status}, content-type={content_type}, "
+                    f"content-length={content_length})"
+                )
+                diagnostics.update({"status": "invalid_response", "error": message})
+                raise BrightDataAPIError(message)
+
+            rows = self._rows_from_payload(payload)
+            if rows is None:
+                shape = self._payload_shape(payload)
+                message = (
+                    "Bright Data Google title search returned JSON without a recognized organic result list; "
+                    + shape
+                )
+                diagnostics.update({"status": "unparsed_response", "error": message})
+                raise BrightDataAPIError(message)
+
+            total_organic += len(rows)
+            normalized = self._normalize_matches(rows)
+            for result in normalized:
+                for value in (result.get("url_candidates") or []):
+                    if not isinstance(value, str) or not value.strip():
+                        continue
+                    total_candidates += 1
+                    raw_url = value.strip()
+                    try:
+                        raw_parsed = urlparse(raw_url)
+                        raw_host = (raw_parsed.hostname or "").casefold().rstrip(".")
+                        raw_path = raw_parsed.path.rstrip("/").casefold()
+                    except ValueError:
+                        raw_host = ""
+                        raw_path = ""
+
+                    if (
+                        (raw_host == "google.com" or raw_host.endswith(".google.com"))
+                        and raw_path in {"/url", "/imgres"}
+                    ):
+                        total_redirects += 1
+
+                    # Only unwrap explicit Google destination parameters; the final
+                    # allow-list below remains restricted to official movie pages.
+                    destination_url = _resolved_destination_url(raw_url)
+                    if destination_url != raw_url:
+                        total_unwrapped += 1
+
+                    try:
+                        destination_host = (
+                            urlparse(destination_url).hostname or ""
+                        ).casefold().rstrip(".")
+                    except ValueError:
+                        destination_host = ""
+                    if destination_host:
+                        candidate_domains[destination_host] = (
+                            candidate_domains.get(destination_host, 0) + 1
+                        )
+
+                    if not self._official_movie_url(destination_url):
+                        continue
+                    if destination_url in official_by_url:
+                        continue
+                    official_by_url[destination_url] = {
+                        **result,
+                        "url": destination_url,
+                        "url_candidates": [destination_url],
+                        "resolved_urls": [destination_url],
+                        "resolved_url": destination_url,
+                        "provider": "google_serp_official_movie_title_search",
+                        "search_source": "lens_result_title_or_direct_play_store_url",
+                        "search_query_variant": variant,
+                        "original_search_url": raw_url if raw_url != destination_url else None,
+                    }
+
+            # One verified official URL is enough to proceed to TMDB identity
+            # resolution. Avoid spending another paid SERP request unnecessarily.
+            if official_by_url:
+                break
+
+        diagnostics.update({
+            "status": "ok" if official_by_url else "no_official_results",
+            "attempts": total_attempts,
+            "organic_result_count": total_organic,
+            "candidate_url_count": total_candidates,
+            "google_redirect_count": total_redirects,
+            "google_redirect_unwrapped_count": total_unwrapped,
+            "candidate_domains": dict(
+                sorted(candidate_domains.items(), key=lambda item: (-item[1], item[0]))[:12]
+            ),
+            "official_url_count": len(official_by_url),
             "error": None,
         })
-        return official_rows
+        return list(official_by_url.values())
 
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
         """Search one public poster URL with bounded retries for transient provider failures."""
