@@ -121,7 +121,12 @@ class MetadataEngine:
         """
         vision_rows = [
             row for row in (google_vision_results or [])
-            if isinstance(row, dict) and not row.get("error")
+            if (
+                isinstance(row, dict)
+                and not row.get("error")
+                and row.get("provider") == "google_cloud_vision_web_detection"
+                and row.get("match_type") == "full_image_match"
+            )
         ]
         reverse_image_failed = any(
             isinstance(item, dict) and item.get("error")
@@ -199,7 +204,7 @@ class MetadataEngine:
         # Fallback only when Lens itself returned no official TMDB/IMDb ID.
         # Its single query is derived exclusively from Lens result titles and
         # direct Google Play movie URLs, never from the source folder or filename.
-        if not lens_tmdb_ids and not lens_imdb_ids:
+        if not lens_tmdb_ids and not lens_imdb_ids and not getattr(self, "_stop_batch", False):
             title_searcher = getattr(
                 getattr(self, "reverse_image", None),
                 "search_official_movie_pages_from_lens",
@@ -645,7 +650,9 @@ class MetadataEngine:
             return client.analyze_image_url(image_url)
         except GoogleVisionQuotaError as exc:
             self._stop_batch = True
-            self._provider_stop_status = exc.status_code or 429
+            self._provider_stop_status = (
+                exc.status_code if exc.status_code and exc.status_code >= 400 else 429
+            )
             self._provider_stop_reason = "google_vision_quota_or_throttle"
             self._provider_stop_provider = "google_cloud_vision"
             return {
@@ -658,7 +665,11 @@ class MetadataEngine:
             }
         except GoogleVisionAPIError as exc:
             status_code = exc.status_code
-            if status_code in {400, 401, 403, 429, 500, 502, 503, 504} or status_code is None:
+            if (
+                status_code in {400, 401, 403, 429, 500, 502, 503, 504}
+                or status_code is None
+                or bool(exc.provider_code)
+            ):
                 self._stop_batch = True
                 self._provider_stop_status = status_code
                 self._provider_stop_reason = "google_vision_provider_error"
@@ -758,7 +769,7 @@ class MetadataEngine:
             (getattr(self.reverse_image, "last_lens_diagnostics", {}) or {})
             if self.reverse_image else {}
         )
-        if self._stop_batch:
+        if getattr(self, "_stop_batch", False):
             google_vision_result = {
                 "status": "skipped_batch_stopped",
                 "official_page_matches": [],
@@ -847,7 +858,7 @@ class MetadataEngine:
             and match.get("status") == "review"
             and not match.get("candidate_ids")
             and google_vision_result.get("ocr_title_hints")
-            and not self._stop_batch
+            and not getattr(self, "_stop_batch", False)
         ):
             ocr_candidate_search = self._search_ocr_title_candidates(google_vision_result)
         reverse_image_evidence["google_vision"] = {
