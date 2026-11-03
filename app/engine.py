@@ -335,7 +335,7 @@ class MetadataEngine:
             )
             if title_search_diagnostics.get("error"):
                 reason = (
-                     "TinEye returned no official backlink and the optional provider lookup failed: "
+                    "TinEye returned no official backlink and the optional provider lookup failed: "
                     + str(title_search_diagnostics.get("error"))[:220]
                 )
             return None, {
@@ -520,7 +520,7 @@ class MetadataEngine:
         evidence["candidate_identities"] = identities
 
         # Multiple different official TMDB movie IDs remain a conflict. Never
-        # select one using Lens captions, snippets, folder names, or filenames.
+        # select one using matched-image captions, snippets, folder names, or filenames.
         if len(identities) != 1:
             tmdb_id_lookup["status"] = "ambiguous_multiple_tmdb_ids"
             return None, {
@@ -1137,7 +1137,8 @@ class MetadataEngine:
             ),
         })
         reverse_image_evidence["results_source"] = reverse_image_results_source
-        reverse_image_evidence["lens_diagnostics"] = lens_diagnostics
+        reverse_image_evidence["provider_diagnostics"] = lens_diagnostics
+        reverse_image_evidence["lens_diagnostics"] = lens_diagnostics  # legacy schema compatibility
         reverse_image_evidence["wikipedia_tmdb_suggestions"] = {
             "status": wikipedia_tmdb_suggestions.get("status"),
             "identity_evidence": False,
@@ -1189,7 +1190,7 @@ class MetadataEngine:
                 self._details_cache[tmdb_id] = details
             normalized = self.tmdb.normalize_details(details)
             # Use the title returned by the verified TMDB movie record as-is.
-            # Do not infer or select a title from Lens text, countries or market counts.
+            # Do not infer or select a title from TinEye matched-image names, countries or market counts.
             canonical_title = (
                 str(normalized.get("title") or normalized.get("original_title") or "").strip()
                 or f"TMDB Movie {tmdb_id}"
@@ -1288,7 +1289,7 @@ class MetadataEngine:
                 )
             except Exception as exc:
                 # Isolate failures to this film. Persist it as REVIEW so a later
-                # batch can retry it; one invalid Lens backlink or API response
+                # batch can retry it; one invalid TinEye backlink or API response
                 # must not abort the remaining films in the batch.
                 folder = item["folder"]
                 image_path = item["image_path"]
