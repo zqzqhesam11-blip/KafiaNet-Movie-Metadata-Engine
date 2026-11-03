@@ -19,7 +19,7 @@ To keep this project free:
 - Do not add a payment card, deposit funds, or activate a paid plan.
 - Do not configure automatic top-ups or any paid balance.
 - If Bright Data reports HTTP 402 or 429, stop the batch. Do not retry repeatedly and do not add funds.
-- Each poster uses the Google Lens `exact_matches` tab. The engine extracts only numeric movie IDs from official `themoviedb.org/movie/<id>` result destinations. It does not use Lens titles, snippets, countries, years, IMDb URLs, image URLs, poster filenames or source-folder names as identity inputs. No TMDB text search is performed.
+- The primary image lookup uses Google Lens `exact_matches`. When Lens has no direct official ID, bounded Google SERP queries may use only Lens result titles and direct Google Play movie slugs as search hints; only official IMDb/TMDB destination URLs are accepted as identifiers. IMDb IDs are resolved through TMDB `/find`, then every TMDB ID is checked against `/movie/{id}` details. Folder names and local image filenames are never search or identity inputs.
 - At most two bounded retries are made for transient 5xx gateway errors, transport failures, and 5xx statuses inside Bright Data's HTTP-200 response envelope. HTTP 402/429 quota responses are never retried and stop the batch.
 - Bright Data free credits may be shared with other products or tools using the same account. Keep the key private.
 
@@ -36,12 +36,12 @@ References:
 - The source movie-folder name is never changed. Only the JSON basename changes to the movie title and release year returned by TMDB.
 - Image filenames, extensions, bytes, and Git blob SHAs are preserved.
 - Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
-- Movie identity starts with the poster image in Google Lens. The only accepted identity signal is a numeric movie ID parsed from an official TMDB movie destination URL returned by Lens.
-- The engine calls TMDB `/movie/{movie_id}` for every distinct official TMDB movie ID found. A single valid ID is accepted only after TMDB returns a movie record whose `id` exactly equals the Lens ID. Distinct competing TMDB movie IDs, an unresolved ID, or no official TMDB movie ID result in REVIEW. IMDb-only links do not trigger a text or IMDb fallback.
-- Movie title, release date/year, country, director, cast, overview, ratings, external IMDb ID and other metadata are read from the verified TMDB movie record. The title saved for catalog naming is the title returned by TMDB; Lens title text and country clues are not used.
+- Movie identity starts with image-based evidence. Google Lens official result URLs and (when enabled) Google Cloud Vision full-image matching pages can supply official TMDB/IMDb URL identifiers. The engine resolves IMDb via TMDB `/find` and verifies every candidate with official TMDB movie details. OCR titles, generic entities, partial image matches, visually similar images and title-search results are discovery clues only, not identity proof.
+- The engine calls TMDB `/movie/{movie_id}` for every distinct official TMDB movie ID found. A single valid ID is accepted only after TMDB returns a movie record whose `id` exactly equals the candidate ID (and confirms any IMDb ID resolved through `/find`). Distinct competing IDs, unresolved IDs, or no official movie ID result in REVIEW. If Vision confirmation is enabled, READY additionally requires a full-image matching page containing the same official movie ID.
+- Movie title, release date/year, country, director, cast, overview, ratings, external IMDb ID and other metadata are read from the verified TMDB movie record. The title saved for catalog naming is the title returned by TMDB; poster folder names and local image filenames are never used. Lens and OCR text can only form search hints, never proof.
 - TMDB movie images are requested with `append_to_response=images` and a language fallback. Poster paths are saved with their TMDB image CDN URLs (including w500 and original sizes).
-- Folder names, folder years, poster filenames, image URLs, Lens text, snippets and catalog labels are never used as movie identity inputs.
-- No movie-title search, country search, title similarity scoring, metadata fingerprint comparison, or IMDb-only identity resolution is performed.
+- Folder names, folder years, poster filenames, image URLs, OCR text, web entities, Lens snippets and catalog labels are never used as movie identity inputs. OCR-derived TMDB search results are stored only as unverified REVIEW suggestions.
+- No folder-name, folder-year or country-based matching is performed. TMDB title search is used only for OCR-derived REVIEW suggestions and cannot set READY. There is no title-similarity scoring or metadata fingerprint identity fallback.
 - Every READY JSON and `metadata/index.json` row records the `tmdb_id` explicitly. The `imdb_id` is also saved when TMDB supplies it; otherwise it remains null. TMDB IDs are never invented.
 - A failed, blocked, or unparsed live response is recorded as an error, not as a successful empty result. Previously saved results are reusable only when their stored diagnostics explicitly identify the `exact_matches` tab; older `visual_matches` evidence is ignored.
 - Each per-film terminal result reports the Lens tab, HTTP status, retry count, result count and error, the count of official TMDB movie URLs, their distinct numeric movie IDs, and the TMDB details-resolution outcome. These diagnostics do not include API secrets.
@@ -60,6 +60,7 @@ Required environment variables:
 - `GITHUB_TOKEN`: fine-grained token with Contents read/write on the poster repository; required only for APPLY.
 - `POSTERS_REPO`: defaults to `zqzqhesam11-blip/KafiaNet-Movie-Posters`.
 - `POSTERS_BRANCH`: defaults to `main`.
+- Optional `GOOGLE_VISION_ENABLED` (default `false`), `GOOGLE_VISION_API_KEY` (only required when enabled), and `GOOGLE_VISION_REQUIRE_CONFIRMATION` (default `true`).
 
 
 #Optional: `TMDB_LANGUAGE` (default `en-US`), `BATCH_LIMIT` (default `5`), `HTTP_TIMEOUT_SECONDS` (default `60`).
