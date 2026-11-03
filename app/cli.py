@@ -6,6 +6,7 @@ from typing import Any
 
 from app.config import Settings
 from app.engine import MetadataEngine
+from app.tineye_api import TinEyeAPIClient
 
 
 def format_summary(result: dict[str, Any]) -> str:
@@ -32,8 +33,8 @@ def format_summary(result: dict[str, Any]) -> str:
             f"planned_deletes={len(result.get('planned_source_image_deletes') or [])}"
         )
         lines.append(
-            "NOTE: DRY_RUN performs live Google Lens lookups and, when no official ID is found, "
-            "one Google Search query for official TMDB/IMDb pages; these requests consume free-tier quota."
+            "NOTE: DRY_RUN performs live TinEye image searches and consumes paid TinEye search credits. "
+            "Run `python -m app.cli check-tineye` before starting a batch."
         )
         lines.append(
             "NOTE: Local poster OCR is disabled by default (LOCAL_OCR_ENABLED=false); "
@@ -52,10 +53,34 @@ def format_summary(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def check_brightdata_config(settings: Settings) -> int:
-    settings.validate_brightdata()
-    print("[KafiaNet] Bright Data configuration is present.")
-    print("[KafiaNet] No network request was sent; API authentication and remaining free quota were not tested.")
+def check_tineye(settings: Settings) -> int:
+    """Verify TinEye API access and remaining credits without searching a poster."""
+    settings.validate_tineye()
+    client = TinEyeAPIClient(
+        settings.tineye_api_key,
+        timeout=max(45, settings.http_timeout_seconds),
+    )
+    try:
+        account = client.remaining_searches()
+    finally:
+        client.close()
+
+    total = account.get("total_remaining_searches")
+    bundles = account.get("bundles") or []
+    print("[KafiaNet] TinEye API connection: OK")
+    if total is not None:
+        print(f"[KafiaNet] remaining_searches={total}")
+    else:
+        print(f"[KafiaNet] active_bundles={len(bundles)}")
+    for bundle in bundles:
+        if not isinstance(bundle, dict):
+            continue
+        print(
+            "[KafiaNet] "
+            f"bundle_remaining={bundle.get('remaining_searches', 'unknown')} "
+            f"expires={bundle.get('expire_date', 'unknown')}"
+        )
+    print("[KafiaNet] No image search was performed; no image-search credit was consumed.")
     return 0
 
 
@@ -65,7 +90,7 @@ def main() -> int:
         "command",
         nargs="?",
         default="run",
-        choices=["run", "check-brightdata-config"],
+        choices=["run", "check-tineye"],
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--apply", action="store_true", help="Write result JSON to the public poster repository")
@@ -73,10 +98,10 @@ def main() -> int:
     parser.add_argument("--verbose", action="store_true", help="Print the full JSON report")
     args = parser.parse_args()
     settings = Settings.from_env()
-    if args.command == "check-brightdata-config":
+    if args.command == "check-tineye":
         if args.limit is not None or args.apply or args.dry_run or args.verbose:
-            parser.error("check-brightdata-config does not accept batch or write options")
-        return check_brightdata_config(settings)
+            parser.error("check-tineye does not accept batch or write options")
+        return check_tineye(settings)
     apply = bool(args.apply and not args.dry_run)
     settings.validate_for_processing(apply=apply)
     limit = args.limit or settings.batch_limit
