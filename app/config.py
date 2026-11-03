@@ -16,6 +16,9 @@ class Settings:
     batch_limit: int
     http_timeout_seconds: float
     local_ocr_enabled: bool = False
+    # Official TinEye REST API key. Kept separate from Bright Data's legacy
+    # fields so older configuration readers remain source-compatible.
+    tineye_api_key: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -30,9 +33,18 @@ class Settings:
             batch_limit=max(1, int(os.getenv("BATCH_LIMIT", "5"))),
             http_timeout_seconds=max(5.0, float(os.getenv("HTTP_TIMEOUT_SECONDS", "60"))),
             local_ocr_enabled=os.getenv("LOCAL_OCR_ENABLED", "false").strip().casefold() in {"1", "true", "yes", "on"},
+            tineye_api_key=os.getenv("TINEYE_API_KEY", "").strip(),
         )
 
+    def validate_tineye(self) -> None:
+        if not self.tineye_api_key:
+            raise RuntimeError(
+                "Missing required environment variable: TINEYE_API_KEY. "
+                "Configure the official TinEye API key in Hostless; do not paste it into chat."
+            )
+
     def validate_brightdata(self) -> None:
+        # Retained only for backwards compatibility with the old diagnostic command.
         missing = []
         if not self.brightdata_api_key:
             missing.append("BRIGHTDATA_API_KEY")
@@ -41,17 +53,15 @@ class Settings:
         if missing:
             raise RuntimeError(
                 "Missing Bright Data configuration: " + ", ".join(missing) +
-                ". Store the API key and SERP zone in Hostless secrets/environment variables."
+                ". This legacy provider is not used for reverse-image searches."
             )
 
     def validate_for_processing(self, apply: bool) -> None:
         missing = []
         if not self.tmdb_bearer_token:
             missing.append("TMDB_BEARER_TOKEN")
-        if not self.brightdata_api_key:
-            missing.append("BRIGHTDATA_API_KEY")
-        if not self.brightdata_serp_zone:
-            missing.append("BRIGHTDATA_SERP_ZONE")
+        if not self.tineye_api_key:
+            missing.append("TINEYE_API_KEY")
         if apply and not self.github_token:
             missing.append("GITHUB_TOKEN")
         if missing:
