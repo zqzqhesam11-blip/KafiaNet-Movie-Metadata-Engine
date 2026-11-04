@@ -86,7 +86,7 @@ class MetadataEngine:
             self.local_ocr.close()
 
     def _stop_for_provider_server_error(self, diagnostics: Any) -> bool:
-        """Stop the remaining batch after an exhausted Bright Data 5xx response."""
+        """Stop after Bright Data auth/access failures or exhausted 5xx responses."""
         if not isinstance(diagnostics, dict):
             return False
         raw_status = diagnostics.get("http_status")
