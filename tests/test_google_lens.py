@@ -9,6 +9,7 @@ import httpx
 from app.google_lens import (
     BRIGHTDATA_REQUEST_URL,
     BrightDataAPIError,
+    BrightDataQuotaError,
     BrightDataGoogleLensClient,
 )
 
@@ -27,6 +28,38 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         else:
             api.client.post.return_value = response
         return api
+
+    def test_quota_and_rate_limit_responses_are_not_retried_or_reissued(self):
+        for status in (402, 429):
+            with self.subTest(status=status):
+                api = self.make_client({"error": "free quota exhausted"}, status=status)
+                with self.assertRaises(BrightDataQuotaError):
+                    api.search_by_image_url("https://example.com/poster.jpg")
+
+                self.assertEqual(api.client.post.call_count, 1)
+                self.assertEqual(api.api_request_attempts, 1)
+                self.assertEqual(api.last_lens_diagnostics["status"], "quota_error")
+                self.assertEqual(api.last_lens_diagnostics["attempts"], 1)
+
+                # Even a later direct caller cannot send another request from this client.
+                with self.assertRaises(BrightDataQuotaError):
+                    api.search_by_image_url("https://example.com/another-poster.jpg")
+                self.assertEqual(api.client.post.call_count, 1)
+                self.assertEqual(api.api_request_attempts, 1)
+
+    def test_auth_and_access_failures_latch_without_additional_requests(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                api = self.make_client({"error": "access denied"}, status=status)
+                with self.assertRaises(BrightDataAPIError):
+                    api.search_by_image_url("https://example.com/poster.jpg")
+                self.assertEqual(api.client.post.call_count, 1)
+                self.assertEqual(api.api_request_attempts, 1)
+
+                with self.assertRaises(BrightDataAPIError):
+                    api.search_by_image_url("https://example.com/another-poster.jpg")
+                self.assertEqual(api.client.post.call_count, 1)
+                self.assertEqual(api.api_request_attempts, 1)
 
     def test_search_uses_brightdata_rest_and_google_lens_exact_matches(self):
         api = self.make_client({
@@ -155,6 +188,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.client.post.call_count, 2)
         self.assertEqual(api.last_lens_diagnostics["attempts"], 2)
         self.assertEqual(api.last_lens_diagnostics["status"], "no_matches")
+        self.assertEqual(api.api_request_attempts, 2)
 
     def test_empty_json_response_retries_then_reports_http_metadata(self):
         response = Mock()
