@@ -86,7 +86,7 @@ class MetadataEngine:
             self.local_ocr.close()
 
     def _stop_for_provider_server_error(self, diagnostics: Any) -> bool:
-        """Stop the remaining batch after an exhausted Bright Data 5xx response."""
+        """Stop after Bright Data auth/access failures or exhausted 5xx responses."""
         if not isinstance(diagnostics, dict):
             return False
         raw_status = diagnostics.get("http_status")
@@ -94,12 +94,24 @@ class MetadataEngine:
             status_code = int(raw_status)
         except (TypeError, ValueError):
             return False
-        if status_code not in TRANSIENT_PROVIDER_HTTP_STATUSES:
+        if status_code in {401, 403}:
+            stop_reason = "provider_auth_or_access"
+        elif status_code in TRANSIENT_PROVIDER_HTTP_STATUSES:
+            stop_reason = "provider_server_error"
+        else:
             return False
         self._stop_batch = True
         self._provider_stop_status = status_code
-        self._provider_stop_reason = "provider_server_error"
+        self._provider_stop_reason = stop_reason
         return True
+
+    def _brightdata_api_request_attempts(self) -> int:
+        """Return this worker process's outbound Bright Data API attempt count."""
+        value = getattr(getattr(self, "reverse_image", None), "api_request_attempts", 0)
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def _reverse_image_results(self, image_url: str) -> list[dict[str, Any]]:
         if not self.reverse_image:
@@ -1358,6 +1370,7 @@ class MetadataEngine:
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
                 f"imdb_id={imdb_id if imdb_id is not None else 'none'} "
                 f"reverse_image={latest_query_status} evidence={reverse_image_source} "
+                f"brightdata_api_request_attempts={self._brightdata_api_request_attempts()} "
                 f"lens_tab={lens_diag.get('lens_tab', 'unknown')} "
                 f"lens_data_format={lens_diag.get('data_format', 'unknown')} "
                 f"lens_http={lens_diag.get('http_status', 'none')} "
@@ -1481,6 +1494,7 @@ class MetadataEngine:
                 "deleted_old_files": 0,
                 "provider_stop_status": self._provider_stop_status,
                 "provider_stop_reason": self._provider_stop_reason,
+                "brightdata_api_request_attempts": self._brightdata_api_request_attempts(),
                 "records": records,
                 "next_pending_estimate": max(0, len(pending) - len(records)),
             }
@@ -1739,6 +1753,7 @@ class MetadataEngine:
                 if "multiple distinct official IMDb/TMDB movie identities"
                 in str((record.get("match") or {}).get("reason") or "")
             ),
+            "brightdata_api_request_attempts": self._brightdata_api_request_attempts(),
             "planned_output_files": sorted(files),
             "planned_image_moves": sorted(moves),
             "planned_source_image_deletes": image_deletes,

@@ -53,6 +53,10 @@ class BrightDataGoogleLensClient:
         )
         self.last_lens_diagnostics: dict[str, Any] = {}
         self.last_official_search_diagnostics: dict[str, Any] = {}
+        # Counts outbound API attempts for this worker process only. Bright Data's
+        # free credits are account-wide and are enforced by the provider itself.
+        self.api_request_attempts = 0
+        self._stop_latched_status: int | None = None
 
     def close(self) -> None:
         self.client.close()
@@ -484,6 +488,16 @@ class BrightDataGoogleLensClient:
         actual upstream HTTP status. Retry that status too; otherwise a wrapped
         Google 502 is incorrectly treated as a permanent per-film failure.
         """
+        blocked_status = getattr(self, "_stop_latched_status", None)
+        if blocked_status is not None:
+            message = self._http_error(
+                int(blocked_status),
+                "this worker already stopped after a quota/access response; no further API request was sent",
+            )
+            if int(blocked_status) in {402, 429}:
+                raise BrightDataQuotaError(int(blocked_status), message)
+            raise BrightDataAPIError(message)
+
         if response_format not in {"raw", "json"}:
             raise BrightDataAPIError(
                 f"Unsupported Bright Data response format for {stage}: {response_format}"
@@ -495,6 +509,9 @@ class BrightDataGoogleLensClient:
                     {"x-unblock-data-format": "parsed_light"}
                     if parsed_light_header else None
                 )
+                # Count conservatively before sending: a timeout can happen after
+                # Bright Data received and accounted for the request.
+                self.api_request_attempts = int(getattr(self, "api_request_attempts", 0)) + 1
                 response = self.client.post(
                     BRIGHTDATA_REQUEST_URL,
                     headers=request_headers,
@@ -531,6 +548,11 @@ class BrightDataGoogleLensClient:
                     inner_status = 0
                 if inner_status:
                     effective_status = inner_status
+
+            # Latch quota and account-access failures for this worker process.
+            # Do not send another billable request after the provider has denied one.
+            if effective_status in {401, 402, 403, 429}:
+                self._stop_latched_status = effective_status
 
             # Bright Data has occasionally returned HTTP 200 with no body or
             # a JSON envelope whose inner body is empty. That is a failed delivery,
@@ -726,6 +748,7 @@ class BrightDataGoogleLensClient:
             "payload_shape": None,
             "http_status": None,
             "attempts": 0,
+            "api_request_attempts": int(getattr(self, "api_request_attempts", 0)),
             "organic_result_count": 0,
             "candidate_url_count": 0,
             "google_redirect_count": 0,
@@ -767,9 +790,19 @@ class BrightDataGoogleLensClient:
                     response_format="json",
                 )
             except BrightDataAPIError as exc:
+                blocked_status = getattr(exc, "status_code", None) or getattr(self, "_stop_latched_status", None)
                 diagnostics.update({
-                    "status": "quota_error" if isinstance(exc, BrightDataQuotaError) else "error",
-                    "attempts": total_attempts + MAX_TRANSIENT_RETRIES + 1,
+                    "status": (
+                        "quota_error" if isinstance(exc, BrightDataQuotaError)
+                        else "provider_blocked" if blocked_status in {401, 403}
+                        else "error"
+                    ),
+                    "http_status": blocked_status,
+                    "attempts": total_attempts + (
+                        0 if blocked_status in {401, 402, 403, 429}
+                        else MAX_TRANSIENT_RETRIES + 1
+                    ),
+                    "api_request_attempts": int(getattr(self, "api_request_attempts", 0)),
                     "error": f"{type(exc).__name__}: {str(exc)[:300]}",
                 })
                 raise
@@ -904,6 +937,7 @@ class BrightDataGoogleLensClient:
             "data_format": "parsed_light",
             "http_status": None,
             "attempts": 0,
+            "api_request_attempts": int(getattr(self, "api_request_attempts", 0)),
             "result_count": 0,
             "error": None,
         }
@@ -913,9 +947,19 @@ class BrightDataGoogleLensClient:
                 "Google Lens image search",
             )
         except BrightDataAPIError as exc:
+            blocked_status = getattr(exc, "status_code", None) or getattr(self, "_stop_latched_status", None)
             self.last_lens_diagnostics.update({
-                "status": "error",
-                "attempts": MAX_TRANSIENT_RETRIES + 1,
+                "status": (
+                    "quota_error" if isinstance(exc, BrightDataQuotaError)
+                    else "provider_blocked" if blocked_status in {401, 403}
+                    else "error"
+                ),
+                "http_status": blocked_status,
+                "attempts": (
+                    0 if blocked_status in {401, 402, 403, 429}
+                    else MAX_TRANSIENT_RETRIES + 1
+                ),
+                "api_request_attempts": int(getattr(self, "api_request_attempts", 0)),
                 "error": f"{type(exc).__name__}: {str(exc)[:300]}",
             })
             raise
@@ -924,6 +968,7 @@ class BrightDataGoogleLensClient:
         self.last_lens_diagnostics.update({
             "http_status": effective_status,
             "attempts": attempts,
+            "api_request_attempts": int(getattr(self, "api_request_attempts", 0)),
         })
         if effective_status < 200 or effective_status >= 300:
             error_payload = payload.get("body") if (
@@ -989,6 +1034,7 @@ class BrightDataGoogleLensClient:
             "status": "ok" if normalized else "no_matches",
             "raw_result_count": len(rows),
             "result_count": len(normalized),
+            "api_request_attempts": int(getattr(self, "api_request_attempts", 0)),
             "error": None,
         })
         return normalized

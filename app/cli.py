@@ -14,6 +14,7 @@ def format_summary(result: dict[str, Any]) -> str:
     lines = [
         "[KafiaNet] BATCH SUMMARY",
         f"mode={mode}",
+        f"brightdata_api_request_attempts={result.get('brightdata_api_request_attempts', 0)}",
         f"selected={result.get('batch_selected', 0)}/{result.get('batch_requested', 0)}",
         f"ready={result.get('ready', 0)} review={result.get('review', 0)} duplicates={result.get('duplicates_in_this_batch', 0)}",
         (
@@ -38,6 +39,14 @@ def format_summary(result: dict[str, Any]) -> str:
         lines.append(
             "NOTE: Local poster OCR is disabled by default (LOCAL_OCR_ENABLED=false); "
             "it is not initialized unless explicitly enabled."
+        )
+    elif mode == "STOPPED_PROVIDER_LIMIT":
+        lines.append(
+            f"provider_stop_status={result.get('provider_stop_status', 'unknown')} "
+            f"provider_stop_reason={result.get('provider_stop_reason', 'unknown')}"
+        )
+        lines.append(
+            "NOTE: Bright Data access/quota stop prevented further poster lookups and catalog writes."
         )
     else:
         lines.append(

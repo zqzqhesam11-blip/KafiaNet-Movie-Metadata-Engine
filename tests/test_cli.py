@@ -32,6 +32,7 @@ class CliSummaryTests(unittest.TestCase):
 
         output = format_summary(result)
 
+        self.assertIn("brightdata_api_request_attempts=0", output)
         self.assertIn("selected=200/200", output)
         self.assertIn("ready=178 review=20 duplicates=2", output)
         self.assertIn("commit_sha=abc123", output)
@@ -42,6 +43,22 @@ class CliSummaryTests(unittest.TestCase):
         self.assertNotIn("must not appear", output)
         self.assertNotIn("very/long/path.json", output)
         self.assertNotIn("poster.jpg", output)
+
+    def test_stopped_provider_summary_discloses_no_catalog_write(self):
+        output = format_summary({
+            "mode": "STOPPED_PROVIDER_LIMIT",
+            "batch_selected": 1,
+            "batch_requested": 5,
+            "provider_stop_status": 402,
+            "provider_stop_reason": "provider_quota_or_throttle",
+            "brightdata_api_request_attempts": 7,
+            "written_files": 0,
+        })
+
+        self.assertIn("brightdata_api_request_attempts=7", output)
+        self.assertIn("provider_stop_status=402", output)
+        self.assertIn("prevented further poster lookups and catalog writes", output)
+        self.assertNotIn("written_files=", output)
 
     def test_dry_run_summary_reports_counts_only(self):
         output = format_summary({
