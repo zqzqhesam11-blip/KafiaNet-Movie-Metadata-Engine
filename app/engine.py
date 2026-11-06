@@ -133,6 +133,7 @@ def _folder_identity_consistency(
         "folder_year": folder_year,
         "candidate_year": candidate_year,
         "title_match": title_match,
+        "year_match": year_match,
         "matching_title_aliases": matching_aliases[:5],
         "folder_name_used_for_search": False,
         "folder_name_used_to_select_candidate": False,
