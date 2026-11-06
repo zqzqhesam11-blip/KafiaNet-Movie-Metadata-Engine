@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,6 +14,8 @@ GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/inte
 MAX_POSTER_BYTES = 12 * 1024 * 1024
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MIN_CANDIDATE_CONFIDENCE = 0.85
+GEMINI_API_MAX_ATTEMPTS = 3
+GEMINI_API_RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 
 _RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -277,23 +280,55 @@ class GeminiPosterVision:
             },
             "generation_config": {"max_output_tokens": 700},
         }
-        response = self.client.post(
-            GEMINI_INTERACTIONS_URL,
-            headers={
-                "x-goog-api-key": self.api_key,
-                "content-type": "application/json",
-            },
-            json=request_payload,
-        )
-        if response.status_code == 429:
+        response: httpx.Response | None = None
+        for attempt in range(1, GEMINI_API_MAX_ATTEMPTS + 1):
+            try:
+                response = self.client.post(
+                    GEMINI_INTERACTIONS_URL,
+                    headers={
+                        "x-goog-api-key": self.api_key,
+                        "content-type": "application/json",
+                    },
+                    json=request_payload,
+                )
+            except httpx.TransportError as exc:
+                if attempt >= GEMINI_API_MAX_ATTEMPTS:
+                    raise GeminiVisionError(
+                        f"Gemini API transport failed after {attempt} attempts ({type(exc).__name__})",
+                        status_code=503,
+                    ) from exc
+                time.sleep(2 ** (attempt - 1))
+                continue
+
+            if response.status_code == 429:
+                raise GeminiVisionError(
+                    "Gemini API request limit reached (HTTP 429)",
+                    status_code=429,
+                )
+            if response.status_code in GEMINI_API_RETRYABLE_STATUS_CODES:
+                if attempt < GEMINI_API_MAX_ATTEMPTS:
+                    retry_after = response.headers.get("retry-after")
+                    try:
+                        delay = float(retry_after) if retry_after else float(2 ** (attempt - 1))
+                    except ValueError:
+                        delay = float(2 ** (attempt - 1))
+                    time.sleep(min(max(delay, 0.0), 8.0))
+                    continue
+                raise GeminiVisionError(
+                    f"Gemini API request failed after {attempt} attempts (HTTP {response.status_code})",
+                    status_code=response.status_code,
+                )
+            if response.status_code >= 400:
+                raise GeminiVisionError(
+                    f"Gemini API request failed (HTTP {response.status_code})",
+                    status_code=response.status_code,
+                )
+            break
+
+        if response is None:
             raise GeminiVisionError(
-                "Gemini API request limit reached (HTTP 429)",
-                status_code=429,
-            )
-        if response.status_code >= 400:
-            raise GeminiVisionError(
-                f"Gemini API request failed (HTTP {response.status_code})",
-                status_code=response.status_code,
+                f"Gemini API request failed after {GEMINI_API_MAX_ATTEMPTS} attempts",
+                status_code=503,
             )
         try:
             payload = response.json()
