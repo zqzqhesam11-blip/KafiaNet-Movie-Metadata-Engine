@@ -44,6 +44,86 @@ def _comparison_title_key(value: str | None) -> str:
     title = "".join(char for char in title if not unicodedata.combining(char))
     return re.sub(r"[^\w]+", " ", title.casefold(), flags=re.UNICODE).strip()
 
+def _compact_identity_title_key(value: str | None) -> str:
+    """Normalize titles for a conservative, punctuation-insensitive context check."""
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    normalized = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    )
+    return "".join(char for char in normalized.casefold() if char.isalnum())
+
+
+def _folder_identity_consistency(
+    details: dict[str, Any],
+    expected_folder: str | None,
+) -> dict[str, Any]:
+    """Reject an official ID whose resolved title/year conflicts with its source label.
+
+    The folder label is a negative-only consistency veto: it is never sent to a
+    search provider, used to discover an ID, or used to choose between candidates.
+    """
+    if not str(expected_folder or "").strip():
+        return {
+            "status": "not_applied",
+            "allowed": True,
+            "reason": "No source-folder label was supplied for the consistency veto",
+            "folder_name_used_for_search": False,
+            "folder_name_used_to_select_candidate": False,
+            "folder_name_used_for_conflict_veto": False,
+        }
+
+    normalized = TMDBClient.normalize_details(details or {})
+    folder = str(expected_folder).strip()
+    folder_year_match = re.search(r"\\(((?:18|19|20)\\d{2})\\)\\s*$", folder)
+    folder_year = int(folder_year_match.group(1)) if folder_year_match else None
+    folder_title = folder[:folder_year_match.start()].strip() if folder_year_match else folder
+    folder_key = _compact_identity_title_key(folder_title)
+
+    aliases: list[str] = []
+    for value in (normalized.get("title"), normalized.get("original_title")):
+        title = str(value or "").strip()
+        if title and title not in aliases:
+            aliases.append(title)
+    for row in normalized.get("alternative_titles") or []:
+        if isinstance(row, dict):
+            title = str(row.get("title") or "").strip()
+            if title and title not in aliases:
+                aliases.append(title)
+
+    matching_aliases = [
+        title for title in aliases
+        if len(_compact_identity_title_key(title)) >= 4
+        and _compact_identity_title_key(title) in folder_key
+    ]
+    candidate_year = normalized.get("year")
+    try:
+        candidate_year = int(candidate_year) if candidate_year is not None else None
+    except (TypeError, ValueError):
+        candidate_year = None
+
+    title_match = bool(matching_aliases)
+    year_match = (
+        folder_year is None
+        or (candidate_year is not None and candidate_year == folder_year)
+    )
+    allowed = title_match and year_match
+    return {
+        "status": "passed" if allowed else "conflict",
+        "allowed": allowed,
+        "reason": (
+            "TMDB title alias and release year are consistent with the source-folder label"
+            if allowed
+            else "Resolved TMDB identity conflicts with the source-folder title and/or year; automatic match blocked"
+        ),
+        "folder_year": folder_year,
+        "candidate_year": candidate_year,
+        "title_match": title_match,
+        "matching_title_aliases": matching_aliases[:5],
+        "folder_name_used_for_search": False,
+        "folder_name_used_to_select_candidate": False,
+        "folder_name_used_for_conflict_veto": True,
+    }
+
 
 class MetadataEngine:
     def __init__(self, settings: Settings):
@@ -129,6 +209,7 @@ class MetadataEngine:
     def _find_movie(
         self,
         reverse_image_results: list[dict[str, Any]],
+        expected_folder: str | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
         """Resolve only official TMDB/IMDb identifiers, with a Lens-derived title-search fallback.
 
@@ -144,6 +225,57 @@ class MetadataEngine:
         )
         lens_tmdb_ids = extract_tmdb_movie_ids(reverse_image_results)
         lens_imdb_ids = extract_imdb_ids(reverse_image_results)
+        lens_tmdb_ids_from_lens = list(lens_tmdb_ids)
+        lens_imdb_ids_from_lens = list(lens_imdb_ids)
+        title_search_tmdb_ids: list[int] = []
+        title_search_imdb_ids: list[str] = []
+        title_search_diagnostics: dict[str, Any] = {
+            "status": (
+                "skipped_lens_error" if reverse_image_failed
+                else "skipped_direct_official_id_present"
+                if (lens_tmdb_ids or lens_imdb_ids)
+                else "not_run"
+            ),
+            "query_count": 0,
+            "query_variants": [],
+            "title_hints": [],
+            "year_hint": None,
+            "response_format": "json",
+            "payload_shape": None,
+            "http_status": None,
+            "attempts": 0,
+            "organic_result_count": 0,
+            "candidate_url_count": 0,
+            "google_redirect_count": 0,
+            "google_redirect_unwrapped_count": 0,
+            "candidate_domains": {},
+            "official_url_count": 0,
+            "error": None,
+        }
+
+        def title_search_evidence() -> dict[str, Any]:
+            return {
+                "source": "google_lens_result_titles_and_direct_play_store_urls",
+                "status": title_search_diagnostics.get("status", "not_run"),
+                "query_count": title_search_diagnostics.get("query_count", 0),
+                "query_variants": list(title_search_diagnostics.get("query_variants") or []),
+                "title_hints": list(title_search_diagnostics.get("title_hints") or [])[:5],
+                "year_hint": title_search_diagnostics.get("year_hint"),
+                "response_format": title_search_diagnostics.get("response_format", "json"),
+                "payload_shape": title_search_diagnostics.get("payload_shape"),
+                "http_status": title_search_diagnostics.get("http_status"),
+                "attempts": title_search_diagnostics.get("attempts", 0),
+                "organic_result_count": title_search_diagnostics.get("organic_result_count", 0),
+                "candidate_url_count": title_search_diagnostics.get("candidate_url_count", 0),
+                "google_redirect_count": title_search_diagnostics.get("google_redirect_count", 0),
+                "google_redirect_unwrapped_count": title_search_diagnostics.get("google_redirect_unwrapped_count", 0),
+                "candidate_domains": dict(title_search_diagnostics.get("candidate_domains") or {}),
+                "official_url_count": title_search_diagnostics.get("official_url_count", 0),
+                "error": title_search_diagnostics.get("error"),
+                "tmdb_ids": list(title_search_tmdb_ids),
+                "imdb_ids": list(title_search_imdb_ids),
+            }
+
         tmdb_id_lookup = {
             "status": "resolving" if (lens_tmdb_ids or lens_imdb_ids) else "no_tmdb_id",
             "tmdb_ids": list(lens_tmdb_ids),
@@ -172,6 +304,7 @@ class MetadataEngine:
                 "errors": [],
             },
             "candidate_identities": [],
+            "official_title_search": title_search_evidence(),
         }
 
         if reverse_image_failed:
@@ -181,23 +314,6 @@ class MetadataEngine:
                 "reason": "Google Lens image lookup or URL resolution failed; no movie identity was guessed",
                 "candidate_ids": [],
             }, evidence
-
-        lens_tmdb_ids_from_lens = list(lens_tmdb_ids)
-        lens_imdb_ids_from_lens = list(lens_imdb_ids)
-        title_search_tmdb_ids: list[int] = []
-        title_search_imdb_ids: list[str] = []
-        title_search_diagnostics: dict[str, Any] = {
-            "status": "skipped_direct_official_id_present"
-            if (lens_tmdb_ids or lens_imdb_ids) else "unavailable",
-            "query_count": 0,
-            "title_hints": [],
-            "year_hint": None,
-            "http_status": None,
-            "attempts": 0,
-            "organic_result_count": 0,
-            "official_url_count": 0,
-            "error": None,
-        }
 
         # Fallback only when Lens itself returned no official TMDB/IMDb ID.
         # Its single query is derived exclusively from Lens result titles and
@@ -261,23 +377,7 @@ class MetadataEngine:
             if (lens_tmdb_ids_from_lens or lens_imdb_ids_from_lens)
             else "lens_derived_google_official_title_search"
         )
-        evidence["official_title_search"] = {
-            "source": "google_lens_result_titles_and_direct_play_store_urls",
-            "status": title_search_diagnostics.get("status", "unavailable"),
-            "query_count": title_search_diagnostics.get("query_count", 0),
-            "query_variants": list(title_search_diagnostics.get("query_variants") or []),
-            "title_hints": list(title_search_diagnostics.get("title_hints") or [])[:5],
-            "year_hint": title_search_diagnostics.get("year_hint"),
-            "organic_result_count": title_search_diagnostics.get("organic_result_count", 0),
-            "candidate_url_count": title_search_diagnostics.get("candidate_url_count", 0),
-            "google_redirect_count": title_search_diagnostics.get("google_redirect_count", 0),
-            "google_redirect_unwrapped_count": title_search_diagnostics.get("google_redirect_unwrapped_count", 0),
-            "candidate_domains": dict(title_search_diagnostics.get("candidate_domains") or {}),
-            "official_url_count": title_search_diagnostics.get("official_url_count", 0),
-            "error": title_search_diagnostics.get("error"),
-            "tmdb_ids": list(title_search_tmdb_ids),
-            "imdb_ids": list(title_search_imdb_ids),
-        }
+        evidence["official_title_search"] = title_search_evidence()
         evidence["id_resolution"]["strategy"] = (
             "lens_official_id_or_lens_derived_google_official_title_search_then_tmdb_find"
         )
@@ -513,6 +613,20 @@ class MetadataEngine:
         selected = identities[0]
         selected_id = int(selected["tmdb_id"])
         selected_candidate = resolved[selected_id]
+        identity_consistency = _folder_identity_consistency(
+            selected_candidate,
+            expected_folder,
+        )
+        evidence["identity_consistency"] = identity_consistency
+        if not identity_consistency.get("allowed", False):
+            tmdb_id_lookup["status"] = "identity_context_conflict"
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": identity_consistency.get("reason") or "Candidate identity conflicts with source context",
+                "candidate_ids": [selected_id],
+                "identity_consistency": identity_consistency,
+            }, evidence
         has_direct_tmdb_id = selected_id in lens_tmdb_ids_from_lens
         has_title_search_tmdb_id = selected_id in title_search_tmdb_ids
         has_imdb_id = bool(expected_imdb_ids_by_tmdb.get(selected_id))
@@ -560,6 +674,7 @@ class MetadataEngine:
             "google_title_search_imdb_ids": list(title_search_imdb_ids),
             "folder_name_used": False,
             "image_filename_used": False,
+            "identity_consistency": identity_consistency,
         }
         return selected_candidate, {
             "status": "ready",
@@ -1021,7 +1136,7 @@ class MetadataEngine:
                     "error": f"{type(exc).__name__}: {str(exc)[:240]}",
                 }
 
-        candidate, match, reverse_image_evidence = self._find_movie(reverse_image_results)
+        candidate, match, reverse_image_evidence = self._find_movie(\n            reverse_image_results, expected_folder=folder\n        )
         wikipedia_tmdb_suggestions = (
             self._wikipedia_tmdb_suggestions_from_lens(reverse_image_results)
             if not candidate
@@ -1066,9 +1181,7 @@ class MetadataEngine:
         # Recompute after _find_movie: its official title-search fallback may
         # append direct TMDB/IMDb URLs found from Lens-derived title hints.
         lens_diagnostics.update(tmdb_movie_url_diagnostics(reverse_image_results))
-        title_search_diag = getattr(
-            self.reverse_image, "last_official_search_diagnostics", {}
-        )
+        title_search_diag = reverse_image_evidence.get("official_title_search") or {}
         if not isinstance(title_search_diag, dict):
             title_search_diag = {}
         lens_diagnostics.update({
