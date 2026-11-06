@@ -16,6 +16,8 @@ class Settings:
     batch_limit: int
     http_timeout_seconds: float
     local_ocr_enabled: bool = False
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.8-flash"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -30,6 +32,8 @@ class Settings:
             batch_limit=max(1, int(os.getenv("BATCH_LIMIT", "5"))),
             http_timeout_seconds=max(5.0, float(os.getenv("HTTP_TIMEOUT_SECONDS", "60"))),
             local_ocr_enabled=os.getenv("LOCAL_OCR_ENABLED", "false").strip().casefold() in {"1", "true", "yes", "on"},
+            gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
+            gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash",
         )
 
     def validate_brightdata(self) -> None:

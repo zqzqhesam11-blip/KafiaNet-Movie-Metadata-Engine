@@ -11,6 +11,7 @@ from app.github_api import GitHubAPI
 from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, tmdb_movie_url_diagnostics
 from app.local_ocr import LocalPosterOCR
 from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
+from app.gemini_vision import GeminiPosterVision, MIN_CANDIDATE_CONFIDENCE
 from app.tmdb import TMDBClient
 from app.wikipedia import WikipediaClient
 
@@ -165,6 +166,16 @@ class MetadataEngine:
             settings.brightdata_serp_zone,
             timeout=max(45, settings.http_timeout_seconds),
         )
+        gemini_api_key = str(getattr(settings, "gemini_api_key", "") or "").strip()
+        self.gemini_vision = (
+            GeminiPosterVision(
+                gemini_api_key,
+                model=str(getattr(settings, "gemini_model", "gemini-3.8-flash") or "gemini-3.8-flash"),
+                timeout=settings.http_timeout_seconds,
+            )
+            if gemini_api_key
+            else None
+        )
         self.local_ocr = (
             LocalPosterOCR(timeout=settings.http_timeout_seconds)
             if bool(getattr(settings, "local_ocr_enabled", False))
@@ -178,6 +189,8 @@ class MetadataEngine:
             self.wikipedia.close()
         if self.reverse_image:
             self.reverse_image.close()
+        if getattr(self, "gemini_vision", None):
+            self.gemini_vision.close()
         if getattr(self, "local_ocr", None):
             self.local_ocr.close()
 
@@ -222,20 +235,238 @@ class MetadataEngine:
                 result["stop_batch"] = True
             return [result]
 
+
+    @staticmethod
+    def _lens_title_corroborates_vision_candidate(
+        title: str,
+        year: int,
+        lens_results: list[dict[str, Any]],
+        lens_client: Any,
+    ) -> tuple[bool, int | None, list[str]]:
+        """Check whether independent Lens result titles support a vision title."""
+        hints: list[str] = []
+        lens_year: int | None = None
+        extractor = getattr(lens_client, "title_hints_from_lens_results", None)
+        if callable(extractor):
+            try:
+                raw_hints, lens_year = extractor(list(lens_results or []))
+                hints = [
+                    " ".join(str(value or "").split()).strip()
+                    for value in (raw_hints or [])
+                    if str(value or "").strip()
+                ][:8]
+            except Exception:
+                hints = []
+                lens_year = None
+        if not hints:
+            hints = [
+                " ".join(str(row.get("title") or "").split()).strip()
+                for row in (lens_results or [])
+                if isinstance(row, dict) and not row.get("error") and row.get("title")
+            ][:8]
+
+        wanted = [
+            token for token in _identity_title_tokens(title)
+            if token not in {"a", "an", "the"}
+        ]
+        if len(wanted) < 3:
+            return False, lens_year, hints
+        corroborated = False
+        for hint in hints:
+            available = _identity_title_tokens(hint)
+            cursor = 0
+            matched = True
+            for token in wanted:
+                try:
+                    cursor = available.index(token, cursor) + 1
+                except ValueError:
+                    matched = False
+                    break
+            if matched:
+                corroborated = True
+                break
+        year_ok = lens_year is None or int(lens_year) == int(year)
+        return corroborated and year_ok, lens_year, hints
+
+    def _vision_tmdb_candidates(
+        self,
+        vision_result: dict[str, Any] | None,
+    ) -> tuple[dict[int, list[dict[str, Any]]], dict[str, Any]]:
+        """Search TMDB from high-confidence poster-vision titles; still unverified."""
+        output: dict[str, Any] = {
+            "provider": "google_gemini_vision",
+            "status": "not_run",
+            "identity_evidence": False,
+            "automatic_match_allowed": False,
+            "minimum_confidence": MIN_CANDIDATE_CONFIDENCE,
+            "queries": [],
+            "candidate_tmdb_ids": [],
+            "verified_tmdb_ids": [],
+            "validation": [],
+        }
+        by_tmdb_id: dict[int, list[dict[str, Any]]] = {}
+        if not isinstance(vision_result, dict):
+            output["status"] = "unavailable"
+            return by_tmdb_id, output
+        if vision_result.get("status") != "ok" or vision_result.get("is_movie_poster") is not True:
+            output["status"] = str(vision_result.get("status") or "no_confident_candidate")
+            return by_tmdb_id, output
+
+        searcher = getattr(self.tmdb, "search_movies", None)
+        if not callable(searcher):
+            output["status"] = "tmdb_search_unavailable"
+            return by_tmdb_id, output
+
+        candidates = [
+            row for row in (vision_result.get("candidates") or [])
+            if isinstance(row, dict)
+            and str(row.get("title") or "").strip()
+            and isinstance(row.get("year"), int)
+            and 1870 <= row["year"] <= 2100
+            and float(row.get("confidence") or 0) >= MIN_CANDIDATE_CONFIDENCE
+        ][:3]
+        if not candidates:
+            output["status"] = "no_confident_candidate"
+            return by_tmdb_id, output
+
+        for candidate in candidates:
+            title = " ".join(str(candidate.get("title") or "").split()).strip()
+            year = int(candidate["year"])
+            query_row: dict[str, Any] = {
+                "title": title[:180],
+                "year": year,
+                "confidence": candidate.get("confidence"),
+                "results": [],
+            }
+            try:
+                payload = searcher(title, year)
+                rows = payload.get("results") or []
+                for row in rows[:8]:
+                    if not isinstance(row, dict) or not str(row.get("id") or "").isdigit():
+                        continue
+                    release_date = str(row.get("release_date") or "")
+                    result_year = int(release_date[:4]) if release_date[:4].isdigit() else None
+                    title_keys = {
+                        _comparison_title_key(row.get("title")),
+                        _comparison_title_key(row.get("original_title")),
+                    }
+                    exact_title = _comparison_title_key(title) in title_keys
+                    if not exact_title or result_year != year:
+                        continue
+                    tmdb_id = int(row["id"])
+                    if tmdb_id <= 0:
+                        continue
+                    by_tmdb_id.setdefault(tmdb_id, []).append(dict(candidate))
+                    query_row["results"].append({
+                        "tmdb_id": tmdb_id,
+                        "title": row.get("title"),
+                        "original_title": row.get("original_title"),
+                        "year": result_year,
+                    })
+                    if len(query_row["results"]) >= 5:
+                        break
+            except Exception as exc:
+                query_row["error"] = f"{type(exc).__name__}: {str(exc)[:180]}"
+            output["queries"].append(query_row)
+
+        output["candidate_tmdb_ids"] = sorted(by_tmdb_id)
+        output["status"] = "tmdb_candidates_found" if by_tmdb_id else "no_exact_tmdb_title_year_match"
+        return by_tmdb_id, output
+
+    def _validate_vision_candidate_details(
+        self,
+        details: dict[str, Any],
+        vision_candidate: dict[str, Any],
+        lens_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Require exact TMDB title/year and a matching director or Lens corroboration."""
+        normalized = TMDBClient.normalize_details(details or {})
+        wanted_title = _comparison_title_key(vision_candidate.get("title"))
+        titles = [
+            normalized.get("title"),
+            normalized.get("original_title"),
+            *[
+                row.get("title")
+                for row in (normalized.get("alternative_titles") or [])
+                if isinstance(row, dict)
+            ],
+        ]
+        matching_titles = [
+            str(value) for value in titles
+            if value and _comparison_title_key(value) == wanted_title
+        ]
+        title_match = bool(matching_titles)
+        try:
+            wanted_year = int(vision_candidate.get("year"))
+            tmdb_year = int(normalized.get("year"))
+        except (TypeError, ValueError):
+            wanted_year = None
+            tmdb_year = None
+        year_match = wanted_year is not None and tmdb_year == wanted_year
+
+        vision_director = " ".join(str(vision_candidate.get("director") or "").split()).strip()
+        tmdb_directors = [
+            str(row.get("name") or "").strip()
+            for row in (normalized.get("directors") or [])
+            if isinstance(row, dict) and row.get("name")
+        ]
+        director_match = (
+            bool(vision_director)
+            and _comparison_title_key(vision_director) in {
+                _comparison_title_key(value) for value in tmdb_directors
+            }
+        )
+        lens_corroborated, lens_year, lens_hints = (
+            self._lens_title_corroborates_vision_candidate(
+                str(vision_candidate.get("title") or ""),
+                wanted_year or 0,
+                lens_results,
+                getattr(self, "reverse_image", None),
+            )
+            if not vision_director and wanted_year is not None
+            else (False, None, [])
+        )
+        corroboration_passed = director_match if vision_director else lens_corroborated
+        allowed = title_match and year_match and corroboration_passed
+        return {
+            "title_match": title_match,
+            "year_match": year_match,
+            "matching_tmdb_titles": matching_titles[:5],
+            "vision_year": wanted_year,
+            "tmdb_year": tmdb_year,
+            "vision_director": vision_director or None,
+            "tmdb_directors": tmdb_directors[:8],
+            "director_match": director_match,
+            "lens_title_corroborated": lens_corroborated,
+            "lens_year": lens_year,
+            "lens_title_hints": lens_hints[:5],
+            "corroboration_method": "tmdb_director" if vision_director else "lens_title",
+            "allowed": allowed,
+            "reason": (
+                "Gemini poster title/year matched TMDB and the director was confirmed"
+                if allowed and vision_director
+                else "Gemini poster title/year matched TMDB and Lens independently corroborated the title"
+                if allowed
+                else "Gemini candidate failed exact TMDB title/year/director or independent Lens corroboration"
+            ),
+        }
+
     def _find_movie(
         self,
         reverse_image_results: list[dict[str, Any]],
         expected_folder: str | None = None,
+        vision_result: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
-        """Resolve only official TMDB/IMDb identifiers, with a Lens-derived title-search fallback.
+        """Resolve Lens official IDs or strict Gemini poster-title candidates.
 
-        Direct Lens links are preferred. If Lens exposes no official movie ID,
-        one Google SERP query is built only from Lens result titles and direct
-        Google Play movie URLs. The source-folder name and local image filename
-        are never search inputs or candidate selectors. After one official ID
-        resolves, the folder label may only veto an obvious title/year conflict.
-        IMDb IDs are mapped through TMDB /find, then every candidate is verified
-        through TMDB movie details.
+        Lens direct official IDs are preferred. When Lens has no official ID,
+        high-confidence Gemini visual title/year candidates may be searched in
+        TMDB; each must match TMDB's title/year and either its director credits
+        or independent Lens title evidence. If Gemini has no strong candidate,
+        the existing Lens-derived official-page search remains available.
+        Folder names and image filenames never discover or select candidates.
+        The folder label remains a negative-only conflict veto after resolution.
+        Every selected TMDB ID is verified through official movie details.
         """
         reverse_image_failed = any(
             isinstance(item, dict) and item.get("error")
@@ -325,18 +556,40 @@ class MetadataEngine:
             "official_title_search": title_search_evidence(),
         }
 
-        if reverse_image_failed:
+        vision_can_recover_lens_failure = (
+            isinstance(vision_result, dict)
+            and vision_result.get("status") == "ok"
+            and vision_result.get("is_movie_poster") is True
+            and bool(vision_result.get("candidates"))
+        )
+        if reverse_image_failed and not vision_can_recover_lens_failure:
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "Google Lens image lookup or URL resolution failed; no movie identity was guessed",
+                "reason": "Google Lens image lookup or URL resolution failed and Gemini supplied no strong visual candidate",
                 "candidate_ids": [],
             }, evidence
 
-        # Fallback only when Lens itself returned no official TMDB/IMDb ID.
-        # Its single query is derived exclusively from Lens result titles and
-        # direct Google Play movie URLs, never from the source folder or filename.
-        if not lens_tmdb_ids and not lens_imdb_ids:
+        vision_candidates_by_id: dict[int, list[dict[str, Any]]] = {}
+        vision_resolution: dict[str, Any] = {
+            "provider": "google_gemini_vision",
+            "status": "skipped_official_identity_present" if (lens_tmdb_ids or lens_imdb_ids) else "not_run",
+            "identity_evidence": False,
+            "automatic_match_allowed": False,
+            "queries": [],
+            "candidate_tmdb_ids": [],
+            "verified_tmdb_ids": [],
+            "validation": [],
+        }
+        if not lens_tmdb_ids and not lens_imdb_ids and isinstance(vision_result, dict):
+            vision_candidates_by_id, vision_resolution = self._vision_tmdb_candidates(vision_result)
+            if vision_candidates_by_id:
+                title_search_diagnostics["status"] = "skipped_vision_tmdb_candidates_found"
+
+        # If vision finds a strong title candidate, search TMDB directly rather
+        # than spending another Bright Data Google Search request. Otherwise,
+        # retain the existing Lens-derived official-page search fallback.
+        if not lens_tmdb_ids and not lens_imdb_ids and not vision_candidates_by_id and not self._stop_batch:
             title_searcher = getattr(
                 getattr(self, "reverse_image", None),
                 "search_official_movie_pages_from_lens",
@@ -390,9 +643,12 @@ class MetadataEngine:
                 lens_tmdb_ids = list(dict.fromkeys([*lens_tmdb_ids, *title_search_tmdb_ids]))
                 lens_imdb_ids = list(dict.fromkeys([*lens_imdb_ids, *title_search_imdb_ids]))
 
+        evidence["vision_resolution"] = vision_resolution
         evidence["strategy"] = (
             "google_lens_official_id"
             if (lens_tmdb_ids_from_lens or lens_imdb_ids_from_lens)
+            else "gemini_vision_tmdb_title_year_lookup"
+            if vision_candidates_by_id
             else "lens_derived_google_official_title_search"
         )
         evidence["official_title_search"] = title_search_evidence()
@@ -403,21 +659,30 @@ class MetadataEngine:
         evidence["id_resolution"]["imdb_ids_seen"] = list(lens_imdb_ids)
         evidence["id_resolution"]["google_title_search_tmdb_ids"] = list(title_search_tmdb_ids)
         evidence["id_resolution"]["google_title_search_imdb_ids"] = list(title_search_imdb_ids)
+        evidence["id_resolution"]["vision_tmdb_ids"] = sorted(vision_candidates_by_id)
         tmdb_id_lookup.update({
-            "status": "resolving" if (lens_tmdb_ids or lens_imdb_ids) else "no_tmdb_id",
+            "status": "resolving" if (lens_tmdb_ids or lens_imdb_ids or vision_candidates_by_id) else "no_tmdb_id",
             "tmdb_ids": list(lens_tmdb_ids),
             "direct_tmdb_ids": list(lens_tmdb_ids_from_lens),
             "imdb_ids": list(lens_imdb_ids),
             "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
             "google_title_search_imdb_ids": list(title_search_imdb_ids),
+            "vision_tmdb_ids": sorted(vision_candidates_by_id),
         })
         evidence["tmdb_ids"] = list(lens_tmdb_ids)
         evidence["imdb_ids"] = list(lens_imdb_ids)
 
-        if not lens_tmdb_ids and not lens_imdb_ids:
+        if self._stop_batch:
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": "A provider limit or service error was reached; this batch is stopping without catalog writes",
+                "candidate_ids": [],
+            }, evidence
+
+        if not lens_tmdb_ids and not lens_imdb_ids and not vision_candidates_by_id:
             reason = (
-                "Lens returned no direct official IDs and the Lens-derived Google title search "
-                "found no official TMDB/IMDb movie URL with a usable numeric identifier"
+                "Neither Lens nor Gemini poster vision produced a TMDB/IMDb identity candidate"
             )
             if title_search_diagnostics.get("error"):
                 reason = (
@@ -488,6 +753,7 @@ class MetadataEngine:
         candidate_tmdb_ids = list(dict.fromkeys([
             *lens_tmdb_ids,
             *(value for ids in imdb_to_tmdb_ids.values() for value in ids),
+            *sorted(vision_candidates_by_id),
         ]))
         tmdb_id_lookup["tmdb_ids"] = candidate_tmdb_ids
         evidence["tmdb_ids"] = candidate_tmdb_ids
@@ -537,6 +803,20 @@ class MetadataEngine:
                     raise ValueError(
                         "TMDB movie details did not confirm the IMDb ID returned by /find"
                     )
+                if int(tmdb_id) in vision_candidates_by_id:
+                    checks = [
+                        self._validate_vision_candidate_details(details, candidate, reverse_image_results)
+                        for candidate in vision_candidates_by_id[int(tmdb_id)]
+                    ]
+                    allowed_checks = [row for row in checks if row.get("allowed")]
+                    vision_resolution["validation"].append({
+                        "tmdb_id": int(tmdb_id),
+                        "checks": checks[:3],
+                        "allowed": bool(allowed_checks),
+                    })
+                    if not allowed_checks:
+                        continue
+                    vision_resolution["verified_tmdb_ids"].append(int(tmdb_id))
                 resolved[int(tmdb_id)] = details
             except Exception as exc:
                 details_errors.append({
@@ -545,6 +825,14 @@ class MetadataEngine:
                     "message": str(exc)[:250],
                 })
 
+        vision_resolution["verified_tmdb_ids"] = sorted(set(vision_resolution["verified_tmdb_ids"]))
+        if vision_candidates_by_id:
+            vision_resolution["status"] = (
+                "verified" if vision_resolution["verified_tmdb_ids"] else "tmdb_details_validation_failed"
+            )
+            vision_resolution["identity_evidence"] = bool(vision_resolution["verified_tmdb_ids"])
+            vision_resolution["automatic_match_allowed"] = len(vision_resolution["verified_tmdb_ids"]) == 1
+        evidence["vision_resolution"] = vision_resolution
         evidence["id_resolution"]["errors"].extend(details_errors)
         evidence["id_resolution"]["unresolved_tmdb_ids"] = [
             int(row["tmdb_id"]) for row in details_errors
@@ -552,6 +840,13 @@ class MetadataEngine:
         tmdb_id_lookup["details_resolved"] = len(resolved)
         tmdb_id_lookup["errors"] = details_errors
         tmdb_id_lookup["status"] = "error" if details_errors else "resolved"
+        if vision_candidates_by_id and not vision_resolution.get("verified_tmdb_ids"):
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": "Gemini visual candidate did not pass exact TMDB title/year and director-or-Lens corroboration checks",
+                "candidate_ids": sorted(vision_candidates_by_id),
+            }, evidence
         if details_errors:
             return None, {
                 "status": "review",
@@ -652,7 +947,12 @@ class MetadataEngine:
             value in title_search_imdb_ids
             for value in expected_imdb_ids_by_tmdb.get(selected_id, [])
         )
-        if has_direct_tmdb_id and has_imdb_id:
+        has_vision_tmdb_id = selected_id in vision_candidates_by_id
+        if has_vision_tmdb_id:
+            identity_source = "gemini_vision_poster_pixels_verified_by_tmdb"
+            identity_method = "gemini_vision_exact_title_year_director_tmdb_details"
+            verification = "poster_image_visual_identification_plus_exact_tmdb_title_year_and_director_or_lens_corroboration"
+        elif has_direct_tmdb_id and has_imdb_id:
             identity_source = "google_lens_official_tmdb_and_imdb_ids"
             identity_method = "lens_tmdb_and_imdb_id_lookup"
             verification = "official_tmdb_url_plus_tmdb_find_imdb_id_and_movie_details"
@@ -690,6 +990,8 @@ class MetadataEngine:
             "official_imdb_ids": list(lens_imdb_ids),
             "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
             "google_title_search_imdb_ids": list(title_search_imdb_ids),
+            "vision_tmdb_ids": sorted(vision_candidates_by_id),
+            "vision_validation": vision_resolution.get("validation") or [],
             "folder_name_used": False,
             "image_filename_used": False,
             "identity_consistency": identity_consistency,
@@ -703,7 +1005,9 @@ class MetadataEngine:
             "imdb_id": selected["imdb_id"],
             "folder_name_used_for_matching": False,
             "reason": (
-                "TMDB movie details confirmed official TMDB and IMDb links returned by the Lens-derived Google search"
+                "Gemini identified the poster and TMDB movie details confirmed its exact title/year plus director or Lens title corroboration"
+                if has_vision_tmdb_id
+                else "TMDB movie details confirmed official TMDB and IMDb links returned by the Lens-derived Google search"
                 if has_title_search_tmdb_id and has_title_search_imdb_id
                 else "TMDB confirmed the movie ID from an official TMDB link"
                 if has_direct_tmdb_id and not has_imdb_id
@@ -1154,8 +1458,61 @@ class MetadataEngine:
                     "error": f"{type(exc).__name__}: {str(exc)[:240]}",
                 }
 
+        vision_result: dict[str, Any] = {
+            "provider": "google_gemini_vision",
+            "source": "poster_image_pixels",
+            "status": (
+                "skipped_official_identity_present"
+                if has_lens_official_id
+                else "disabled_by_configuration"
+                if getattr(self, "gemini_vision", None) is None
+                else "not_run"
+            ),
+            "model": str(getattr(self.settings, "gemini_model", "gemini-3.8-flash") or "gemini-3.8-flash"),
+            "identity_evidence": False,
+            "automatic_match_allowed": False,
+            "candidates": [],
+            "poster_text": [],
+        }
+        gemini_vision = getattr(self, "gemini_vision", None)
+        if not has_lens_official_id and gemini_vision is not None and not self._stop_batch:
+            try:
+                vision_result = gemini_vision.identify_poster(image_url)
+                if not isinstance(vision_result, dict):
+                    raise ValueError("Gemini vision client returned an invalid result")
+            except Exception as exc:
+                provider_status = getattr(exc, "status_code", None)
+                if provider_status == 429 or (
+                    isinstance(provider_status, int) and provider_status >= 500
+                ):
+                    self._stop_batch = True
+                    self._provider_stop_status = provider_status
+                    self._provider_stop_reason = (
+                        "gemini_quota_or_throttle"
+                        if provider_status == 429
+                        else "gemini_provider_server_error"
+                    )
+                vision_result = {
+                    "provider": "google_gemini_vision",
+                    "source": "poster_image_pixels",
+                    "status": "error",
+                    "model": str(getattr(self.settings, "gemini_model", "gemini-3.8-flash") or "gemini-3.8-flash"),
+                    "identity_evidence": False,
+                    "automatic_match_allowed": False,
+                    "candidates": [],
+                    "poster_text": [],
+                    "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+                }
+
         candidate, match, reverse_image_evidence = self._find_movie(
-            reverse_image_results, expected_folder=folder
+            reverse_image_results, expected_folder=folder, vision_result=vision_result
+        )
+        vision_resolution = reverse_image_evidence.get("vision_resolution") or {}
+        vision_result["tmdb_resolution"] = vision_resolution
+        vision_result["identity_evidence"] = bool(vision_resolution.get("identity_evidence"))
+        vision_result["automatic_match_allowed"] = bool(
+            vision_resolution.get("automatic_match_allowed")
+            and str(match.get("identity_source") or "").startswith("gemini_vision_")
         )
         wikipedia_tmdb_suggestions = (
             self._wikipedia_tmdb_suggestions_from_lens(reverse_image_results)
@@ -1230,6 +1587,14 @@ class MetadataEngine:
                 "exact_title_year_match_count", 0
             ),
         })
+        lens_diagnostics.update({
+            "vision_status": vision_result.get("status", "not_run"),
+            "vision_model": vision_result.get("model", "unknown"),
+            "vision_candidates": len(vision_result.get("candidates") or []),
+            "vision_tmdb_candidate_ids": list(vision_resolution.get("candidate_tmdb_ids") or []),
+            "vision_verified_tmdb_ids": list(vision_resolution.get("verified_tmdb_ids") or []),
+            "vision_resolution_status": vision_resolution.get("status", "not_run"),
+        })
         reverse_image_evidence["results_source"] = reverse_image_results_source
         reverse_image_evidence["lens_diagnostics"] = lens_diagnostics
         reverse_image_evidence["wikipedia_tmdb_suggestions"] = {
@@ -1257,6 +1622,7 @@ class MetadataEngine:
             },
             "match": match,
             "wikipedia": wikipedia_tmdb_suggestions,
+            "vision": vision_result,
             "ocr": {
                 **ocr_result,
                 "tmdb_suggestions": ocr_tmdb_suggestions,
@@ -1474,9 +1840,13 @@ class MetadataEngine:
 
             def safe_log_detail(value: Any, limit: int = 170) -> str:
                 detail = " ".join(str(value or "").replace('"', "'").replace("\r", " ").replace("\n", " ").split())
-                secret = str(getattr(self.settings, "brightdata_api_key", "") or "")
-                if secret:
-                    detail = detail.replace(secret, "[REDACTED]")
+                for secret in (
+                    getattr(self.settings, "brightdata_api_key", ""),
+                    getattr(self.settings, "gemini_api_key", ""),
+                ):
+                    secret = str(secret or "")
+                    if secret:
+                        detail = detail.replace(secret, "[REDACTED]")
                 return detail[:limit] or "none"
 
             lens_error = "none"
@@ -1496,6 +1866,12 @@ class MetadataEngine:
                 f"lens_http={lens_diag.get('http_status', 'none')} "
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
+                f"vision_status={lens_diag.get('vision_status', 'not_run')} "
+                f"vision_model={lens_diag.get('vision_model', 'unknown')} "
+                f"vision_candidates={lens_diag.get('vision_candidates', 0)} "
+                f"vision_tmdb_ids={','.join(str(value) for value in (lens_diag.get('vision_tmdb_candidate_ids') or [])[:5]) or 'none'} "
+                f"vision_verified_ids={','.join(str(value) for value in (lens_diag.get('vision_verified_tmdb_ids') or [])[:5]) or 'none'} "
+                f"vision_resolution={lens_diag.get('vision_resolution_status', 'not_run')} "
                 f"title_search_status={lens_diag.get('title_search_status', 'not_run')} "
                 f"title_search_format={lens_diag.get('title_search_response_format', 'unknown')} "
                 f"title_search_http={lens_diag.get('title_search_http_status', 'none')} "
@@ -1561,7 +1937,7 @@ class MetadataEngine:
                 )
             if self._stop_batch:
                 print(
-                    f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status} "
+                    f"[KafiaNet] STOP: provider HTTP {self._provider_stop_status} "
                     f"({self._provider_stop_reason or 'provider_limit'}); "
                     "remaining posters were not queried and this batch will not write catalog changes.",
                     flush=True,
