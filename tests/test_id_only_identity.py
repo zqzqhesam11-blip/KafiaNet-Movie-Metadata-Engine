@@ -364,7 +364,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(diagnostics["title_search_status"], "skipped_lens_error")
         self.assertEqual(diagnostics["title_search_query_count"], 0)
         self.assertEqual(diagnostics["title_search_hints"], [])
-        self.assertEqual(diagnostics["title_search_domains"], {})
+        self.assertEqual(diagnostics["title_search_candidate_domains"], {})
 
 
 
