@@ -457,15 +457,16 @@ class MetadataEngine:
         expected_folder: str | None = None,
         vision_result: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
-        """Resolve only official TMDB/IMDb identifiers, with a Lens-derived title-search fallback.
+        """Resolve Lens official IDs or strict Gemini poster-title candidates.
 
-        Direct Lens links are preferred. If Lens exposes no official movie ID,
-        one Google SERP query is built only from Lens result titles and direct
-        Google Play movie URLs. The source-folder name and local image filename
-        are never search inputs or candidate selectors. After one official ID
-        resolves, the folder label may only veto an obvious title/year conflict.
-        IMDb IDs are mapped through TMDB /find, then every candidate is verified
-        through TMDB movie details.
+        Lens direct official IDs are preferred. When Lens has no official ID,
+        high-confidence Gemini visual title/year candidates may be searched in
+        TMDB; each must match TMDB's title/year and either its director credits
+        or independent Lens title evidence. If Gemini has no strong candidate,
+        the existing Lens-derived official-page search remains available.
+        Folder names and image filenames never discover or select candidates.
+        The folder label remains a negative-only conflict veto after resolution.
+        Every selected TMDB ID is verified through official movie details.
         """
         reverse_image_failed = any(
             isinstance(item, dict) and item.get("error")
@@ -555,11 +556,17 @@ class MetadataEngine:
             "official_title_search": title_search_evidence(),
         }
 
-        if reverse_image_failed:
+        vision_can_recover_lens_failure = (
+            isinstance(vision_result, dict)
+            and vision_result.get("status") == "ok"
+            and vision_result.get("is_movie_poster") is True
+            and bool(vision_result.get("candidates"))
+        )
+        if reverse_image_failed and not vision_can_recover_lens_failure:
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "Google Lens image lookup or URL resolution failed; no movie identity was guessed",
+                "reason": "Google Lens image lookup or URL resolution failed and Gemini supplied no strong visual candidate",
                 "candidate_ids": [],
             }, evidence
 
@@ -1814,9 +1821,13 @@ class MetadataEngine:
 
             def safe_log_detail(value: Any, limit: int = 170) -> str:
                 detail = " ".join(str(value or "").replace('"', "'").replace("\r", " ").replace("\n", " ").split())
-                secret = str(getattr(self.settings, "brightdata_api_key", "") or "")
-                if secret:
-                    detail = detail.replace(secret, "[REDACTED]")
+                for secret in (
+                    getattr(self.settings, "brightdata_api_key", ""),
+                    getattr(self.settings, "gemini_api_key", ""),
+                ):
+                    secret = str(secret or "")
+                    if secret:
+                        detail = detail.replace(secret, "[REDACTED]")
                 return detail[:limit] or "none"
 
             lens_error = "none"
