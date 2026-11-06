@@ -44,13 +44,26 @@ def _comparison_title_key(value: str | None) -> str:
     title = "".join(char for char in title if not unicodedata.combining(char))
     return re.sub(r"[^\w]+", " ", title.casefold(), flags=re.UNICODE).strip()
 
-def _compact_identity_title_key(value: str | None) -> str:
-    """Normalize titles for a conservative, punctuation-insensitive context check."""
+def _identity_title_tokens(value: str | None) -> list[str]:
+    """Normalize a title to Unicode-aware word tokens for exact phrase matching."""
     normalized = unicodedata.normalize("NFKD", str(value or ""))
     normalized = "".join(
         char for char in normalized if not unicodedata.combining(char)
     )
-    return "".join(char for char in normalized.casefold() if char.isalnum())
+    return re.findall(r"[^\\W_]+", normalized.casefold(), flags=re.UNICODE)
+
+
+def _contains_title_tokens(folder_tokens: list[str], title_tokens: list[str]) -> bool:
+    if not title_tokens:
+        return False
+    # Very short one-word names are too ambiguous to act as a safe veto key.
+    if len(title_tokens) == 1 and len(title_tokens[0]) < 5:
+        return False
+    width = len(title_tokens)
+    return any(
+        folder_tokens[start:start + width] == title_tokens
+        for start in range(len(folder_tokens) - width + 1)
+    )
 
 
 def _folder_identity_consistency(
@@ -77,7 +90,7 @@ def _folder_identity_consistency(
     folder_year_match = re.search(r"\(((?:18|19|20)\d{2})\)\s*$", folder)
     folder_year = int(folder_year_match.group(1)) if folder_year_match else None
     folder_title = folder[:folder_year_match.start()].strip() if folder_year_match else folder
-    folder_key = _compact_identity_title_key(folder_title)
+    folder_tokens = _identity_title_tokens(folder_title)
 
     aliases: list[str] = []
     for value in (normalized.get("title"), normalized.get("original_title")):
@@ -92,8 +105,10 @@ def _folder_identity_consistency(
 
     matching_aliases = [
         title for title in aliases
-        if len(_compact_identity_title_key(title)) >= 4
-        and _compact_identity_title_key(title) in folder_key
+        if _contains_title_tokens(
+            folder_tokens,
+            _identity_title_tokens(title),
+        )
     ]
     candidate_year = normalized.get("year")
     try:
