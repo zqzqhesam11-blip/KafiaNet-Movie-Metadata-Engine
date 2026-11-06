@@ -897,7 +897,27 @@ class BrightDataGoogleLensClient:
 
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
         """Search one public poster URL with bounded retries for transient provider failures."""
-        target_url = self._lens_request_url(image_url)
+        # Reset the title-search diagnostics per poster. This prevents a failed
+        # Lens request or a direct-ID path from inheriting the prior poster's
+        # Google Search diagnostics from this long-lived client.
+        self.last_official_search_diagnostics = {
+            "status": "not_run",
+            "query_count": 0,
+            "query_variants": [],
+            "title_hints": [],
+            "year_hint": None,
+            "response_format": "json",
+            "payload_shape": None,
+            "http_status": None,
+            "attempts": 0,
+            "organic_result_count": 0,
+            "candidate_url_count": 0,
+            "google_redirect_count": 0,
+            "google_redirect_unwrapped_count": 0,
+            "candidate_domains": {},
+            "official_url_count": 0,
+            "error": None,
+        }
         self.last_lens_diagnostics = {
             "status": "requesting",
             "lens_tab": LENS_TAB,
@@ -907,6 +927,7 @@ class BrightDataGoogleLensClient:
             "result_count": 0,
             "error": None,
         }
+        target_url = self._lens_request_url(image_url)
         try:
             response, payload, effective_status, attempts = self._post_serp_with_retries(
                 target_url,
