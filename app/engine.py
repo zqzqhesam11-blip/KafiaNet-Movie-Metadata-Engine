@@ -640,6 +640,8 @@ class MetadataEngine:
         evidence["strategy"] = (
             "google_lens_official_id"
             if (lens_tmdb_ids_from_lens or lens_imdb_ids_from_lens)
+            else "gemini_vision_tmdb_title_year_lookup"
+            if vision_candidates_by_id
             else "lens_derived_google_official_title_search"
         )
         evidence["official_title_search"] = title_search_evidence()
