@@ -281,11 +281,15 @@ class GeminiPosterVision:
             json=request_payload,
         )
         if response.status_code == 429:
-            raise GeminiVisionError("Gemini API request limit reached (HTTP 429)")
+            error = GeminiVisionError("Gemini API request limit reached (HTTP 429)")
+            error.status_code = 429
+            raise error
         if response.status_code >= 400:
-            raise GeminiVisionError(
+            error = GeminiVisionError(
                 f"Gemini API request failed (HTTP {response.status_code})"
             )
+            error.status_code = response.status_code
+            raise error
         try:
             payload = response.json()
         except (ValueError, json.JSONDecodeError) as exc:
