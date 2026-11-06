@@ -216,8 +216,10 @@ class MetadataEngine:
         Direct Lens links are preferred. If Lens exposes no official movie ID,
         one Google SERP query is built only from Lens result titles and direct
         Google Play movie URLs. The source-folder name and local image filename
-        are never inputs. IMDb IDs are mapped through TMDB /find, then every
-        candidate is verified through TMDB movie details.
+        are never search inputs or candidate selectors. After one official ID
+        resolves, the folder label may only veto an obvious title/year conflict.
+        IMDb IDs are mapped through TMDB /find, then every candidate is verified
+        through TMDB movie details.
         """
         reverse_image_failed = any(
             isinstance(item, dict) and item.get("error")
