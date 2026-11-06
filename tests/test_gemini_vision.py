@@ -91,8 +91,10 @@ class GeminiVisionClientTests(unittest.TestCase):
         self.assertFalse(result["automatic_match_allowed"])
         self.assertEqual(captured["url"], "https://generativelanguage.googleapis.com/v1beta/interactions")
         self.assertFalse(captured["body"]["store"])
-        self.assertEqual(captured["body"]["input"][0]["type"], "image")
-        self.assertEqual(captured["body"]["input"][0]["mime_type"], "image/jpeg")
+        self.assertEqual(captured["body"]["input"][0]["type"], "user_input")
+        self.assertEqual(captured["body"]["input"][0]["content"][1]["type"], "image")
+        self.assertEqual(captured["body"]["input"][0]["content"][1]["mime_type"], "image/jpeg")
+        self.assertEqual(captured["body"]["input"][0]["content"][1]["resolution"], "medium")
         self.assertEqual(captured["body"]["response_format"]["mime_type"], "application/json")
 
     def test_low_confidence_or_missing_year_never_becomes_eligible(self):
