@@ -50,7 +50,7 @@ def _identity_title_tokens(value: str | None) -> list[str]:
     normalized = "".join(
         char for char in normalized if not unicodedata.combining(char)
     )
-    return re.findall(r"[^\\W_]+", normalized.casefold(), flags=re.UNICODE)
+    return re.findall(r"[^\W_]+", normalized.casefold(), flags=re.UNICODE)
 
 
 def _contains_title_tokens(folder_tokens: list[str], title_tokens: list[str]) -> bool:
