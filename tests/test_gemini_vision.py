@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import call, patch
 
 import httpx
 
 from app.engine import MetadataEngine
-from app.gemini_vision import GeminiPosterVision, MIN_CANDIDATE_CONFIDENCE
+from app.gemini_vision import GeminiPosterVision, GeminiVisionError, MIN_CANDIDATE_CONFIDENCE
 from app.tmdb import TMDBClient
 
 
@@ -96,6 +97,97 @@ class GeminiVisionClientTests(unittest.TestCase):
         self.assertEqual(captured["body"]["input"][0]["content"][1]["mime_type"], "image/jpeg")
         self.assertEqual(captured["body"]["input"][0]["content"][1]["resolution"], "medium")
         self.assertEqual(captured["body"]["response_format"]["mime_type"], "application/json")
+
+
+    def test_gemini_http_503_retries_with_exponential_backoff(self):
+        api_calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal api_calls
+            if request.url.host == "raw.githubusercontent.com":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "image/jpeg"},
+                    content=b"\\xff\\xd8\\xffposter-pixels",
+                )
+            api_calls += 1
+            if api_calls < 3:
+                return httpx.Response(503, json={"error": {"message": "temporarily unavailable"}})
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "steps": [{
+                        "type": "model_output",
+                        "content": [{
+                            "type": "text",
+                            "text": json.dumps({
+                                "is_movie_poster": True,
+                                "candidates": [{
+                                    "title": "A Short Film About Killing",
+                                    "year": 1988,
+                                    "director": "Krzysztof Kieslowski",
+                                    "confidence": 0.97,
+                                    "visible_evidence": ["Readable title"],
+                                }],
+                                "poster_text": ["A Short Film About Killing"],
+                                "notes": "",
+                            }),
+                        }],
+                    }],
+                },
+            )
+
+        vision = GeminiPosterVision("test-secret")
+        vision.client.close()
+        vision.client = httpx.Client(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=False,
+        )
+        try:
+            with patch("app.gemini_vision.time.sleep") as sleep:
+                result = vision.identify_poster(
+                    "https://raw.githubusercontent.com/owner/repo/main/poster.jpg"
+                )
+        finally:
+            vision.close()
+
+        self.assertEqual(api_calls, 3)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+
+    def test_gemini_persistent_http_503_stops_after_three_attempts(self):
+        api_calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal api_calls
+            if request.url.host == "raw.githubusercontent.com":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "image/jpeg"},
+                    content=b"\\xff\\xd8\\xffposter-pixels",
+                )
+            api_calls += 1
+            return httpx.Response(503, json={"error": {"message": "temporarily unavailable"}})
+
+        vision = GeminiPosterVision("test-secret")
+        vision.client.close()
+        vision.client = httpx.Client(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=False,
+        )
+        try:
+            with patch("app.gemini_vision.time.sleep"):
+                with self.assertRaises(GeminiVisionError) as caught:
+                    vision.identify_poster(
+                        "https://raw.githubusercontent.com/owner/repo/main/poster.jpg"
+                    )
+        finally:
+            vision.close()
+
+        self.assertEqual(api_calls, 3)
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertIn("after 3 attempts", str(caught.exception))
 
     def test_gemini_http_429_is_exposed_for_batch_stop(self):
         def handler(request: httpx.Request) -> httpx.Response:
