@@ -589,7 +589,7 @@ class MetadataEngine:
         # If vision finds a strong title candidate, search TMDB directly rather
         # than spending another Bright Data Google Search request. Otherwise,
         # retain the existing Lens-derived official-page search fallback.
-        if not lens_tmdb_ids and not lens_imdb_ids and not vision_candidates_by_id:
+        if not lens_tmdb_ids and not lens_imdb_ids and not vision_candidates_by_id and not self._stop_batch:
             title_searcher = getattr(
                 getattr(self, "reverse_image", None),
                 "search_official_movie_pages_from_lens",
@@ -671,6 +671,14 @@ class MetadataEngine:
         })
         evidence["tmdb_ids"] = list(lens_tmdb_ids)
         evidence["imdb_ids"] = list(lens_imdb_ids)
+
+        if self._stop_batch:
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": "A provider limit or service error was reached; this batch is stopping without catalog writes",
+                "candidate_ids": [],
+            }, evidence
 
         if not lens_tmdb_ids and not lens_imdb_ids and not vision_candidates_by_id:
             reason = (
@@ -1473,6 +1481,17 @@ class MetadataEngine:
                 if not isinstance(vision_result, dict):
                     raise ValueError("Gemini vision client returned an invalid result")
             except Exception as exc:
+                provider_status = getattr(exc, "status_code", None)
+                if provider_status == 429 or (
+                    isinstance(provider_status, int) and provider_status >= 500
+                ):
+                    self._stop_batch = True
+                    self._provider_stop_status = provider_status
+                    self._provider_stop_reason = (
+                        "gemini_quota_or_throttle"
+                        if provider_status == 429
+                        else "gemini_provider_server_error"
+                    )
                 vision_result = {
                     "provider": "google_gemini_vision",
                     "source": "poster_image_pixels",
@@ -1918,7 +1937,7 @@ class MetadataEngine:
                 )
             if self._stop_batch:
                 print(
-                    f"[KafiaNet] STOP: Bright Data HTTP {self._provider_stop_status} "
+                    f"[KafiaNet] STOP: provider HTTP {self._provider_stop_status} "
                     f"({self._provider_stop_reason or 'provider_limit'}); "
                     "remaining posters were not queried and this batch will not write catalog changes.",
                     flush=True,
