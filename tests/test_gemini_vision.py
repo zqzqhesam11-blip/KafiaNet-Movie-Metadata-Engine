@@ -97,6 +97,33 @@ class GeminiVisionClientTests(unittest.TestCase):
         self.assertEqual(captured["body"]["input"][0]["content"][1]["resolution"], "medium")
         self.assertEqual(captured["body"]["response_format"]["mime_type"], "application/json")
 
+    def test_gemini_http_429_is_exposed_for_batch_stop(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "raw.githubusercontent.com":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "image/jpeg"},
+                    content=b"\xff\xd8\xffposter-pixels",
+                )
+            return httpx.Response(429, json={"error": {"message": "quota exhausted"}})
+
+        vision = GeminiPosterVision("test-secret")
+        vision.client.close()
+        vision.client = httpx.Client(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=False,
+        )
+        try:
+            with self.assertRaises(Exception) as caught:
+                vision.identify_poster(
+                    "https://raw.githubusercontent.com/owner/repo/main/poster.jpg"
+                )
+        finally:
+            vision.close()
+
+        self.assertEqual(getattr(caught.exception, "status_code", None), 429)
+        self.assertIn("request limit", str(caught.exception).lower())
+
     def test_low_confidence_or_missing_year_never_becomes_eligible(self):
         result = GeminiPosterVision._normalize_model_result({
             "is_movie_poster": True,
