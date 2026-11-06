@@ -108,7 +108,7 @@ class GeminiVisionClientTests(unittest.TestCase):
                 return httpx.Response(
                     200,
                     headers={"content-type": "image/jpeg"},
-                    content=b"\\xff\\xd8\\xffposter-pixels",
+                    content=b"\xff\xd8\xffposter-pixels",
                 )
             api_calls += 1
             if api_calls < 3:
@@ -165,7 +165,7 @@ class GeminiVisionClientTests(unittest.TestCase):
                 return httpx.Response(
                     200,
                     headers={"content-type": "image/jpeg"},
-                    content=b"\\xff\\xd8\\xffposter-pixels",
+                    content=b"\xff\xd8\xffposter-pixels",
                 )
             api_calls += 1
             return httpx.Response(503, json={"error": {"message": "temporarily unavailable"}})
