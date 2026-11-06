@@ -331,6 +331,11 @@ class IdOnlyIdentityTests(unittest.TestCase):
             expected_folder="Apollo 101⁄2 A Space Age Childhood (2022)",
         )
 
+        self.assertIsNotNone(
+            candidate,
+            msg=f"match={match!r}; identity_consistency={evidence.get('identity_consistency')!r}; "
+            f"identity_lookup={evidence.get('tmdb_id_lookup')!r}",
+        )
         self.assertEqual(candidate["id"], 664996)
         self.assertEqual(match["status"], "ready")
         self.assertEqual(evidence["identity_consistency"]["status"], "passed")
