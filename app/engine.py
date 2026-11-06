@@ -823,7 +823,7 @@ class MetadataEngine:
                 "verified" if vision_resolution["verified_tmdb_ids"] else "tmdb_details_validation_failed"
             )
             vision_resolution["identity_evidence"] = bool(vision_resolution["verified_tmdb_ids"])
-            vision_resolution["automatic_match_allowed"] = bool(vision_resolution["verified_tmdb_ids"])
+            vision_resolution["automatic_match_allowed"] = len(vision_resolution["verified_tmdb_ids"]) == 1
         evidence["vision_resolution"] = vision_resolution
         evidence["id_resolution"]["errors"].extend(details_errors)
         evidence["id_resolution"]["unresolved_tmdb_ids"] = [
@@ -1467,7 +1467,7 @@ class MetadataEngine:
             "poster_text": [],
         }
         gemini_vision = getattr(self, "gemini_vision", None)
-        if not has_lens_official_id and gemini_vision is not None:
+        if not has_lens_official_id and gemini_vision is not None and not self._stop_batch:
             try:
                 vision_result = gemini_vision.identify_poster(image_url)
                 if not isinstance(vision_result, dict):
