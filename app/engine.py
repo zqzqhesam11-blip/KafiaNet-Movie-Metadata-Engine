@@ -74,7 +74,7 @@ def _folder_identity_consistency(
 
     normalized = TMDBClient.normalize_details(details or {})
     folder = str(expected_folder).strip()
-    folder_year_match = re.search(r"\\(((?:18|19|20)\\d{2})\\)\\s*$", folder)
+    folder_year_match = re.search(r"\(((?:18|19|20)\d{2})\)\s*$", folder)
     folder_year = int(folder_year_match.group(1)) if folder_year_match else None
     folder_title = folder[:folder_year_match.start()].strip() if folder_year_match else folder
     folder_key = _compact_identity_title_key(folder_title)
@@ -1136,7 +1136,9 @@ class MetadataEngine:
                     "error": f"{type(exc).__name__}: {str(exc)[:240]}",
                 }
 
-        candidate, match, reverse_image_evidence = self._find_movie(\n            reverse_image_results, expected_folder=folder\n        )
+        candidate, match, reverse_image_evidence = self._find_movie(
+            reverse_image_results, expected_folder=folder
+        )
         wikipedia_tmdb_suggestions = (
             self._wikipedia_tmdb_suggestions_from_lens(reverse_image_results)
             if not candidate
