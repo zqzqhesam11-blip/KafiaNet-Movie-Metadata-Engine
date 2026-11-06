@@ -28,6 +28,22 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             api.client.post.return_value = response
         return api
 
+    def test_each_image_search_resets_previous_official_title_search_diagnostics(self):
+        api = self.make_client({"exact_matches": []})
+        api.last_official_search_diagnostics = {
+            "status": "ok",
+            "query_count": 2,
+            "title_hints": ["Biz Size Döneriz"],
+            "candidate_domains": {"themoviedb.org": 2},
+        }
+
+        api.search_by_image_url("https://example.com/breathless-poster.jpg")
+
+        self.assertEqual(api.last_official_search_diagnostics["status"], "not_run")
+        self.assertEqual(api.last_official_search_diagnostics["query_count"], 0)
+        self.assertEqual(api.last_official_search_diagnostics["title_hints"], [])
+        self.assertEqual(api.last_official_search_diagnostics["candidate_domains"], {})
+
     def test_search_uses_brightdata_rest_and_google_lens_exact_matches(self):
         api = self.make_client({
             "exact_matches": [{

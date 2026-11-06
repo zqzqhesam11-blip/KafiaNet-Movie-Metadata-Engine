@@ -260,7 +260,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         }]
 
         record = engine._record_for_folder({
-            "folder": "THIS FOLDER NAME IS INTENTIONALLY WRONG (1900)",
+            "folder": "A Short Film About Killing (1988)",
             "image_path": "Posters/poster.jpg",
         })
 
@@ -285,6 +285,91 @@ class IdOnlyIdentityTests(unittest.TestCase):
             "google_lens_official_tmdb_movie_id",
         )
         self.assertFalse(record["original"]["folder_name_used_for_matching"])
+        self.assertEqual(
+            record["reverse_image"]["evidence"]["identity_consistency"]["status"],
+            "passed",
+        )
+        self.assertFalse(
+            record["reverse_image"]["evidence"]["identity_consistency"]["folder_name_used_for_search"]
+        )
+        self.assertTrue(
+            record["reverse_image"]["evidence"]["identity_consistency"]["folder_name_used_for_conflict_veto"]
+        )
+
+    def test_bulado_folder_conflict_blocks_wrong_imdb_to_tmdb_identity(self):
+        engine = self.make_engine()
+        wrong_movie = movie_details(634, "tt0243155", "Bridget Jones's Diary")
+        wrong_movie["release_date"] = "2001-04-13"
+        engine.tmdb.records[634] = wrong_movie
+        engine.tmdb.find_results["tt0243155"] = {"movie_results": [{"id": 634}]}
+
+        candidate, match, evidence = engine._find_movie(
+            [{"url": "https://www.imdb.com/title/tt0243155/"}],
+            expected_folder="Buladó (2020)",
+        )
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(match["candidate_ids"], [634])
+        self.assertEqual(evidence["identity_consistency"]["status"], "conflict")
+        self.assertFalse(evidence["identity_consistency"]["title_match"])
+        self.assertFalse(evidence["identity_consistency"]["year_match"])
+        self.assertEqual(
+            evidence["identity_consistency"]["reason"],
+            "Resolved TMDB identity conflicts with the source-folder title and/or year; automatic match blocked",
+        )
+
+    def test_fraction_title_alias_and_year_are_normalized_for_consistency(self):
+        engine = self.make_engine()
+        apollo = movie_details(664996, "tt7978758", "Apollo 10½: A Space Age Childhood")
+        apollo["release_date"] = "2022-04-01"
+        engine.tmdb.records[664996] = apollo
+        engine.tmdb.find_results["tt7978758"] = {"movie_results": [{"id": 664996}]}
+
+        candidate, match, evidence = engine._find_movie(
+            [{"url": "https://www.imdb.com/title/tt7978758/"}],
+            expected_folder="Apollo 101⁄2 A Space Age Childhood (2022)",
+        )
+
+        self.assertIsNotNone(
+            candidate,
+            msg=f"match={match!r}; identity_consistency={evidence.get('identity_consistency')!r}; "
+            f"identity_lookup={evidence.get('tmdb_id_lookup')!r}",
+        )
+        self.assertEqual(candidate["id"], 664996)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(evidence["identity_consistency"]["status"], "passed")
+        self.assertTrue(evidence["identity_consistency"]["title_match"])
+        self.assertTrue(evidence["identity_consistency"]["year_match"])
+
+    def test_lens_failure_does_not_reuse_previous_film_title_search_diagnostics(self):
+        engine = self.make_engine()
+        engine.reverse_image.last_lens_diagnostics = {
+            "status": "error",
+            "result_count": 0,
+        }
+        engine.reverse_image.last_official_search_diagnostics = {
+            "status": "ok",
+            "query_count": 1,
+            "title_hints": ["Biz Size Döneriz"],
+            "candidate_domains": {"themoviedb.org": 2},
+            "official_url_count": 2,
+        }
+        engine._reverse_image_results = lambda _image_url: [{
+            "error": "BrightDataAPIError",
+            "message": "Lens returned an empty response",
+        }]
+
+        record = engine._record_for_folder({
+            "folder": "Breathless (1960)",
+            "image_path": "Posters/breathless.jpg",
+        })
+
+        diagnostics = record["reverse_image"]["latest_query"]["diagnostics"]
+        self.assertEqual(diagnostics["title_search_status"], "skipped_lens_error")
+        self.assertEqual(diagnostics["title_search_query_count"], 0)
+        self.assertEqual(diagnostics["title_search_hints"], [])
+        self.assertEqual(diagnostics["title_search_candidate_domains"], {})
 
 
 
