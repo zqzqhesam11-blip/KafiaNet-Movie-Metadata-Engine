@@ -253,14 +253,18 @@ class GeminiPosterVision:
         request_payload = {
             "model": self.model,
             "store": False,
-            "input": [
-                {
-                    "type": "image",
-                    "mime_type": mime_type,
-                    "data": base64.b64encode(image_bytes).decode("ascii"),
-                },
-                {"type": "text", "text": self._prompt()},
-            ],
+            "input": [{
+                "type": "user_input",
+                "content": [
+                    {"type": "text", "text": self._prompt()},
+                    {
+                        "type": "image",
+                        "mime_type": mime_type,
+                        "data": base64.b64encode(image_bytes).decode("ascii"),
+                        "resolution": "medium",
+                    },
+                ],
+            }],
             "response_format": {
                 "type": "text",
                 "mime_type": "application/json",
