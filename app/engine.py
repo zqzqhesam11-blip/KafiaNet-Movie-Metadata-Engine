@@ -1246,14 +1246,6 @@ class MetadataEngine:
                 "exact_title_year_match_count", 0
             ),
         })
-        lens_diagnostics.update({
-            "wikidata_status": wikidata_suggestions.get("status", "not_run"),
-            "wikidata_candidates": wikidata_suggestions.get("candidate_count", 0),
-            "afi_catalog_results": len(catalog_sources.get("afi_catalog") or []),
-            "bfi_archive_results": len(catalog_sources.get("bfi_national_archive") or []),
-        })
-        reverse_image_evidence["results_source"] = reverse_image_results_source
-        reverse_image_evidence["lens_diagnostics"] = lens_diagnostics
         wikidata_suggestions = wikipedia_tmdb_suggestions.get("wikidata") or {
             "provider": "wikidata_action_api",
             "status": "not_run",
@@ -1303,6 +1295,14 @@ class MetadataEngine:
             "identity_evidence": False,
             "automatic_match_allowed": False,
         }
+        lens_diagnostics.update({
+            "wikidata_status": wikidata_suggestions.get("status", "not_run"),
+            "wikidata_candidates": wikidata_suggestions.get("candidate_count", 0),
+            "afi_catalog_results": len(catalog_sources.get("afi_catalog") or []),
+            "bfi_archive_results": len(catalog_sources.get("bfi_national_archive") or []),
+        })
+        reverse_image_evidence["results_source"] = reverse_image_results_source
+        reverse_image_evidence["lens_diagnostics"] = lens_diagnostics
         reverse_image_evidence["wikipedia_tmdb_suggestions"] = {
             "status": wikipedia_tmdb_suggestions.get("status"),
             "identity_evidence": False,
