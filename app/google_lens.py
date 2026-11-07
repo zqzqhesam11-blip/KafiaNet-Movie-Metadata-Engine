@@ -446,12 +446,17 @@ class BrightDataGoogleLensClient:
         try:
             parsed = urlparse(str(value or "").strip())
             host = (parsed.hostname or "").casefold().rstrip(".")
+            path = parsed.path.rstrip("/").casefold()
         except ValueError:
             return False
         if host == "imdb.com" or host.endswith(".imdb.com"):
             return bool(re.search(r"/title/tt\d{5,12}(?:/|$)", parsed.path, flags=re.I))
         if host == "themoviedb.org" or host.endswith(".themoviedb.org"):
             return bool(re.match(r"^/movie/\d+(?:[-/]|$)", parsed.path, flags=re.I))
+        if host in {"aficatalog.afi.com", "catalog.afi.com"}:
+            return bool(path and path not in {"/", "/faq", "/behind-the-veil"})
+        if host == "collections-search.bfi.org.uk":
+            return path.startswith("/web/details/")
         return False
 
     @staticmethod
@@ -685,13 +690,19 @@ class BrightDataGoogleLensClient:
         *,
         broad: bool = False,
     ) -> str:
-        """Build explicit, independently-scoped IMDb/TMDB branches from Lens titles.
+        """Build domain-scoped searches across official film and archive catalogs.
 
-        The exact pass keeps phrases intact and applies the year when Lens supplied one.
-        Only if it finds no official movie URL do we retry with unquoted title terms
-        and without the year, allowing alternate title/index variants to surface.
+        IMDb and TMDB are searched for official identifiers; AFI and BFI are
+        searched as independent catalog references for reviewer corroboration.
+        The exact pass keeps phrases intact and applies the year when available.
         """
-        domains = ("imdb.com/title", "themoviedb.org/movie")
+        domains = (
+            "imdb.com/title",
+            "themoviedb.org/movie",
+            "aficatalog.afi.com",
+            "catalog.afi.com",
+            "collections-search.bfi.org.uk",
+        )
         branches: list[str] = []
         for value in title_hints:
             title = re.sub(r"[^\w\s'’\-]", " ", str(value or ""), flags=re.UNICODE)
@@ -732,6 +743,9 @@ class BrightDataGoogleLensClient:
             "google_redirect_unwrapped_count": 0,
             "candidate_domains": {},
             "official_url_count": 0,
+            "catalog_source_count": 0,
+            "afi_catalog_result_count": 0,
+            "bfi_archive_result_count": 0,
             "error": None,
         }
         if not title_hints:
@@ -745,6 +759,8 @@ class BrightDataGoogleLensClient:
         total_redirects = 0
         total_unwrapped = 0
         total_attempts = 0
+        afi_catalog_count = 0
+        bfi_archive_count = 0
 
         # The first query is precise; the second is used only when Google returns
         # a valid SERP but no official IMDb/TMDB movie URL.
@@ -863,13 +879,33 @@ class BrightDataGoogleLensClient:
                         continue
                     if destination_url in official_by_url:
                         continue
+                    destination_path = ""
+                    try:
+                        destination_path = (urlparse(destination_url).hostname or "").casefold().rstrip(".")
+                    except ValueError:
+                        pass
+                    if destination_path in {"aficatalog.afi.com", "catalog.afi.com"}:
+                        catalog_source = "afi_catalog"
+                        afi_catalog_count += 1
+                    elif destination_path == "collections-search.bfi.org.uk":
+                        catalog_source = "bfi_national_archive"
+                        bfi_archive_count += 1
+                    elif destination_path == "imdb.com" or destination_path.endswith(".imdb.com"):
+                        catalog_source = "imdb_official_title_page"
+                    elif destination_path == "themoviedb.org" or destination_path.endswith(".themoviedb.org"):
+                        catalog_source = "tmdb_official_movie_page"
+                    else:
+                        catalog_source = "unknown_official_source"
                     official_by_url[destination_url] = {
                         **result,
                         "url": destination_url,
                         "url_candidates": [destination_url],
                         "resolved_urls": [destination_url],
                         "resolved_url": destination_url,
-                        "provider": "google_serp_official_movie_title_search",
+                        "provider": "google_serp_trusted_film_catalog_search",
+                        "catalog_source": catalog_source,
+                        "identity_evidence": False,
+                        "automatic_match_allowed": False,
                         "search_source": "lens_result_title_or_direct_play_store_url",
                         "search_query_variant": variant,
                         "original_search_url": raw_url if raw_url != destination_url else None,
@@ -891,6 +927,9 @@ class BrightDataGoogleLensClient:
                 sorted(candidate_domains.items(), key=lambda item: (-item[1], item[0]))[:12]
             ),
             "official_url_count": len(official_by_url),
+            "catalog_source_count": afi_catalog_count + bfi_archive_count,
+            "afi_catalog_result_count": afi_catalog_count,
+            "bfi_archive_result_count": bfi_archive_count,
             "error": None,
         })
         return list(official_by_url.values())
