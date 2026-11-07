@@ -788,5 +788,33 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_official_search_diagnostics["query_count"], 2)
 
 
+    def test_trusted_film_archives_are_saved_as_reviewer_sources_only(self):
+        afi_url = "https://aficatalog.afi.com/Film/2269"
+        bfi_url = "https://collections-search.bfi.org.uk/web/Details/ChoiceFilmWorks/150010110"
+        self.assertTrue(BrightDataGoogleLensClient._official_movie_url(afi_url))
+        self.assertTrue(BrightDataGoogleLensClient._official_movie_url(bfi_url))
+        self.assertFalse(BrightDataGoogleLensClient._official_movie_url("https://example.com/Film/2269"))
+
+        api = self.make_client({
+            "organic": [
+                {"title": "AFI film record", "link": afi_url, "description": "Film record"},
+                {"title": "BFI archive record", "link": bfi_url, "description": "Archive record"},
+            ]
+        })
+        rows = api.search_official_movie_pages_from_lens([
+            {"title": "Example American film"}
+        ])
+
+        self.assertEqual({row["catalog_source"] for row in rows}, {
+            "afi_catalog",
+            "bfi_national_archive",
+        })
+        self.assertTrue(all(row["identity_evidence"] is False for row in rows))
+        self.assertTrue(all(row["automatic_match_allowed"] is False for row in rows))
+        self.assertEqual(api.last_official_search_diagnostics["catalog_source_count"], 2)
+        # Archive references alone do not suppress the broad pass for official IDs.
+        self.assertEqual(api.last_official_search_diagnostics["query_count"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

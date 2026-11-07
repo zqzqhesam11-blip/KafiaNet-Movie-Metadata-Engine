@@ -29,6 +29,24 @@ class FakeWikipedia:
         }
 
 
+class FakeWikidata:
+    def __init__(self, result=None):
+        self.result = result or {
+            "provider": "wikidata_action_api",
+            "status": "suggestions_only",
+            "identity_evidence": False,
+            "automatic_match_allowed": False,
+            "candidate_count": 1,
+            "candidates": [{"wikidata_id": "Q123", "title": "A Short Film About Killing", "year": 1988}],
+            "errors": [],
+        }
+        self.calls = []
+
+    def search_films(self, title_hints, **kwargs):
+        self.calls.append((list(title_hints), kwargs))
+        return self.result
+
+
 class FakeTMDB:
     def __init__(self, results):
         self.results = results
@@ -45,6 +63,7 @@ class WikipediaTMDBSuggestionTests(unittest.TestCase):
         engine.reverse_image = FakeLens()
         engine.wikipedia = FakeWikipedia(articles)
         engine.tmdb = FakeTMDB(results)
+        engine.wikidata = FakeWikidata()
         return engine
 
     def test_wikipedia_title_and_year_are_searched_in_tmdb_but_never_auto_match(self):
@@ -82,6 +101,10 @@ class WikipediaTMDBSuggestionTests(unittest.TestCase):
         self.assertFalse(output["identity_evidence"])
         self.assertFalse(output["automatic_match_allowed"])
         self.assertEqual(engine.wikipedia.calls[0][0], ["A Short Film About Killing"])
+        self.assertEqual(engine.wikidata.calls[0][0], ["A Short Film About Killing"])
+        self.assertFalse(output["wikidata"]["identity_evidence"])
+        self.assertFalse(output["wikidata"]["automatic_match_allowed"])
+        self.assertEqual(output["wikidata"]["candidate_count"], 1)
         self.assertEqual(engine.tmdb.calls, [("A Short Film About Killing", 1988)])
         suggestions = output["queries"][0]["results"]
         self.assertTrue(suggestions[0]["exact_title_year_match"])

@@ -8,7 +8,6 @@ Cloud worker for enriching the public KafiaNet poster catalog with verified TMDB
 - Engine code: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine`.
 - Reverse-image provider: Google Lens `exact_matches` tab through the Bright Data SERP API.
 - Local poster OCR: RapidOCR with ONNX Runtime CPU; no external OCR API or OCR secret.
-- Optional poster vision: Google Gemini image understanding (structured title/year/director candidates); enabled only when `GEMINI_API_KEY` is configured.
 - Metadata results are written to the poster repository only when APPLY is explicitly requested.
 
 ## Free-tier and no-payment setup
@@ -20,18 +19,22 @@ To keep this project free:
 - Do not add a payment card, deposit funds, or activate a paid plan.
 - Do not configure automatic top-ups or any paid balance.
 - If Bright Data reports HTTP 402 or 429, stop the batch. Do not retry repeatedly and do not add funds.
-- Google Lens `exact_matches` is the reverse-image identity source. Official TMDB movie URLs and IMDb title URLs are accepted from Lens; Gemini may additionally propose titles and years, but only TMDB itself supplies candidate numeric IDs.
-- When Lens returns useful titles but no official TMDB/IMDb identifier, the engine also searches English Wikipedia using Lens titles only, reads the article lead for an unambiguous film year, and queries TMDB `/search/movie` using the Wikipedia title plus that year. Results and source links are saved under `wikipedia` as manual-review suggestions only; even one exact title/year result cannot set READY. Folder names and image filenames are never used.
+- Google Lens `exact_matches` is the reverse-image discovery source. Official TMDB movie URLs and IMDb title URLs returned by Lens are candidate identifiers; TMDB alone verifies the final numeric movie ID and metadata.
+- When Lens returns useful titles but no official TMDB/IMDb identifier, the engine searches English Wikipedia and Wikidata using Lens-derived title hints, reads article lead dates and structured film properties, and queries TMDB `/search/movie`. These results are saved as reviewer research only; even an exact title/year result cannot independently set READY.
+- Three additional trusted reference sources are searched alongside Wikipedia and TMDB: **Wikidata** (global structured film entities and cross-reference IDs), **AFI Catalog** (American film catalog), and **BFI National Archive Collections Search** (an international film and moving-image collection with a contemporary focus on British work). AFI and BFI results are captured as official-domain search references, not treated as proof of identity. Coverage is specialized and incomplete, not a universal filmography.
+- All Wikipedia, Wikidata, AFI, and BFI results are recorded with `identity_evidence=false` and `automatic_match_allowed=false`. They can help a reviewer compare title, year, director, IMDb/TMDB cross-references, and archive records, but only an official TMDB/IMDb identifier resolved and verified through TMDB can authorize READY. Folder names and image filenames are never used as search inputs.
 - Separately, the poster image bytes are OCR-processed locally by RapidOCR. Up to three OCR text hints may be sent to TMDB `/search/movie`; returned rows are saved only as manual-review suggestions under `ocr.tmdb_suggestions` and are never fed into identity resolution or automatic READY decisions.
-- When `GEMINI_API_KEY` is configured, the engine sends poster pixels (not its folder or filename) to Gemini only when Lens has not produced an official TMDB/IMDb ID. Gemini returns at most three visual title/year/director candidates; it never supplies an ID or URL.
-- A Gemini candidate proceeds only with confidence >= 0.85, an exact TMDB title/original-title match, an exact release-year match, and either an exact director match against TMDB credits or independent title corroboration from Lens result titles. TMDB movie details must return the queried numeric ID, and the existing source-folder consistency veto still applies. Multiple matching TMDB IDs remain REVIEW. Gemini alone can never set READY.
-- Gemini requests use the Interactions API with `store: false`. DRY_RUN still sends poster images to Gemini when the key is configured and consumes Google AI API quota; configure the key only when this external image analysis is desired.
 - At most two bounded retries are made for transient 5xx gateway errors, transport failures, and 5xx statuses inside Bright Data's HTTP-200 response envelope. HTTP 402/429 quota responses are never retried and stop the batch.
 - Bright Data free credits may be shared with other products or tools using the same account. Keep the key private.
 
 References:
-- https://brightdata.com/products/serp-api/google-search/reverse-image
-- https://github.com/brightdata/cli#free-tier
+- Google Lens through Bright Data: https://brightdata.com/products/serp-api/google-search/reverse-image
+- Wikidata Action API: https://www.wikidata.org/w/api.php
+- AFI Catalog: https://catalog.afi.com/
+- BFI National Archive Collections Search: https://collections-search.bfi.org.uk/
+- Wikipedia MediaWiki API: https://www.mediawiki.org/wiki/API:Search
+- TMDB API documentation: https://developer.themoviedb.org/docs
+- Bright Data free tier: https://github.com/brightdata/cli#free-tier
 
 **Important:** DRY_RUN does not write to the poster repository, but it does perform live Google Lens requests and consumes Bright Data free-tier requests. Start with `--limit 1`.
 
@@ -42,12 +45,13 @@ References:
 - The source movie-folder name is never changed. Only the JSON basename changes to the movie title and release year returned by TMDB.
 - Image filenames, extensions, bytes, and Git blob SHAs are preserved.
 - Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
-- Automatic movie identity can come from official TMDB/IMDb IDs returned by Lens and verified through TMDB, or from a high-confidence Gemini visual title/year candidate that is independently verified by exact TMDB title/year plus director match (or Lens title corroboration). Gemini never supplies IDs; the numeric ID always comes from TMDB search and is confirmed by TMDB movie details. Local OCR text is not an identity signal.
-- The engine calls TMDB `/movie/{movie_id}` for every distinct candidate ID. A single valid ID is accepted only after TMDB returns the same numeric ID and the relevant Lens or Gemini verification rules pass. Distinct competing TMDB movie IDs, an unresolved ID, or an ambiguous image identity result in REVIEW.
+- Automatic movie identity can come only from official TMDB/IMDb IDs returned by Google Lens or the Lens-derived search, then independently resolved and verified through TMDB. Local OCR, Wikipedia, Wikidata, AFI, and BFI are reviewer aids only.
+- The engine calls TMDB `/movie/{movie_id}` for every distinct candidate ID. A single valid ID is accepted only after TMDB returns the same numeric ID and, when an IMDb ID was used, confirms the same IMDb external ID. Distinct competing TMDB movie IDs, an unresolved ID, or an ambiguous image identity result in REVIEW.
 - Movie title, release date/year, country, director, cast, overview, ratings, external IMDb ID and other metadata are read from the verified TMDB movie record. The title saved for catalog naming is the title returned by TMDB; Lens title text and country clues are not used.
 - TMDB movie images are requested with `append_to_response=images` and a language fallback. Poster paths are saved with their TMDB image CDN URLs (including w500 and original sizes).
-- Folder names, folder years, poster filenames, image URLs, and catalog labels are never used to discover or positively select a movie. The folder label is only a negative conflict veto; Lens result titles may independently corroborate a Gemini candidate when the model cannot identify the director.
-- TMDB text search is used for OCR reviewer suggestions and for Gemini visual title/year candidates. OCR results remain suggestions only. Gemini candidates require exact title/year matching and director or independent Lens corroboration; loose title similarity, country clues, and folder names are never used to select a movie.
+- Folder names, folder years, poster filenames, image URLs, and catalog labels are never used to discover or positively select a movie. The folder label is only a negative conflict veto.
+- TMDB text search is used for Wikipedia and OCR reviewer suggestions. Wikidata, AFI, and BFI are additional research references only; loose title similarity, country clues, and folder names are never used to select a movie.
+- Each JSON record stores Wikipedia results under `wikipedia`, Wikidata cross-checks under `wikidata`, and AFI/BFI references under `catalog_sources`. The matching summary reports `wikidata_status`, `wikidata_candidates`, `afi_catalog_results`, and `bfi_archive_results`.
 - Every READY JSON and `metadata/index.json` row records the `tmdb_id` explicitly. The `imdb_id` is also saved when TMDB supplies it; otherwise it remains null. TMDB IDs are never invented.
 - A failed, blocked, or unparsed live response is recorded as an error, not as a successful empty result. Previously saved results are reusable only when their stored diagnostics explicitly identify the `exact_matches` tab; older `visual_matches` evidence is ignored.
 - Each per-film terminal result reports the Lens tab, HTTP status, retry count, result count and error, the count of official TMDB movie URLs, their distinct numeric movie IDs, and the TMDB details-resolution outcome. These diagnostics do not include API secrets.
@@ -74,8 +78,6 @@ Required environment variables:
 - `BRIGHTDATA_API_KEY`: Bright Data API key, stored as a Hostless secret.
 - `BRIGHTDATA_SERP_ZONE`: name of the SERP API free-tier zone created in Bright Data.
 - `GITHUB_TOKEN`: fine-grained token with Contents read/write on the poster repository; required only for APPLY.
-- `GEMINI_API_KEY`: optional Google AI Studio Gemini API key for poster-image recognition (stored as a Hostless secret).
-- `GEMINI_MODEL`: optional model name (default `gemini-3.8-flash`).
 - `POSTERS_REPO`: defaults to `zqzqhesam11-blip/KafiaNet-Movie-Posters`.
 - `POSTERS_BRANCH`: defaults to `main`.
 
@@ -101,7 +103,8 @@ python -m app.cli check-brightdata-config
 python -m app.cli run --limit 1
 ```
 
-The `run --limit 1` command is a live **DRY RUN** unless `--apply` is supplied. Inspect its results before processing a larger batch. When `GEMINI_API_KEY` is configured, it also sends one poster image to Gemini when Lens has no official ID. APPLY writes one Git commit per batch.
+The run command defaults to **DRY RUN** and does not write or move catalog files. It still performs live provider requests (Lens/Bright Data, Wikipedia, Wikidata, and TMDB) and may consume provider quotas. Use `--apply` only after reviewing the one-item result and explicitly intending to update the poster repository.
+
 
 ## Output layout
 
