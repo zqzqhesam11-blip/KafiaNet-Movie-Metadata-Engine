@@ -911,9 +911,16 @@ class BrightDataGoogleLensClient:
                         "original_search_url": raw_url if raw_url != destination_url else None,
                     }
 
-            # One verified official URL is enough to proceed to TMDB identity
-            # resolution. Avoid spending another paid SERP request unnecessarily.
-            if official_by_url:
+            # A catalog/archive reference is useful for review but cannot
+            # replace an official TMDB/IMDb identifier. Continue to the broader
+            # fallback unless an actual identity-bearing movie URL was found.
+            if any(
+                row.get("catalog_source") in {
+                    "tmdb_official_movie_page",
+                    "imdb_official_title_page",
+                }
+                for row in official_by_url.values()
+            ):
                 break
 
         diagnostics.update({
