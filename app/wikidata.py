@@ -7,7 +7,7 @@ import httpx
 
 
 WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
-FILM_INSTANCE_IDS = {"Q11424", "Q24862", "Q202866"}
+FILM_INSTANCE_IDS = {"Q11424", "Q24862", "Q506240"}
 
 
 def _clean(value: Any, limit: int = 180) -> str:
