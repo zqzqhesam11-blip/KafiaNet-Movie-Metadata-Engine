@@ -812,6 +812,8 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertTrue(all(row["identity_evidence"] is False for row in rows))
         self.assertTrue(all(row["automatic_match_allowed"] is False for row in rows))
         self.assertEqual(api.last_official_search_diagnostics["catalog_source_count"], 2)
+        # Archive references alone do not suppress the broad pass for official IDs.
+        self.assertEqual(api.last_official_search_diagnostics["query_count"], 2)
 
 
 if __name__ == "__main__":
