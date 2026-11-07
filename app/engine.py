@@ -227,11 +227,10 @@ class MetadataEngine:
             return [result]
 
 
-    @staticmethod
     def _find_movie(
         self,
         reverse_image_results: list[dict[str, Any]],
-        expected_folder: str,
+        expected_folder: str = "",
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
         """Resolve official TMDB/IMDb IDs found by Lens or its title-derived search.
 
