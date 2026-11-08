@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import unquote, urlencode, urlparse
 
@@ -15,8 +17,11 @@ BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 GOOGLE_LENS_URL = "https://lens.google.com/uploadbyurl"
 GOOGLE_SEARCH_URL = "https://www.google.com/search"
 LENS_TAB = "exact_matches"
+LENS_FALLBACK_TAB = "visual_matches"
 MAX_NORMALIZED_RESULTS = 80
 MAX_TRANSIENT_RETRIES = 2
+MAX_RATE_LIMIT_RETRIES = 1
+MAX_RATE_LIMIT_WAIT_SECONDS = 30
 TRANSIENT_HTTP_STATUSES = {500, 502, 503, 504}
 
 
@@ -146,7 +151,9 @@ class BrightDataGoogleLensClient:
         return prepared
 
     @staticmethod
-    def _lens_request_url(image_url: str) -> str:
+    def _lens_request_url(image_url: str, tab: str = LENS_TAB) -> str:
+        if tab not in {LENS_TAB, LENS_FALLBACK_TAB}:
+            raise BrightDataAPIError(f"Unsupported Google Lens tab: {tab}")
         parsed = urlparse(str(image_url or "").strip())
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
             raise BrightDataAPIError(
@@ -156,7 +163,7 @@ class BrightDataGoogleLensClient:
             "url": image_url,
             "hl": "en",
             "brd_json": "1",
-            "brd_lens": LENS_TAB,
+            "brd_lens": tab,
         }
         return f"{GOOGLE_LENS_URL}?{urlencode(query)}"
 
@@ -475,6 +482,48 @@ class BrightDataGoogleLensClient:
                     pass
             return None
 
+    @staticmethod
+    def _rate_limit_retry_delay(response: httpx.Response, payload: Any) -> int | None:
+        """Return a short, explicit provider cooldown; never retry generic 429s blindly."""
+        headers = getattr(response, "headers", {}) or {}
+        retry_after = headers.get("retry-after") if hasattr(headers, "get") else None
+        delays: list[int] = []
+
+        if retry_after:
+            try:
+                delays.append(max(1, int(float(str(retry_after).strip()))))
+            except (TypeError, ValueError):
+                try:
+                    retry_at = parsedate_to_datetime(str(retry_after))
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    delays.append(max(1, int((retry_at - datetime.now(timezone.utc)).total_seconds())))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+        detail = BrightDataGoogleLensClient._error_detail(
+            payload, str(getattr(response, "text", "") or "")
+        )
+        if isinstance(payload, dict) and payload.get("body"):
+            detail += " " + str(payload.get("body"))[:500]
+        match = re.search(
+            r"(?:minimum\s+of|at\s+least|after\s+(?:a\s+)?minimum\s+of|retry\s+after|try\s+again\s+after)\s*(\d{1,3})\s*(?:seconds?|secs?)",
+            detail,
+            flags=re.I,
+        )
+        if match:
+            delays.append(int(match.group(1)))
+        elif "recently failed" in detail.casefold():
+            # Bright Data's explicit same-query cooldown message specifies 15 seconds.
+            delays.append(15)
+
+        if not delays:
+            return None
+        delay = max(delays)
+        if delay > MAX_RATE_LIMIT_WAIT_SECONDS:
+            return None
+        return delay
+
     def _post_serp_with_retries(
         self,
         target_url: str,
@@ -483,18 +532,28 @@ class BrightDataGoogleLensClient:
         parsed_light_header: bool = True,
         response_format: str = "raw",
     ) -> tuple[httpx.Response, Any, int, int]:
-        """POST one SERP request and retry transport or outer/inner transient failures.
+        """POST one SERP request with bounded transport, gateway, and explicit cooldown retries.
 
-        Bright Data can return an HTTP-200 API envelope whose body carries the
-        actual upstream HTTP status. Retry that status too; otherwise a wrapped
-        Google 502 is incorrectly treated as a permanent per-film failure.
+        Generic 429 responses are not retried. A retry is allowed only when Bright Data
+        supplies Retry-After or its explicit "query recently failed" cooldown message.
         """
         if response_format not in {"raw", "json"}:
             raise BrightDataAPIError(
                 f"Unsupported Bright Data response format for {stage}: {response_format}"
             )
 
-        for attempt in range(MAX_TRANSIENT_RETRIES + 1):
+        attempt = 0
+        transient_retries = 0
+        rate_limit_retries = 0
+        wait_seconds = 0
+        self.last_request_diagnostics = {
+            "attempts": 0,
+            "rate_limit_retries": 0,
+            "rate_limit_wait_seconds": 0,
+        }
+
+        while True:
+            attempt += 1
             try:
                 request_headers = (
                     {"x-unblock-data-format": "parsed_light"}
@@ -510,12 +569,18 @@ class BrightDataGoogleLensClient:
                     },
                 )
             except httpx.TransportError as exc:
-                if attempt >= MAX_TRANSIENT_RETRIES:
+                if transient_retries >= MAX_TRANSIENT_RETRIES:
+                    self.last_request_diagnostics.update({
+                        "attempts": attempt,
+                        "rate_limit_retries": rate_limit_retries,
+                        "rate_limit_wait_seconds": wait_seconds,
+                    })
                     raise BrightDataAPIError(
-                        f"Bright Data {stage} transport failure after {attempt + 1} "
+                        f"Bright Data {stage} transport failure after {attempt} "
                         f"attempt(s) ({type(exc).__name__}): {str(exc)[:220]}"
                     ) from exc
-                time.sleep(min(2 ** attempt, 2))
+                time.sleep(min(2 ** transient_retries, 2))
+                transient_retries += 1
                 continue
 
             payload = self._safe_json(response)
@@ -537,10 +602,6 @@ class BrightDataGoogleLensClient:
                 if inner_status:
                     effective_status = inner_status
 
-            # Bright Data has occasionally returned HTTP 200 with no body or
-            # a JSON envelope whose inner body is empty. That is a failed delivery,
-            # not a valid empty Lens result. Retry it with the same bounded backoff
-            # used for transient gateway failures before classifying the film REVIEW.
             empty_success_body = (
                 200 <= effective_status < 300
                 and (
@@ -553,39 +614,62 @@ class BrightDataGoogleLensClient:
                     )
                 )
             )
+
             if (
                 (effective_status in TRANSIENT_HTTP_STATUSES or empty_success_body)
-                and attempt < MAX_TRANSIENT_RETRIES
+                and transient_retries < MAX_TRANSIENT_RETRIES
             ):
-                time.sleep(min(2 ** attempt, 2))
+                time.sleep(min(2 ** transient_retries, 2))
+                transient_retries += 1
                 continue
 
-            return response, payload, effective_status, attempt + 1
+            if effective_status == 429 and rate_limit_retries < MAX_RATE_LIMIT_RETRIES:
+                delay = self._rate_limit_retry_delay(response, payload)
+                if delay is not None:
+                    rate_limit_retries += 1
+                    wait_seconds += delay
+                    time.sleep(delay)
+                    continue
 
-        raise BrightDataAPIError(
-            f"Bright Data {stage} ended without a response after {MAX_TRANSIENT_RETRIES + 1} attempts"
-        )
+            self.last_request_diagnostics.update({
+                "attempts": attempt,
+                "rate_limit_retries": rate_limit_retries,
+                "rate_limit_wait_seconds": wait_seconds,
+            })
+            return response, payload, effective_status, attempt
 
 
     @staticmethod
     def _clean_title_hint(value: str) -> tuple[str, int | None]:
-        """Clean a title obtained from Lens metadata or a direct Play Store result URL."""
+        """Clean a Lens title without treating publisher names as part of the film title."""
         text = unquote(str(value or "")).replace("_", " ").replace("+", " ")
-        # Result titles are untrusted data: keep them as plain quoted words,
-        # never allow them to inject extra Google search operators.
-        text = re.sub(r"[^\w\s'’\-]", " ", text, flags=re.UNICODE)
-        text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
-        year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", text)
-        year = int(year_match.group(1)) if year_match else None
-        text = re.sub(r"[\[(](?:19|20)\d{2}[\])]", " ", text)
-        text = re.sub(r"\s+(?:19|20)\d{2}\s*$", " ", text)
+        text = text.replace("∣", "|")
+        text = re.sub(r"^[^:]{2,24}\s*:\s*(?=[A-ZÀ-ž])", "", text)
+        text = re.sub(r"\s*\|\s*(?:watch\s+(?:the\s+)?film\s+online|watch\s+online|official\s+trailer|full\s+movie).*$", "", text, flags=re.I)
         text = re.sub(
-            r"\s+(?:[-–—|:]\s*)?(?:google play|tmdb|the movie database|imdb|"
-            r"wikipedia|youtube|official trailer|watch online)\s*$",
+            r"\s+(?:on|at)\s+(?:cinobo|plex|prime\s+video|netflix|amazon\s+prime|"
+            r"youtube|google\s+play|letterboxd)\b.*$",
             "",
             text,
             flags=re.I,
         )
+        text = re.sub(
+            r"\s*[-–—|:]\s*(?:IMDb|TMDB|The Movie Database|Wikipedia|Vikipedi|"
+            r"YouTube|Prime Video|Netflix|Amazon Prime Video|Rotten Tomatoes|"
+            r"Moviepilot|OFDb|NTV Haber|TikTok|Essential Cinema|The Disapproving Swede|"
+            r"Cinobo|Plex|Filmweb|Letterboxd)\b.*$",
+            "",
+            text,
+            flags=re.I,
+        )
+        # Keep titles, not catalogue/editorial fragments appended after a separator.
+        text = re.sub(r"\s*[|]\s*(?:film|kritik|trailer|reviews?|criticism)\b.*$", "", text, flags=re.I)
+        text = re.sub(r"[^\w\s'’\-]", " ", text, flags=re.UNICODE)
+        text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
+        year_match = re.search(r"(?<!\d)((?:18|19|20)\d{2})(?!\d)", text)
+        year = int(year_match.group(1)) if year_match else None
+        text = re.sub(r"[\[(](?:18|19|20)\d{2}[\])]", " ", text)
+        text = re.sub(r"\s+(?:18|19|20)\d{2}\s*$", " ", text)
         text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
         if len(text) < 5 or not re.search(r"[A-Za-zÀ-ž]", text):
             return "", year
@@ -601,37 +685,31 @@ class BrightDataGoogleLensClient:
         cls,
         results: list[dict[str, Any]],
     ) -> tuple[list[str], int | None]:
-        """Collect title hints from all Lens rows, prioritizing useful Play Store aliases.
+        """Rank repeated Lens title signals and retain direct Play Store aliases as suggestions.
 
-        Source-folder labels and local image filenames are never accepted. Lens
-        sometimes places direct Google Play movie pages near the end of a long
-        exact-matches response, so scan every returned row before applying the
-        bounded hint limit.
+        Opaque Google /goto URLs are never decoded or treated as identity evidence.
+        Local filenames and source-folder labels are never accepted as title inputs.
         """
-        lens_hints: list[str] = []
+        lens_buckets: dict[str, dict[str, Any]] = {}
         play_hints: list[str] = []
-        years: set[int] = set()
-
-        def add(target: list[str], value: str, *, include_year: bool = True) -> None:
-            title, year = cls._clean_title_hint(value)
-            if include_year and year:
-                years.add(year)
-            if not title:
-                return
-            key = re.sub(r"\W+", " ", title.casefold()).strip()
-            if not key or any(
-                re.sub(r"\W+", " ", old.casefold()).strip() == key
-                for old in target
-            ):
-                return
-            target.append(title)
 
         for item in results or []:
             if not isinstance(item, dict) or item.get("error"):
                 continue
             title_value = item.get("title")
             if isinstance(title_value, str):
-                add(lens_hints, title_value)
+                title, year = cls._clean_title_hint(title_value)
+                if title:
+                    key = re.sub(r"\W+", " ", title.casefold()).strip()
+                    bucket = lens_buckets.setdefault(key, {
+                        "title": title,
+                        "count": 0,
+                        "years": set(),
+                        "first_seen": len(lens_buckets),
+                    })
+                    bucket["count"] += 1
+                    if year:
+                        bucket["years"].add(year)
 
             urls: list[str] = []
             for key in ("url", "resolved_url", "url_candidates", "resolved_urls"):
@@ -656,32 +734,53 @@ class BrightDataGoogleLensClient:
                     continue
                 slug = parsed.path[len(prefix):].split("/", 1)[0]
                 if slug and not slug.isdigit():
-                    add(play_hints, slug, include_year=False)
+                    play_title, _ = cls._clean_title_hint(slug)
+                    if play_title:
+                        key = re.sub(r"\W+", " ", play_title.casefold()).strip()
+                        if key and all(
+                            re.sub(r"\W+", " ", old.casefold()).strip() != key
+                            for old in play_hints
+                        ):
+                            play_hints.append(play_title)
 
-        # Put a Play Store alias first only when it contributes a distinct title.
-        # If it merely repeats a Lens title, preserve Lens casing/order instead.
+        ranked_lens = sorted(
+            lens_buckets.values(),
+            key=lambda row: (-int(row["count"]), int(row["first_seen"])),
+        )
+        repeated_lens = [row for row in ranked_lens if int(row["count"]) >= 2]
+        single_lens = [row for row in ranked_lens if int(row["count"]) < 2]
+
         ordered_hints: list[str] = []
-        for play_title in play_hints:
-            play_key = re.sub(r"\W+", " ", play_title.casefold()).strip()
-            duplicates_lens = any(
-                re.sub(r"\W+", " ", lens_title.casefold()).strip() == play_key
-                for lens_title in lens_hints
-            )
-            if not duplicates_lens:
-                ordered_hints.append(play_title)
-
-        ordered_hints.extend(lens_hints)
-        for play_title in play_hints:
-            play_key = re.sub(r"\W+", " ", play_title.casefold()).strip()
-            if not any(
-                re.sub(r"\W+", " ", old.casefold()).strip() == play_key
+        def append_unique(value: str) -> None:
+            key = re.sub(r"\W+", " ", value.casefold()).strip()
+            if key and all(
+                re.sub(r"\W+", " ", old.casefold()).strip() != key
                 for old in ordered_hints
             ):
-                ordered_hints.append(play_title)
+                ordered_hints.append(value)
 
-        # Year evidence is accepted only from Lens result title text, never from
-        # a Play Store slug or any local folder/image name.
-        return ordered_hints[:5], next(iter(years)) if len(years) == 1 else None
+        for row in repeated_lens:
+            append_unique(str(row["title"]))
+        for value in play_hints:
+            append_unique(value)
+        for row in single_lens:
+            append_unique(str(row["title"]))
+
+        year: int | None = None
+        if repeated_lens:
+            top_years = repeated_lens[0]["years"]
+            if len(top_years) == 1:
+                year = next(iter(top_years))
+        if year is None:
+            all_years = {
+                value
+                for bucket in lens_buckets.values()
+                for value in bucket["years"]
+            }
+            if len(all_years) == 1:
+                year = next(iter(all_years))
+
+        return ordered_hints[:5], year
 
     @staticmethod
     def _google_official_title_search_url(
@@ -941,11 +1040,82 @@ class BrightDataGoogleLensClient:
         })
         return list(official_by_url.values())
 
+    def _request_lens_tab(
+        self,
+        image_url: str,
+        tab: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        """Fetch and normalize one documented Google Lens tab."""
+        target_url = self._lens_request_url(image_url, tab=tab)
+        response, payload, effective_status, attempts = self._post_serp_with_retries(
+            target_url,
+            f"Google Lens {tab} image search",
+        )
+        body = getattr(response, "text", "") or ""
+        if effective_status < 200 or effective_status >= 300:
+            error_payload = payload.get("body") if (
+                isinstance(payload, dict) and "status_code" in payload and "body" in payload
+            ) else payload
+            message = self._http_error(
+                effective_status,
+                self._error_detail(error_payload, str(error_payload or body)),
+            )
+            if effective_status in {402, 429}:
+                raise BrightDataQuotaError(effective_status, message)
+            raise BrightDataAPIError(message)
+
+        if payload is None:
+            headers = getattr(response, "headers", {}) or {}
+            content_type = headers.get("content-type", "unknown") if hasattr(headers, "get") else "unknown"
+            content_length = headers.get("content-length", "unknown") if hasattr(headers, "get") else "unknown"
+            raise BrightDataAPIError(
+                "Bright Data returned an empty or non-JSON response "
+                f"(HTTP {effective_status}, content-type={content_type}, "
+                f"content-length={content_length})"
+            )
+
+        if isinstance(payload, dict) and "status_code" in payload and "body" in payload:
+            inner_body = payload.get("body")
+            if not str(inner_body or "").strip():
+                raise BrightDataAPIError(
+                    "Bright Data API envelope was received but its body is empty "
+                    f"(inner HTTP {effective_status}); no Google Lens results were delivered"
+                )
+
+        if isinstance(payload, dict) and any(payload.get(key) for key in ("error", "errors")):
+            detail = self._error_detail(payload)
+            raise BrightDataAPIError(
+                f"Bright Data returned an API error: {detail or 'unknown provider error'}"
+            )
+
+        rows = self._rows_from_payload(payload)
+        if rows is None:
+            shape = self._payload_shape(payload)
+            raise BrightDataAPIError(
+                "Bright Data returned JSON, but no recognized Google Lens result list was present; "
+                + shape
+            )
+
+        normalized = self._normalize_matches(rows)
+        request_diagnostics = dict(getattr(self, "last_request_diagnostics", {}) or {})
+        tab_diagnostics = {
+            "status": "ok" if normalized else "no_matches",
+            "http_status": effective_status,
+            "attempts": attempts,
+            "result_count": len(normalized),
+            "raw_result_count": len(rows),
+            **request_diagnostics,
+            **self._raw_result_diagnostics(rows),
+        }
+        return normalized, rows, tab_diagnostics
+
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
-        """Search one public poster URL with bounded retries for transient provider failures."""
-        # Reset the title-search diagnostics per poster. This prevents a failed
-        # Lens request or a direct-ID path from inheriting the prior poster's
-        # Google Search diagnostics from this long-lived client.
+        """Search exact matches, then visual matches when exact results lack official IDs.
+
+        Google began wrapping some exact-match destinations in opaque /goto
+        URLs. A single visual_matches fallback is used to seek direct publisher
+        links. Opaque wrappers remain quarantined and are never parsed as IDs.
+        """
         self.last_official_search_diagnostics = {
             "status": "not_run",
             "query_count": 0,
@@ -967,98 +1137,129 @@ class BrightDataGoogleLensClient:
         self.last_lens_diagnostics = {
             "status": "requesting",
             "lens_tab": LENS_TAB,
+            "lens_tabs_attempted": [],
+            "lens_tab_diagnostics": {},
             "data_format": "parsed_light",
             "http_status": None,
             "attempts": 0,
             "result_count": 0,
             "error": None,
         }
-        target_url = self._lens_request_url(image_url)
+
         try:
-            response, payload, effective_status, attempts = self._post_serp_with_retries(
-                target_url,
-                "Google Lens image search",
-            )
+            exact_results, exact_rows, exact_diag = self._request_lens_tab(image_url, LENS_TAB)
         except BrightDataAPIError as exc:
+            request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
             self.last_lens_diagnostics.update({
-                "status": "error",
-                "attempts": MAX_TRANSIENT_RETRIES + 1,
+                "status": "quota_error" if isinstance(exc, BrightDataQuotaError) else "error",
+                "lens_tabs_attempted": [LENS_TAB],
+                "lens_tab_diagnostics": {
+                    LENS_TAB: {
+                        "status": "quota_error" if isinstance(exc, BrightDataQuotaError) else "error",
+                        **request_diag,
+                    }
+                },
+                "attempts": request_diag.get("attempts", 1),
+                "rate_limit_retries": request_diag.get("rate_limit_retries", 0),
+                "rate_limit_wait_seconds": request_diag.get("rate_limit_wait_seconds", 0),
                 "error": f"{type(exc).__name__}: {str(exc)[:300]}",
             })
             raise
 
-        body = getattr(response, "text", "") or ""
-        self.last_lens_diagnostics.update({
-            "http_status": effective_status,
-            "attempts": attempts,
-        })
-        if effective_status < 200 or effective_status >= 300:
-            error_payload = payload.get("body") if (
-                isinstance(payload, dict) and "status_code" in payload and "body" in payload
-            ) else payload
-            message = self._http_error(
-                effective_status,
-                self._error_detail(error_payload, str(error_payload or body)),
-            )
-            self.last_lens_diagnostics.update({
-                "status": "quota_error" if effective_status in {402, 429} else "http_error",
-                "error": message,
-            })
-            if effective_status in {402, 429}:
-                raise BrightDataQuotaError(effective_status, message)
-            raise BrightDataAPIError(message)
+        tabs = {LENS_TAB: exact_diag}
+        attempts = int(exact_diag.get("attempts") or 0)
+        combined = list(exact_results)
+        exact_ids = extract_tmdb_movie_ids(exact_results) or extract_imdb_ids(exact_results)
+        visual_results: list[dict[str, Any]] = []
 
-        if payload is None:
-            headers = getattr(response, "headers", {}) or {}
-            content_type = headers.get("content-type", "unknown") if hasattr(headers, "get") else "unknown"
-            content_length = headers.get("content-length", "unknown") if hasattr(headers, "get") else "unknown"
-            message = (
-                "Bright Data returned an empty or non-JSON response "
-                f"(HTTP {effective_status}, content-type={content_type}, "
-                f"content-length={content_length}); request uses format=raw, brd_json=1, and x-unblock-data-format=parsed_light"
-            )
-            self.last_lens_diagnostics.update({"status": "invalid_response", "error": message})
-            raise BrightDataAPIError(message)
-
-        if isinstance(payload, dict) and "status_code" in payload and "body" in payload:
-            inner_body = payload.get("body")
-            if not str(inner_body or "").strip():
-                message = (
-                    "Bright Data API envelope was received but its body is empty "
-                    f"(inner HTTP {effective_status}); no Google Lens results were delivered"
+        # Use visual_matches only when exact_matches did not produce an official
+        # IMDb/TMDB page. This is a bounded second request, not a batch retry loop.
+        if not exact_ids:
+            try:
+                visual_results, visual_rows, visual_diag = self._request_lens_tab(
+                    image_url, LENS_FALLBACK_TAB
                 )
-                self.last_lens_diagnostics.update({"status": "empty_body", "error": message})
-                raise BrightDataAPIError(message)
+                tabs[LENS_FALLBACK_TAB] = visual_diag
+                attempts += int(visual_diag.get("attempts") or 0)
+                seen = {
+                    (
+                        re.sub(r"\W+", " ", str(row.get("title") or "").casefold()).strip(),
+                        str(row.get("url") or ""),
+                        str(row.get("source") or ""),
+                    )
+                    for row in combined
+                }
+                for row in visual_results:
+                    key = (
+                        re.sub(r"\W+", " ", str(row.get("title") or "").casefold()).strip(),
+                        str(row.get("url") or ""),
+                        str(row.get("source") or ""),
+                    )
+                    if key not in seen:
+                        combined.append(row)
+                        seen.add(key)
+            except BrightDataQuotaError as exc:
+                request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
+                tabs[LENS_FALLBACK_TAB] = {
+                    "status": "quota_error",
+                    **request_diag,
+                    "error": str(exc)[:300],
+                }
+                self.last_lens_diagnostics.update({
+                    "status": "quota_error",
+                    "lens_tabs_attempted": [LENS_TAB, LENS_FALLBACK_TAB],
+                    "lens_tab_diagnostics": tabs,
+                    "attempts": attempts + int(request_diag.get("attempts") or 0),
+                    "rate_limit_retries": sum(
+                        int(item.get("rate_limit_retries") or 0) for item in tabs.values()
+                    ),
+                    "rate_limit_wait_seconds": sum(
+                        int(item.get("rate_limit_wait_seconds") or 0) for item in tabs.values()
+                    ),
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                })
+                raise
+            except BrightDataAPIError as exc:
+                request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
+                tabs[LENS_FALLBACK_TAB] = {
+                    "status": "error",
+                    **request_diag,
+                    "error": f"{type(exc).__name__}: {str(exc)[:250]}",
+                }
 
-        if isinstance(payload, dict) and any(payload.get(key) for key in ("error", "errors")):
-            detail = self._error_detail(payload)
-            message = f"Bright Data returned an API error: {detail or 'unknown provider error'}"
-            self.last_lens_diagnostics.update({"status": "provider_error", "error": message})
-            raise BrightDataAPIError(message)
+        raw_paths: dict[str, int] = {}
+        raw_fields: set[str] = set()
+        for diag in tabs.values():
+            raw_fields.update(diag.get("raw_result_fields") or [])
+            for key, value in (diag.get("raw_link_paths") or {}).items():
+                raw_paths[key] = raw_paths.get(key, 0) + int(value or 0)
 
-        rows = self._rows_from_payload(payload)
-        if rows is None:
-            shape = self._payload_shape(payload)
-            message = (
-                "Bright Data returned JSON, but no recognized Google Lens result list was present; "
-                + shape
-            )
-            self.last_lens_diagnostics.update({
-                "status": "unparsed_response",
-                "payload_shape": shape,
-                "error": message,
-            })
-            raise BrightDataAPIError(message)
-
-        self.last_lens_diagnostics.update(self._raw_result_diagnostics(rows))
-        normalized = self._normalize_matches(rows)
         self.last_lens_diagnostics.update({
-            "status": "ok" if normalized else "no_matches",
-            "raw_result_count": len(rows),
-            "result_count": len(normalized),
-            "error": None,
+            "status": "ok" if combined else "no_matches",
+            "lens_tab": "+".join(tabs),
+            "lens_tabs_attempted": list(tabs),
+            "lens_tab_diagnostics": tabs,
+            "http_status": tabs.get(LENS_FALLBACK_TAB, tabs[LENS_TAB]).get("http_status"),
+            "attempts": attempts,
+            "rate_limit_retries": sum(
+                int(item.get("rate_limit_retries") or 0) for item in tabs.values()
+            ),
+            "rate_limit_wait_seconds": sum(
+                int(item.get("rate_limit_wait_seconds") or 0) for item in tabs.values()
+            ),
+            "raw_result_fields": sorted(raw_fields)[:40],
+            "raw_link_paths": dict(
+                sorted(raw_paths.items(), key=lambda item: (-item[1], item[0]))[:12]
+            ),
+            "exact_matches_result_count": len(exact_results),
+            "visual_matches_result_count": len(visual_results),
+            "raw_result_count": sum(
+                int(item.get("raw_result_count") or 0) for item in tabs.values()
+            ),
+            "result_count": len(combined),
+            "error": tabs.get(LENS_FALLBACK_TAB, {}).get("error"),
         })
-        return normalized
+        return combined
 
     @staticmethod
     def _http_error(status: int, detail: str) -> str:
@@ -1067,7 +1268,7 @@ class BrightDataGoogleLensClient:
             401: "Bright Data authentication failed; verify BRIGHTDATA_API_KEY in Hostless",
             402: "Bright Data reports no available free/API credits; do not add funds or enable a paid plan",
             403: "Bright Data denied this request; verify the SERP zone is active and permitted",
-            429: "Bright Data request limit reached; stop processing and check the dashboard quota",
+            429: "Bright Data returned HTTP 429 after any explicit cooldown retry; this may be temporary throttling or a SERP-zone throughput limit",
         }
         message = messages.get(status, "Bright Data service error; the image lookup did not return a usable response")
         suffix = f": {detail}" if detail else ""
