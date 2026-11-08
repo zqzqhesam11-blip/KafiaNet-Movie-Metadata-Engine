@@ -10,7 +10,7 @@ from urllib.parse import unquote, urlencode, urlparse
 
 import httpx
 
-from app.image_evidence import _resolved_destination_url
+from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, _resolved_destination_url
 
 
 BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
@@ -836,6 +836,8 @@ class BrightDataGoogleLensClient:
             "payload_shape": None,
             "http_status": None,
             "attempts": 0,
+            "rate_limit_retries": 0,
+            "rate_limit_wait_seconds": 0,
             "organic_result_count": 0,
             "candidate_url_count": 0,
             "google_redirect_count": 0,
@@ -882,19 +884,30 @@ class BrightDataGoogleLensClient:
                     response_format="json",
                 )
             except BrightDataAPIError as exc:
+                request_diagnostics = dict(getattr(self, "last_request_diagnostics", {}) or {})
+                total_attempts += int(request_diagnostics.get("attempts") or 0)
                 diagnostics.update({
                     "status": "quota_error" if isinstance(exc, BrightDataQuotaError) else "error",
-                    "attempts": total_attempts + MAX_TRANSIENT_RETRIES + 1,
+                    "attempts": total_attempts,
+                    "rate_limit_retries": int(diagnostics.get("rate_limit_retries") or 0)
+                    + int(request_diagnostics.get("rate_limit_retries") or 0),
+                    "rate_limit_wait_seconds": int(diagnostics.get("rate_limit_wait_seconds") or 0)
+                    + int(request_diagnostics.get("rate_limit_wait_seconds") or 0),
                     "error": f"{type(exc).__name__}: {str(exc)[:300]}",
                 })
                 raise
 
             total_attempts += attempts
             body = getattr(response, "text", "") or ""
+            request_diagnostics = dict(getattr(self, "last_request_diagnostics", {}) or {})
             diagnostics.update({
                 "status": "http_error" if effective_status < 200 or effective_status >= 300 else "parsing",
                 "http_status": effective_status,
                 "attempts": total_attempts,
+                "rate_limit_retries": int(diagnostics.get("rate_limit_retries") or 0)
+                + int(request_diagnostics.get("rate_limit_retries") or 0),
+                "rate_limit_wait_seconds": int(diagnostics.get("rate_limit_wait_seconds") or 0)
+                + int(request_diagnostics.get("rate_limit_wait_seconds") or 0),
                 "response_format": "json",
                 "payload_shape": self._payload_shape(payload) if payload is not None else None,
             })
