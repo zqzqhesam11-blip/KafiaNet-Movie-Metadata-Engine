@@ -771,8 +771,11 @@ class BrightDataGoogleLensClient:
 
         for row in repeated_lens:
             append_unique(str(row["title"]))
+        lens_title_keys = set(lens_buckets)
         for value in play_hints:
-            append_unique(value)
+            key = re.sub(r"\W+", " ", value.casefold()).strip()
+            if key not in lens_title_keys:
+                append_unique(value)
         for row in single_lens:
             append_unique(str(row["title"]))
 
@@ -1244,6 +1247,7 @@ class BrightDataGoogleLensClient:
                 raise
             except BrightDataAPIError as exc:
                 request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
+                attempts += int(request_diag.get("attempts") or 0)
                 tabs[LENS_FALLBACK_TAB] = {
                     "status": "error",
                     **request_diag,
