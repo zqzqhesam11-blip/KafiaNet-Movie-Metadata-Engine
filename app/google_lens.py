@@ -314,12 +314,17 @@ class BrightDataGoogleLensClient:
             for key, value in payload.items()
         ]
 
-        # Prefer explicit organic/Lens collections at any casing or nesting
-        # level before considering generic wrappers.
+        # Prefer non-empty explicit Lens collections at any casing or nesting
+        # level. Some providers include an empty exact_matches array beside a
+        # populated visual_matches collection in the same response.
+        empty_result_list: list[dict[str, Any]] | None = None
         for key, value in normalized_items:
             if key in result_keys and isinstance(value, list):
                 if all(isinstance(item, dict) for item in value):
-                    return value
+                    if value:
+                        return value
+                    if empty_result_list is None:
+                        empty_result_list = value
 
         # Bright Data format=json may return a SERP object directly, while
         # some integrations wrap it as status_code/body JSON.
@@ -358,9 +363,9 @@ class BrightDataGoogleLensClient:
                 rows = BrightDataGoogleLensClient._rows_from_payload(
                     value, depth + 1
                 )
-                if rows is not None:
+                if rows is not None and rows:
                     return rows
-        return None
+        return empty_result_list
 
     @staticmethod
     def _first_url(item: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -644,7 +649,12 @@ class BrightDataGoogleLensClient:
         """Clean a Lens title without treating publisher names as part of the film title."""
         text = unquote(str(value or "")).replace("_", " ").replace("+", " ")
         text = text.replace("∣", "|")
-        text = re.sub(r"^[^:]{2,24}\s*:\s*(?=[A-ZÀ-ž])", "", text)
+        text = re.sub(
+            r"^(?:Prime Video|Netflix|Amazon Prime Video|Google Play|YouTube|Apple TV)\s*:\s*",
+            "",
+            text,
+            flags=re.I,
+        )
         text = re.sub(r"\s*\|\s*(?:watch\s+(?:the\s+)?film\s+online|watch\s+online|official\s+trailer|full\s+movie).*$", "", text, flags=re.I)
         text = re.sub(
             r"\s+(?:on|at)\s+(?:cinobo|plex|prime\s+video|netflix|amazon\s+prime|"
