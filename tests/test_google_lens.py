@@ -729,6 +729,44 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(call.kwargs["json"]["format"], "json")
         self.assertEqual(query["brd_json"], ["1"])
 
+    def test_official_title_search_retries_explicit_brightdata_cooldown(self):
+        cooldown = Mock()
+        cooldown.status_code = 429
+        cooldown.text = (
+            "This query recently failed and cannot be attempted at this time. "
+            "Please try again later, after a minimum of 15 seconds."
+        )
+        cooldown.json.return_value = {"error": cooldown.text}
+        cooldown.headers = {}
+
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = ""
+        recovered.json.return_value = {
+            "organic": [{
+                "title": "A Short Film About Killing (1988) - IMDb",
+                "link": "https://www.imdb.com/title/tt0095468/",
+            }]
+        }
+        api = self.make_client()
+        api.client.post.side_effect = [cooldown, recovered]
+
+        with patch("app.google_lens.time.sleep") as sleep:
+            rows = api.search_official_movie_pages_from_lens([
+                {"title": "A Short Film About Killing (1988)"}
+            ])
+
+        self.assertEqual([row["url"] for row in rows], [
+            "https://www.imdb.com/title/tt0095468/"
+        ])
+        self.assertEqual(api.client.post.call_count, 2)
+        sleep.assert_called_once_with(15)
+        diagnostics = api.last_official_search_diagnostics
+        self.assertEqual(diagnostics["query_count"], 1)
+        self.assertEqual(diagnostics["attempts"], 2)
+        self.assertEqual(diagnostics["rate_limit_retries"], 1)
+        self.assertEqual(diagnostics["rate_limit_wait_seconds"], 15)
+
     def test_title_search_parses_structured_json_inside_brightdata_body_envelope(self):
         organic = [{
             "title": "Apollo 10½: A Space Age Childhood - IMDb",
