@@ -681,7 +681,7 @@ class BrightDataGoogleLensClient:
         text = re.sub(r"[\[(](?:18|19|20)\d{2}[\])]", " ", text)
         text = re.sub(r"\s+(?:18|19|20)\d{2}\s*$", " ", text)
         text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
-        if len(text) < 5 or not re.search(r"[A-Za-zÀ-ž]", text):
+        if len(text) < 4 or not re.search(r"[A-Za-zÀ-ž]", text):
             return "", year
         # Lens can expose the publisher/platform name as the result title
         # (for example, dozens of rows labelled only "YouTube"). Such labels

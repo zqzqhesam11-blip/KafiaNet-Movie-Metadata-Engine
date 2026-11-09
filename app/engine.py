@@ -1754,13 +1754,17 @@ class MetadataEngine:
         old_items = list(index.get("items") or [])
         old_by_folder = {str(row.get("source_folder")): row for row in old_items}
 
-        # Root folders still need their first move even when the older index says
-        # READY. REVIEW folders are retried on later batches until resolved.
+        # Root folders still need their first move even when the index has a
+        # stale READY row. REVIEW is retried only after an explicit --refresh;
+        # ordinary runs never silently repeat searches for the same image.
         pending = [
             item for item in folders
             if item["folder"] not in old_by_folder
-            or old_by_folder[item["folder"]].get("status") == "review"
             or item.get("source_prefix") == item["folder"]
+            or (
+                refresh_plan
+                and old_by_folder[item["folder"]].get("status") == "review"
+            )
         ][: max(1, limit)]
 
         records: list[dict[str, Any]] = []
