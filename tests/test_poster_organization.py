@@ -171,6 +171,7 @@ class PosterOrganizationTests(unittest.TestCase):
         api._branch_commit = lambda: ("old-head", "base-tree")
         api.branch = "main"
         api.client = FakeTreeClient()
+        api._get = lambda path, params=None: {"tree": [], "truncated": False}
 
         result = api.commit_files(
             files={"جاهز/Film A/Film A (2020).json": "{}"},
@@ -307,6 +308,28 @@ class PosterOrganizationTests(unittest.TestCase):
             saved["source"]["original_image_path"],
             "Unresolved Film (2021)/poster.jpg",
         )
+
+    def test_rejects_move_destination_that_already_exists_in_base_tree(self):
+        api = GitHubAPI.__new__(GitHubAPI)
+        api._branch_commit = lambda: ("old-head", "base-tree")
+        api.client = FakeTreeClient()
+        api._get = lambda path, params=None: {
+            "tree": [{"path": "جاهز/Film A/poster.jpg", "type": "blob"}],
+            "truncated": False,
+        }
+
+        with self.assertRaisesRegex(ValueError, "Move destination already exists"):
+            api.commit_files(
+                files={"جاهز/Film A/Film A.json": "{}"},
+                moves={
+                    "جاهز/Film A/poster.jpg": {
+                        "sha": "new-image-blob",
+                        "mode": "100644",
+                    }
+                },
+            )
+
+        self.assertEqual(api.client.calls, [])
 
     def test_rejects_a_move_that_conflicts_with_a_json_file(self):
         api = GitHubAPI.__new__(GitHubAPI)

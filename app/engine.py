@@ -2166,7 +2166,7 @@ class MetadataEngine:
 
         # If a previously READY film becomes a duplicate after this batch, move
         # its current image files and rename its JSON in the same atomic commit.
-        if False:
+        if True:
             for tmdb_id, group in by_id.items():
                 if len(group) < 2:
                     continue
