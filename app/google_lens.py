@@ -683,9 +683,19 @@ class BrightDataGoogleLensClient:
         text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
         if len(text) < 5 or not re.search(r"[A-Za-zÀ-ž]", text):
             return "", year
-        if text.casefold() in {
-            "google play", "movie", "movies", "film", "films",
-            "official site", "watch online", "full movie",
+        # Lens can expose the publisher/platform name as the result title
+        # (for example, dozens of rows labelled only "YouTube"). Such labels
+        # are not film-title evidence and must never outrank a direct movie
+        # detail URL from Google Play or another result.
+        generic_key = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+        if generic_key in {
+            "google play", "google play movies", "play store",
+            "youtube", "youtube com", "youtube movies",
+            "prime video", "amazon prime video", "netflix", "apple tv",
+            "imdb", "tmdb", "the movie database", "wikipedia",
+            "letterboxd", "rotten tomatoes",
+            "movie", "movies", "film", "films",
+            "official site", "watch online", "full movie", "movie trailer",
         }:
             return "", year
         return text[:180], year
@@ -802,11 +812,11 @@ class BrightDataGoogleLensClient:
         *,
         broad: bool = False,
     ) -> str:
-        """Build domain-scoped searches across official film and archive catalogs.
+        """Build one fast, domain-scoped search across official movie catalogs.
 
-        IMDb and TMDB are searched for official identifiers; AFI and BFI are
-        searched as independent catalog references for reviewer corroboration.
-        The exact pass keeps phrases intact and applies the year when available.
+        Keep the search broad enough to tolerate local-language and alternate
+        poster titles. Candidate IDs are still verified by TMDB before READY;
+        the Lens year hint remains available for candidate disambiguation.
         """
         domains = (
             "imdb.com/title",
@@ -883,10 +893,10 @@ class BrightDataGoogleLensClient:
         afi_catalog_count = 0
         bfi_archive_count = 0
 
-        # The first query is precise; the second is used only when Google returns
-        # a valid SERP but no official IMDb/TMDB movie URL.
+        # Use a single broad site-scoped request. The previous exact-then-broad
+        # sequence doubled lookup latency for every poster without an official
+        # ID. TMDB /find and movie details remain mandatory before READY.
         query_specs = (
-            ("exact_site_scoped", False),
             ("broad_site_scoped", True),
         )
         for variant, broad in query_specs:
