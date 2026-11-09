@@ -1818,11 +1818,17 @@ class MetadataEngine:
                     # This branch performs no Lens, Google Search, or TMDB requests.
                     record = plan_records_by_folder[item["folder"]]
                 else:
-                    record = self._record_for_folder(
-                        item,
-                        previous_output_path=previous_row.get("output_path"),
-                        refresh_evidence=refresh_evidence,
-                    )
+                    if refresh_evidence:
+                        record = self._record_for_folder(
+                            item,
+                            previous_output_path=previous_row.get("output_path"),
+                            refresh_evidence=True,
+                        )
+                    else:
+                        record = self._record_for_folder(
+                            item,
+                            previous_output_path=previous_row.get("output_path"),
+                        )
             except Exception as exc:
                 # Isolate failures to this film. Persist it as REVIEW so a later
                 # batch can retry it; one invalid Lens backlink or API response
@@ -1874,7 +1880,7 @@ class MetadataEngine:
                         "reason": "Processing failed before a verified movie match; item is eligible for retry",
                     },
                     "reverse_image": {
-                        "enabled": self.reverse_image is not None,
+                        "enabled": getattr(self, "reverse_image", None) is not None,
                 "provider": "google_lens_brightdata",
                         "results": previous_reverse_image_results,
                         "results_source": "previous_saved" if previous_reverse_image_results else "none",
