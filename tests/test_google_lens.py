@@ -592,6 +592,38 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertIsNone(year)
         self.assertEqual(hints, ["a short film about killing"])
 
+    def test_official_title_search_uses_only_the_primary_lens_title(self):
+        api = self.make_client({"organic": []})
+        lens_rows = [
+            {"title": "A Short Film About Killing (1988) - IMDb"},
+            {"title": "A Short Film About Killing (1988) - The Movie Database"},
+            {"title": "A Short Film About Killing on Cinobo | Watch the film online"},
+            {"title": "Most Adum would love this film Adum hasn't seen r YMS"},
+            {"title": "Amazon com A Short Film About Killing DVD Documentary, Horror"},
+            {"title": "YouTube"},
+            {"title": "A Short Film About Killing Alternative Film Movie Print Wall"},
+        ]
+
+        api.search_official_movie_pages_from_lens(lens_rows)
+
+        from urllib.parse import parse_qs, urlparse
+        query = parse_qs(
+            urlparse(api.client.post.call_args_list[0].kwargs["json"]["url"]).query
+        )["q"][0]
+        self.assertIn('"A Short Film About Killing" 1988', query)
+        self.assertNotIn("Adum", query)
+        self.assertNotIn("Amazon", query)
+        self.assertNotIn("YouTube", query)
+        self.assertNotIn("Movie Print", query)
+        self.assertEqual(
+            api.last_official_search_diagnostics["title_hints"],
+            ["A Short Film About Killing"],
+        )
+        self.assertGreaterEqual(
+            len(api.last_official_search_diagnostics["candidate_title_hints"]), 2
+        )
+        self.assertEqual(api.last_official_search_diagnostics["query_count"], 2)
+
     def test_searches_only_official_tmdb_and_imdb_pages_from_lens_titles(self):
         api = self.make_client({
             "organic": [
