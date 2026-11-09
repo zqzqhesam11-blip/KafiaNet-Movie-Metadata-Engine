@@ -569,6 +569,16 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(hints, ["não matarás"])
         self.assertIsNone(year)
 
+    def test_ai_mode_and_google_search_labels_are_not_movie_titles(self):
+        hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results([
+            {"title": "AI Mode"},
+            {"title": "Google Search"},
+            {"title": "Google AI Overview"},
+            {"title": "Dìdi (2024)"},
+        ])
+        self.assertEqual(hints, ["Dìdi"])
+        self.assertEqual(year, 2024)
+
     def test_platform_only_caption_does_not_suppress_visual_matches_fallback(self):
         exact = Mock()
         exact.status_code = 200
@@ -622,9 +632,9 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         ])
 
         self.assertEqual(year, 1988)
-        # A distinct direct Play Store title is prioritized as a useful alias.
-        self.assertEqual(hints[0].casefold(), "krótki film o zabijaniu")
-        self.assertIn("a short film about killing", [value.casefold() for value in hints])
+        # The Lens result caption is primary; a localized Play Store slug is a fallback alias.
+        self.assertEqual(hints[0].casefold(), "a short film about killing")
+        self.assertIn("krótki film o zabijaniu", [value.casefold() for value in hints])
         self.assertIn("krótki film o zabijaniu", [value.casefold() for value in hints])
         self.assertIn("öldürme üzerine kısa bir film", [value.casefold() for value in hints])
         self.assertNotIn("PRIVATE", " ".join(hints))

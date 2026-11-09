@@ -56,10 +56,32 @@ class FakeTMDB:
         }
         self.details_calls: list[int] = []
         self.find_calls: list[str] = []
+        self.search_calls: list[tuple[str, int | None]] = []
         self.find_results = {
             "tt0095468": {"movie_results": [{"id": 10754}]},
             "tt0095467": {"movie_results": [{"id": 31056}]},
         }
+
+    def search_movies(self, query: str, year: int | None = None):
+        self.search_calls.append((query, year))
+        query_key = " ".join(query.casefold().split())
+        matches = []
+        for tmdb_id, details in self.records.items():
+            title_key = " ".join(str(details.get("title") or "").casefold().split())
+            original_key = " ".join(str(details.get("original_title") or "").casefold().split())
+            if query_key not in {title_key, original_key}:
+                continue
+            release_date = str(details.get("release_date") or "")
+            movie_year = int(release_date[:4]) if release_date[:4].isdigit() else None
+            if year is not None and movie_year != year:
+                continue
+            matches.append({
+                "id": tmdb_id,
+                "title": details.get("title"),
+                "original_title": details.get("original_title"),
+                "release_date": release_date,
+            })
+        return {"results": matches}
 
     def find_by_imdb_id(self, imdb_id: str):
         self.find_calls.append(imdb_id)
@@ -190,17 +212,22 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(set(match["candidate_ids"]), {10754, 31056})
         self.assertEqual(set(engine.tmdb.details_calls), {10754, 31056})
 
-    def test_title_only_result_does_not_call_tmdb_text_search(self):
+    def test_title_only_lens_result_uses_one_exact_tmdb_lookup(self):
         engine = self.make_engine()
 
-        candidate, match, _ = engine._find_movie([{
+        candidate, match, evidence = engine._find_movie([{
             "title": "Buladó (2020)",
             "url": "https://example.test/film/bulado",
         }])
 
         self.assertIsNone(candidate)
         self.assertEqual(match["status"], "review")
+        self.assertEqual(engine.tmdb.search_calls, [("Buladó", 2020)])
         self.assertEqual(engine.tmdb.details_calls, [])
+        self.assertEqual(
+            evidence["official_title_search"]["status"],
+            "no_exact_title_year_match",
+        )
 
     def test_multiple_official_tmdb_movie_ids_remain_review(self):
         engine = self.make_engine()
@@ -225,47 +252,40 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(set(engine.tmdb.details_calls), {10754, 31056})
         self.assertEqual(len(evidence["candidate_identities"]), 2)
 
-    def test_title_search_disambiguates_two_official_ids_using_exact_lens_title_and_year(self):
+    def test_lens_title_disambiguates_two_official_ids_using_exact_title_and_year(self):
         engine = self.make_engine()
-        searcher = Mock(return_value=[
-            {"url": "https://www.imdb.com/title/tt0095468/"},
-            {"url": "https://www.imdb.com/title/tt0095467/"},
-        ])
-        engine.reverse_image = SimpleNamespace(
-            resolve_result_urls=lambda rows: rows,
-            search_official_movie_pages_from_lens=searcher,
-            last_official_search_diagnostics={
-                "status": "ok",
-                "query_count": 1,
-                "title_hints": ["A Short Film About Killing"],
-                "year_hint": 1988,
-                "official_url_count": 2,
+        rows = [
+            {
+                "title": "A Short Film About Killing (1988)",
+                "url": "https://www.themoviedb.org/movie/10754-a-short-film-about-killing",
+                "resolved_url": "https://www.themoviedb.org/movie/10754-a-short-film-about-killing",
             },
-        )
+            {
+                "title": "A Short Film About Killing (1988)",
+                "url": "https://www.themoviedb.org/movie/31056-a-short-film-about-love",
+                "resolved_url": "https://www.themoviedb.org/movie/31056-a-short-film-about-love",
+            },
+        ]
 
-        candidate, match, evidence = engine._find_movie([{
-            "title": "A Short Film About Killing (1988)",
-            "url": "https://play.google.com/store/movies/details/a_short_film_about_killing",
-        }])
+        candidate, match, evidence = engine._find_movie(rows)
 
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["id"], 10754)
         self.assertEqual(match["status"], "ready")
         self.assertEqual(match["imdb_id"], "tt0095468")
-        self.assertEqual(set(engine.tmdb.find_calls), {"tt0095468", "tt0095467"})
         self.assertEqual(set(engine.tmdb.details_calls), {10754, 31056})
         self.assertEqual(
             evidence["identity_disambiguation"]["method"],
-            "exact_lens_primary_title_and_year_against_verified_tmdb_details",
+            "lens_primary_title_and_optional_year_against_verified_tmdb_details",
         )
         self.assertEqual(
             evidence["identity_disambiguation"]["selected_tmdb_id"],
             10754,
         )
-        self.assertTrue(evidence["resolved_identity"]["tmdb_id"] == 10754)
+        self.assertEqual(evidence["resolved_identity"]["tmdb_id"], 10754)
         self.assertTrue(evidence["resolved_identity"]["verification"])
 
-    def test_unresolved_secondary_title_search_id_does_not_block_unique_verified_match(self):
+    def test_lens_title_uses_one_tmdb_query_and_never_repeats_google_search(self):
         engine = self.make_engine()
         apollo = movie_details(
             664996,
@@ -273,28 +293,11 @@ class IdOnlyIdentityTests(unittest.TestCase):
             "Apollo 10½: A Space Age Childhood",
         )
         apollo["release_date"] = "2022-04-01"
+        apollo["original_title"] = "Apollo 10½: A Space Age Childhood"
         engine.tmdb.records[664996] = apollo
-        engine.tmdb.find_results["tt7978758"] = {
-            "movie_results": [{"id": 664996}]
-        }
-        searcher = Mock(return_value=[
-            {"url": "https://www.imdb.com/title/tt7978758/"},
-            {"url": "https://www.imdb.com/title/tt28422574/"},
-        ])
-        engine.reverse_image = SimpleNamespace(
-            resolve_result_urls=lambda rows: rows,
-            search_official_movie_pages_from_lens=searcher,
-            last_official_search_diagnostics={
-                "status": "ok",
-                "query_count": 1,
-                "title_hints": ["Apollo 10 1 2 A Space Age Childhood"],
-                "year_hint": 2022,
-                "official_url_count": 2,
-            },
-        )
 
         candidate, match, evidence = engine._find_movie([{
-            "title": "Apollo 10 1 2 A Space Age Childhood (2022)",
+            "title": "Apollo 10½: A Space Age Childhood (2022)",
             "url": "https://play.google.com/store/movies/details/apollo_10_1_2_a_space_age_childhood",
         }])
 
@@ -303,17 +306,18 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(match["status"], "ready")
         self.assertEqual(match["imdb_id"], "tt7978758")
         self.assertEqual(
-            evidence["identity_disambiguation"]["selected_tmdb_id"],
-            664996,
+            engine.tmdb.search_calls,
+            [("Apollo 10½: A Space Age Childhood", 2022)],
+        )
+        self.assertEqual(engine.tmdb.find_calls, [])
+        self.assertEqual(engine.tmdb.details_calls, [664996])
+        self.assertEqual(
+            evidence["official_title_search"]["tmdb_ids"],
+            [664996],
         )
         self.assertEqual(
-            evidence["identity_disambiguation"]["ignored_secondary_imdb_ids"],
-            ["tt28422574"],
-        )
-        self.assertIn("tt28422574", evidence["id_resolution"]["imdb_to_tmdb_ids"])
-        self.assertEqual(
-            evidence["tmdb_id_lookup"]["status"],
-            "resolved_after_lens_title_disambiguation",
+            evidence["resolved_identity"]["source"],
+            "google_lens_image_match_title_tmdb_verified",
         )
 
     def test_folder_title_mismatch_alone_does_not_veto_verified_official_id(self):

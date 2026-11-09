@@ -33,19 +33,32 @@ class GitHubAPI:
             timeout=timeout,
         )
 
+    @staticmethod
+    def _raise_with_response(response: httpx.Response) -> None:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = str(getattr(response, "text", "") or "").strip().replace("\\n", " ")
+            detail = " ".join(detail.split())[:1200] or "empty response body"
+            raise httpx.HTTPStatusError(
+                f"{exc}; GitHub response body: {detail}",
+                request=exc.request,
+                response=response,
+            ) from exc
+
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self.client.get(path, params=params or {})
-        response.raise_for_status()
+        self._raise_with_response(response)
         return response.json()
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         response = self.client.post(path, json=body)
-        response.raise_for_status()
+        self._raise_with_response(response)
         return response.json()
 
     def _patch(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         response = self.client.patch(path, json=body)
-        response.raise_for_status()
+        self._raise_with_response(response)
         return response.json()
 
     def _branch_commit(self) -> tuple[str, str]:
@@ -177,6 +190,7 @@ class GitHubAPI:
         deletes: list[str] | None = None,
         message: str = "Add KafiaNet movie metadata batch",
         moves: dict[str, dict[str, str]] | None = None,
+        expected_head_sha: str | None = None,
     ) -> str:
         deleted_paths = set(deletes or [])
         move_items: list[dict[str, Any]] = []
@@ -195,10 +209,44 @@ class GitHubAPI:
                 }
             )
 
+        file_paths = set(files)
+        move_paths = set(moves or {})
+        if file_paths.intersection(deleted_paths):
+            raise ValueError("Conflicting Git tree operation: a file is also scheduled for deletion")
+        if file_paths.intersection(move_paths):
+            raise ValueError("Conflicting Git tree operation: a path is both a file and a move")
         if not files and not deleted_paths and not move_items:
             raise ValueError("No files, moves, or deletions to commit")
 
         expected_head, base_tree = self._branch_commit()
+        if expected_head_sha and expected_head != expected_head_sha:
+            raise RuntimeError(
+                "Poster branch HEAD changed after DRY_RUN; refusing to apply a stale plan."
+            )
+
+        current_tree = self._get(f"/git/trees/{base_tree}", {"recursive": "1"})
+        if current_tree.get("truncated"):
+            raise RuntimeError("GitHub tree is truncated; refusing unsafe path-collision checks.")
+        tree_rows = current_tree.get("tree") or []
+        existing_paths = {
+            str(row.get("path") or ""): str(row.get("type") or "")
+            for row in tree_rows if isinstance(row, dict)
+        }
+        existing_blobs = {path for path, kind in existing_paths.items() if kind == "blob"}
+        existing_trees = {path for path, kind in existing_paths.items() if kind == "tree"}
+
+        for destination in move_paths:
+            if destination in existing_paths and destination not in deleted_paths:
+                raise ValueError(f"Move destination already exists in poster repository: {destination}")
+        for destination in file_paths | move_paths:
+            parent = destination.rpartition("/")[0]
+            while parent:
+                if parent in existing_blobs and parent not in deleted_paths:
+                    raise ValueError(f"Git path parent is an existing file: {parent}")
+                parent = parent.rpartition("/")[0]
+            if destination in existing_trees:
+                raise ValueError(f"Git path destination is an existing directory: {destination}")
+
         tree_items: list[dict[str, Any]] = []
 
         for path, content in sorted(files.items()):

@@ -681,7 +681,7 @@ class BrightDataGoogleLensClient:
         text = re.sub(r"[\[(](?:18|19|20)\d{2}[\])]", " ", text)
         text = re.sub(r"\s+(?:18|19|20)\d{2}\s*$", " ", text)
         text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
-        if len(text) < 5 or not re.search(r"[A-Za-zÀ-ž]", text):
+        if len(text) < 4 or not re.search(r"[A-Za-zÀ-ž]", text):
             return "", year
         # Lens can expose the publisher/platform name as the result title
         # (for example, dozens of rows labelled only "YouTube"). Such labels
@@ -694,6 +694,8 @@ class BrightDataGoogleLensClient:
             "prime video", "amazon prime video", "netflix", "apple tv",
             "imdb", "tmdb", "the movie database", "wikipedia",
             "letterboxd", "rotten tomatoes",
+            "ai mode", "google ai mode", "google ai overview",
+            "google search", "google lens", "google", "search", "search results", "images",
             "movie", "movies", "film", "films",
             "official site", "watch online", "full movie", "movie trailer",
         }:
@@ -705,7 +707,7 @@ class BrightDataGoogleLensClient:
         cls,
         results: list[dict[str, Any]],
     ) -> tuple[list[str], int | None]:
-        """Rank repeated Lens title signals and retain direct Play Store aliases as suggestions.
+        """Rank Lens captions first and retain direct Play Store aliases as fallback suggestions.
 
         Opaque Google /goto URLs are never decoded or treated as identity evidence.
         Local filenames and source-folder labels are never accepted as title inputs.
@@ -781,13 +783,13 @@ class BrightDataGoogleLensClient:
 
         for row in repeated_lens:
             append_unique(str(row["title"]))
+        for row in single_lens:
+            append_unique(str(row["title"]))
         lens_title_keys = set(lens_buckets)
         for value in play_hints:
             key = re.sub(r"\W+", " ", value.casefold()).strip()
             if key not in lens_title_keys:
                 append_unique(value)
-        for row in single_lens:
-            append_unique(str(row["title"]))
 
         year: int | None = None
         if repeated_lens:
@@ -1153,11 +1155,10 @@ class BrightDataGoogleLensClient:
         return normalized, rows, tab_diagnostics
 
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
-        """Search exact matches first; use visual matches only if no usable title exists.
+        """Search Google Lens once; add visual matches only when exact matches have no usable title.
 
-        When exact matches already provide a usable title hint, the engine can
-        perform one official, site-scoped IMDb/TMDB search. Avoiding a redundant
-        visual tab saves a Bright Data round trip without weakening ID verification.
+        The engine resolves a Lens title through one TMDB lookup. It does not issue
+        a second Google web-search request to hunt for official URL backlinks.
         Opaque /goto wrappers remain quarantined and are never parsed as IDs.
         """
         self.last_official_search_diagnostics = {

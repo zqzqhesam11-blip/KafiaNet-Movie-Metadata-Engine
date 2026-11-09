@@ -5,140 +5,121 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from app.engine import MetadataEngine
+from app.google_lens import BrightDataGoogleLensClient
 
 
-class LensDerivedOfficialTitleResolutionTests(unittest.TestCase):
-    def test_official_title_search_5xx_stops_batch(self):
+def movie_details(movie_id: int, title: str, year: int, imdb_id: str | None = None) -> dict:
+    return {
+        "id": movie_id,
+        "title": title,
+        "original_title": title,
+        "release_date": f"{year}-01-01",
+        "original_language": "en",
+        "external_ids": {"imdb_id": imdb_id},
+        "production_countries": [],
+        "credits": {"cast": [], "crew": []},
+        "release_dates": {"results": []},
+        "alternative_titles": {"titles": []},
+        "keywords": {"keywords": []},
+        "images": {"posters": []},
+    }
+
+
+class LensFirstResolutionTests(unittest.TestCase):
+    def make_engine(self):
         engine = MetadataEngine.__new__(MetadataEngine)
         engine._details_cache = {}
         engine._stop_batch = False
         engine._provider_stop_status = None
-        searcher = Mock(side_effect=RuntimeError("Bright Data upstream HTTP 502"))
-        engine.reverse_image = SimpleNamespace(
-            search_official_movie_pages_from_lens=searcher,
-            last_official_search_diagnostics={
-                "status": "http_error",
-                "http_status": 502,
-                "query_count": 1,
-                "attempts": 3,
-                "error": "Bright Data service error HTTP 502",
-            },
-        )
+        engine._provider_stop_reason = None
+        engine.reverse_image = SimpleNamespace()
         engine.tmdb = Mock()
+        return engine
 
-        candidate, match, evidence = engine._find_movie([
-            {"title": "Movie title from Lens"}
-        ])
-
-        self.assertIsNone(candidate)
-        self.assertEqual(match["status"], "review")
-        self.assertTrue(engine._stop_batch)
-        self.assertEqual(engine._provider_stop_status, 502)
-        self.assertEqual(
-            evidence["official_title_search"]["status"],
-            "http_error",
-        )
-        self.assertEqual(
-            evidence["official_title_search"]["error"],
-            "Bright Data service error HTTP 502",
-        )
-        engine.tmdb.find_by_imdb_id.assert_not_called()
-
-    def test_official_search_urls_are_resolved_and_verified_through_tmdb(self):
-        tmdb_id = 10754
-        imdb_id = "tt0095468"
-        tmdb_url = "https://www.themoviedb.org/movie/10754-a-short-film-about-killing"
-        imdb_url = "https://www.imdb.com/title/tt0095468/"
-
-        engine = MetadataEngine.__new__(MetadataEngine)
-        engine._details_cache = {}
-        engine._stop_batch = False
-        engine._provider_stop_status = None
-
-        searcher = Mock(return_value=[
-            {
-                "title": "A Short Film About Killing (1988) — The Movie Database",
-                "url": tmdb_url,
-                "url_candidates": [tmdb_url],
-                "resolved_urls": [tmdb_url],
-                "resolved_url": tmdb_url,
-                "provider": "google_serp_official_movie_title_search",
-            },
-            {
-                "title": "A Short Film About Killing (1988) - IMDb",
-                "url": imdb_url,
-                "url_candidates": [imdb_url],
-                "resolved_urls": [imdb_url],
-                "resolved_url": imdb_url,
-                "provider": "google_serp_official_movie_title_search",
-            },
-        ])
-        engine.reverse_image = SimpleNamespace(
-            search_official_movie_pages_from_lens=searcher,
-            last_official_search_diagnostics={
-                "status": "ok",
-                "query_count": 1,
-                "title_hints": ["A Short Film About Killing"],
-                "year_hint": 1988,
-                "organic_result_count": 10,
-                "official_url_count": 2,
-            },
-        )
-
-        details = {
-            "id": tmdb_id,
-            "title": "A Short Film About Killing",
-            "original_title": "Krótki film o zabijaniu",
-            "release_date": "1988-03-11",
-            "original_language": "pl",
-            "external_ids": {"imdb_id": imdb_id},
-            "production_countries": [{"name": "Poland", "iso_3166_1": "PL"}],
-            "credits": {
-                "cast": [
-                    {"id": 1, "name": "Mirosław Baka", "character": "Jacek", "order": 0}
-                ],
-                "crew": [],
-            },
-            "release_dates": {"results": []},
-            "alternative_titles": {"titles": []},
-            "keywords": {"keywords": []},
-            "images": {"posters": []},
-        }
-        engine.tmdb = Mock()
-        engine.tmdb.find_by_imdb_id.return_value = {
-            "movie_results": [{"id": tmdb_id}]
+    def test_lens_title_uses_one_tmdb_search_and_no_second_google_search(self):
+        engine = self.make_engine()
+        details = movie_details(10754, "A Short Film About Killing", 1988, "tt0095468")
+        engine.tmdb.search_movies.return_value = {
+            "results": [{
+                "id": 10754,
+                "title": "A Short Film About Killing",
+                "original_title": "Krótki film o zabijaniu",
+                "release_date": "1988-03-11",
+            }]
         }
         engine.tmdb.movie_details.return_value = details
-
-        # The only input title evidence is from Google Lens/Play results.
-        # No source-folder name or local poster filename is passed to the resolver.
         lens_rows = [{
             "title": "A Short Film About Killing (1988)",
             "url": "https://play.google.com/store/movies/details/a_short_film_about_killing",
-            "url_candidates": [
-                "https://play.google.com/store/movies/details/a_short_film_about_killing"
-            ],
         }]
 
         candidate, match, evidence = engine._find_movie(lens_rows)
 
-        self.assertEqual(searcher.call_count, 1)
-        search_input = searcher.call_args.args[0]
-        self.assertEqual(len(search_input), 1)
-        self.assertTrue(search_input[0]["url"].startswith("https://play.google.com/"))
-        self.assertIsNotNone(candidate)
-        self.assertEqual(candidate["id"], tmdb_id)
         self.assertEqual(match["status"], "ready")
-        self.assertEqual(match["tmdb_id"], tmdb_id)
-        self.assertEqual(match["imdb_id"], imdb_id)
-        self.assertEqual(engine.tmdb.find_by_imdb_id.call_args.args[0], imdb_id)
-        self.assertEqual(engine.tmdb.movie_details.call_args.args[0], tmdb_id)
-        self.assertEqual(evidence["official_title_search"]["tmdb_ids"], [tmdb_id])
-        self.assertEqual(evidence["official_title_search"]["imdb_ids"], [imdb_id])
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["tmdb_id"], 10754)
+        self.assertEqual(match["imdb_id"], "tt0095468")
+        engine.tmdb.search_movies.assert_called_once_with("A Short Film About Killing", year=1988)
+        engine.tmdb.find_by_imdb_id.assert_not_called()
+        engine.tmdb.movie_details.assert_called_once_with(10754)
+        self.assertEqual(evidence["official_title_search"]["tmdb_ids"], [10754])
+        self.assertEqual(
+            evidence["official_title_search"]["source"],
+            "tmdb_search_from_google_lens_image_match",
+        )
         self.assertFalse(evidence["resolved_identity"]["folder_name_used"])
-        self.assertFalse(evidence["resolved_identity"]["image_filename_used"])
-        self.assertIn(tmdb_url, [row.get("url") for row in lens_rows])
-        self.assertIn(imdb_url, [row.get("url") for row in lens_rows])
+
+    def test_no_exact_tmdb_title_match_stays_review_after_one_query(self):
+        engine = self.make_engine()
+        engine.tmdb.search_movies.return_value = {
+            "results": [{
+                "id": 1,
+                "title": "A different film",
+                "original_title": "A different film",
+                "release_date": "1988-01-01",
+            }]
+        }
+
+        candidate, match, evidence = engine._find_movie([
+            {"title": "A Short Film About Killing (1988)"}
+        ])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(
+            evidence["official_title_search"]["status"],
+            "no_exact_title_year_match",
+        )
+        engine.tmdb.search_movies.assert_called_once()
+        engine.tmdb.movie_details.assert_not_called()
+        engine.tmdb.find_by_imdb_id.assert_not_called()
+
+    def test_lens_title_and_year_choose_between_competing_direct_image_matches(self):
+        engine = self.make_engine()
+        first = movie_details(10754, "A Short Film About Killing", 1988)
+        second = movie_details(99999, "A Short Film About Killing", 2005)
+        engine.tmdb.movie_details.side_effect = [first, second]
+        lens_rows = [
+            {
+                "title": "A Short Film About Killing (1988)",
+                "url": "https://www.themoviedb.org/movie/10754-a-short-film-about-killing",
+            },
+            {
+                "title": "A Short Film About Killing (1988)",
+                "url": "https://www.themoviedb.org/movie/99999-other-result",
+            },
+        ]
+
+        candidate, match, evidence = engine._find_movie(lens_rows)
+
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(
+            evidence["identity_disambiguation"]["selected_tmdb_id"],
+            10754,
+        )
+        engine.tmdb.search_movies.assert_not_called()
+        engine.tmdb.find_by_imdb_id.assert_not_called()
 
 
 if __name__ == "__main__":

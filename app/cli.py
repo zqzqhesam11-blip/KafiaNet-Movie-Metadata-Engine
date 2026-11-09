@@ -32,8 +32,12 @@ def format_summary(result: dict[str, Any]) -> str:
             f"planned_deletes={len(result.get('planned_source_image_deletes') or [])}"
         )
         lines.append(
-            "NOTE: DRY_RUN performs live Google Lens lookups and, when no official ID is found, "
-            "one Google Search query for official TMDB/IMDb pages; these requests consume free-tier quota."
+            f"plan_file={result.get('plan_file') or 'none'} "
+            f"plan_reused={str(bool(result.get('plan_reused'))).lower()}"
+        )
+        lines.append(
+            "NOTE: One Lens image search is followed by at most one TMDB title lookup. "
+            "The saved plan is reused by later DRY_RUN calls; APPLY replays it without new searches."
         )
         lines.append(
             "NOTE: Local poster OCR is disabled by default (LOCAL_OCR_ENABLED=false); "
@@ -71,18 +75,35 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="Write result JSON to the public poster repository")
     parser.add_argument("--dry-run", action="store_true", help="Explicitly force read-only catalog planning mode")
     parser.add_argument("--verbose", action="store_true", help="Print the full JSON report")
+    parser.add_argument(
+        "--plan-file",
+        default=".kafianet/dry-run-plan.json",
+        help="Local path used to save and replay the immutable DRY_RUN plan",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Force a new DRY_RUN search and replace the saved plan only after success",
+    )
     args = parser.parse_args()
     settings = Settings.from_env()
     if args.command == "check-brightdata-config":
-        if args.limit is not None or args.apply or args.dry_run or args.verbose:
+        if args.limit is not None or args.apply or args.dry_run or args.verbose or args.refresh:
             parser.error("check-brightdata-config does not accept batch or write options")
         return check_brightdata_config(settings)
+    if args.refresh and args.apply:
+        parser.error("--refresh cannot be combined with --apply; create the refreshed plan first.")
     apply = bool(args.apply and not args.dry_run)
     settings.validate_for_processing(apply=apply)
     limit = args.limit or settings.batch_limit
     engine = MetadataEngine(settings)
     try:
-        result = engine.run_batch(limit=limit, apply=apply)
+        result = engine.run_batch(
+            limit=limit,
+            apply=apply,
+            plan_path=args.plan_file,
+            refresh_plan=args.refresh,
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.verbose else format_summary(result))
         return 0
     finally:
