@@ -674,6 +674,12 @@ class BrightDataGoogleLensClient:
         )
         # Keep titles, not catalogue/editorial fragments appended after a separator.
         text = re.sub(r"\s*[|]\s*(?:film|kritik|trailer|reviews?|criticism)\b.*$", "", text, flags=re.I)
+        text = re.sub(
+            r"\s+(?:english\s+)?(?:subtitled|subtitles?|dubbed)(?:\s+version)?$",
+            "",
+            text,
+            flags=re.I,
+        )
         text = re.sub(r"[^\w\s'’\-]", " ", text, flags=re.UNICODE)
         text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
         year_match = re.search(r"(?<!\d)((?:18|19|20)\d{2})(?!\d)", text)
@@ -841,6 +847,8 @@ class BrightDataGoogleLensClient:
                 continue
             if broad:
                 title_expression = f"({title})"
+                if year:
+                    title_expression += f" {int(year)}"
             else:
                 title_expression = f'"{title.replace(chr(34), " ").strip()}"'
                 if year:
@@ -1200,6 +1208,7 @@ class BrightDataGoogleLensClient:
 
         try:
             exact_results, exact_rows, exact_diag = self._request_lens_tab(image_url, LENS_TAB)
+            exact_results = [{**row, "lens_tab": LENS_TAB} for row in exact_results]
         except BrightDataAPIError as exc:
             request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
             self.last_lens_diagnostics.update({
@@ -1238,6 +1247,7 @@ class BrightDataGoogleLensClient:
                 visual_results, visual_rows, visual_diag = self._request_lens_tab(
                     image_url, LENS_FALLBACK_TAB
                 )
+                visual_results = [{**row, "lens_tab": LENS_FALLBACK_TAB} for row in visual_results]
                 tabs[LENS_FALLBACK_TAB] = visual_diag
                 attempts += int(visual_diag.get("attempts") or 0)
                 seen = {

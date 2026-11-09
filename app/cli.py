@@ -34,8 +34,9 @@ def format_summary(result: dict[str, Any]) -> str:
         if result.get("plan_file"):
             lines.append(f"plan_file={result['plan_file']} plan_id={result.get('plan_id', 'unknown')}")
         lines.append(
-            "NOTE: DRY_RUN performs live Google Lens lookups and, when no official ID is found, "
-            "one Google Search query for official TMDB/IMDb pages; these requests consume free-tier quota."
+            "NOTE: DRY_RUN performs live Google Lens lookups. Exact Lens titles first get one "
+            "TMDB exact-title verification; Google Search fallback runs only when that result is "
+            "missing, incomplete, or ambiguous. Provider requests consume quota."
         )
         lines.append(
             "NOTE: Local poster OCR is disabled by default (LOCAL_OCR_ENABLED=false); "
