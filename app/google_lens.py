@@ -838,12 +838,19 @@ class BrightDataGoogleLensClient:
         lens_results: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """Find official movie pages from Lens-derived titles with one bounded fallback."""
-        title_hints, year = self.title_hints_from_lens_results(lens_results)
+        candidate_title_hints, year = self.title_hints_from_lens_results(lens_results)
+        # Lens often returns useful movie titles alongside unrelated editorial,
+        # retail, and platform captions. Combining all of them into one large
+        # Google OR query dilutes the search and can surface mostly Google
+        # navigation results. Search only the highest-ranked Lens/Play title;
+        # keep the other candidates for diagnostics, not query expansion.
+        title_hints = candidate_title_hints[:1]
         self.last_official_search_diagnostics = {
             "status": "no_title_hints" if not title_hints else "requesting",
             "query_count": 0,
             "query_variants": [],
             "title_hints": title_hints,
+            "candidate_title_hints": candidate_title_hints[:5],
             "year_hint": year,
             "response_format": "json",
             "payload_shape": None,
