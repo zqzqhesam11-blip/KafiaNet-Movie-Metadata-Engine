@@ -694,7 +694,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         query = parse_qs(
             urlparse(api.client.post.call_args_list[0].kwargs["json"]["url"]).query
         )["q"][0]
-        self.assertIn("(site:imdb.com/title (A Short Film About Killing))", query)
+        self.assertIn("(site:imdb.com/title (A Short Film About Killing) 1988)", query)
         self.assertNotIn("Adum", query)
         self.assertNotIn("Amazon", query)
         self.assertNotIn("YouTube", query)
@@ -761,8 +761,8 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(
             api.last_official_search_diagnostics["response_format"], "json"
         )
-        self.assertIn("(site:imdb.com/title (A Short Film About Killing))", query["q"][0])
-        self.assertIn("(site:themoviedb.org/movie (A Short Film About Killing))", query["q"][0])
+        self.assertIn("(site:imdb.com/title (A Short Film About Killing) 1988)", query["q"][0])
+        self.assertIn("(site:themoviedb.org/movie (A Short Film About Killing) 1988)", query["q"][0])
         self.assertEqual(api.last_official_search_diagnostics["year_hint"], 1988)
         self.assertEqual(api.last_official_search_diagnostics["status"], "ok")
         self.assertEqual(api.last_official_search_diagnostics["query_count"], 1)
@@ -801,9 +801,9 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         broad_query = parse_qs(
             urlparse(api.client.post.call_args_list[0].kwargs["json"]["url"]).query
         )["q"][0]
-        self.assertIn("(site:imdb.com/title (A Short Film About Killing))", broad_query)
-        self.assertIn("(site:themoviedb.org/movie (A Short Film About Killing))", broad_query)
-        self.assertNotIn("1988", broad_query)
+        self.assertIn("(site:imdb.com/title (A Short Film About Killing) 1988)", broad_query)
+        self.assertIn("(site:themoviedb.org/movie (A Short Film About Killing) 1988)", broad_query)
+        self.assertIn("1988", broad_query)
 
     def test_title_search_parses_documented_brightdata_body_organic_shape(self):
         body = {
