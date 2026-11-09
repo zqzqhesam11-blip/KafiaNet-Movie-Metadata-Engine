@@ -20,9 +20,10 @@ To keep this project free:
 - Do not configure automatic top-ups or any paid balance.
 - If Bright Data reports HTTP 402 or 429, stop the batch. Do not retry repeatedly and do not add funds.
 - Google Lens `exact_matches` is the reverse-image discovery source. Official TMDB movie URLs and IMDb title URLs returned by Lens are candidate identifiers; TMDB alone verifies the final numeric movie ID and metadata.
-- When Lens returns useful titles but no official TMDB/IMDb identifier, the engine searches English Wikipedia and Wikidata using Lens-derived title hints, reads article lead dates and structured film properties, and queries TMDB `/search/movie`. These results are saved as reviewer research only; even an exact title/year result cannot independently set READY.
-- Three additional trusted reference sources are searched alongside Wikipedia and TMDB: **Wikidata** (global structured film entities and cross-reference IDs), **AFI Catalog** (American film catalog), and **BFI National Archive Collections Search** (an international film and moving-image collection with a contemporary focus on British work). AFI and BFI results are captured as official-domain search references, not treated as proof of identity. Coverage is specialized and incomplete, not a universal filmography.
-- All Wikipedia, Wikidata, AFI, and BFI results are recorded with `identity_evidence=false` and `automatic_match_allowed=false`. They can help a reviewer compare title, year, director, IMDb/TMDB cross-references, and archive records, but only an official TMDB/IMDb identifier resolved and verified through TMDB can authorize READY. Folder names and image filenames are never used as search inputs.
+- The identity path uses Google Lens and, when Lens has no official ID, one bounded Google site-scoped title search for official IMDb/TMDB movie pages. TMDB `/find` and `/movie/{id}` verify any selected identifier.
+- Optional reviewer-only research from Wikipedia, Wikidata, and TMDB text suggestions is **disabled by default** (`REVIEW_RESEARCH_ENABLED=false`). It adds serial network requests but cannot establish identity or authorize READY; enable it only for manual investigation.
+- AFI Catalog and BFI National Archive references may be captured from the title-scoped search as reviewer context. They are not proof of identity and have specialized, incomplete coverage.
+- Wikipedia, Wikidata, AFI, and BFI results always use `identity_evidence=false` and `automatic_match_allowed=false`. Only an official TMDB/IMDb identifier resolved and verified through TMDB can authorize READY. Folder names and image filenames are never used as search inputs.
 - Separately, the poster image bytes are OCR-processed locally by RapidOCR. Up to three OCR text hints may be sent to TMDB `/search/movie`; returned rows are saved only as manual-review suggestions under `ocr.tmdb_suggestions` and are never fed into identity resolution or automatic READY decisions.
 - At most two bounded retries are made for transient 5xx gateway errors, transport failures, and 5xx statuses inside Bright Data's HTTP-200 response envelope. HTTP 402/429 quota responses are never retried and stop the batch.
 - Bright Data free credits may be shared with other products or tools using the same account. Keep the key private.
@@ -46,10 +47,10 @@ References:
 - Image filenames, extensions, bytes, and Git blob SHAs are preserved.
 - Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
 - Automatic movie identity can come only from official TMDB/IMDb IDs returned by Google Lens or the Lens-derived search, then independently resolved and verified through TMDB. Local OCR, Wikipedia, Wikidata, AFI, and BFI are reviewer aids only.
-- The engine calls TMDB `/movie/{movie_id}` for every distinct candidate ID. A single valid ID is accepted only after TMDB returns the same numeric ID and, when an IMDb ID was used, confirms the same IMDb external ID. Distinct competing TMDB movie IDs, an unresolved ID, or an ambiguous image identity result in REVIEW.
+- The engine calls TMDB `/movie/{movie_id}` for every distinct candidate ID. A selected ID is accepted only after TMDB returns the same numeric ID and, when an IMDb ID was used, confirms the same IMDb external ID. When a title-scoped Google search returns multiple official IDs, one candidate may be selected only if its verified TMDB title (or official alternative title) and year exactly match the primary Lens title/year and no other candidate matches. Unresolved IDs returned directly by Lens and competing direct Lens IDs still result in REVIEW. Lens title text can disambiguate verified official IDs; it can never create an ID or independently authorize READY.
 - Movie title, release date/year, country, director, cast, overview, ratings, external IMDb ID and other metadata are read from the verified TMDB movie record. The title saved for catalog naming is the title returned by TMDB; Lens title text and country clues are not used.
 - TMDB movie images are requested with `append_to_response=images` and a language fallback. Poster paths are saved with their TMDB image CDN URLs (including w500 and original sizes).
-- Folder names, folder years, poster filenames, image URLs, and catalog labels are never used to discover or positively select a movie. The folder label is only a negative conflict veto.
+- Folder names, folder years, poster filenames, image URLs, and catalog labels are never used to discover or positively select a movie. The folder label remains a negative-only veto, and blocks only when both its explicit title and explicit year conflict with the already-verified TMDB record. Local-language titles, transliterations, or a missing folder year alone do not force REVIEW.
 - TMDB text search is used for Wikipedia and OCR reviewer suggestions. Wikidata, AFI, and BFI are additional research references only; loose title similarity, country clues, and folder names are never used to select a movie.
 - Each JSON record stores Wikipedia results under `wikipedia`, Wikidata cross-checks under `wikidata`, and AFI/BFI references under `catalog_sources`. The matching summary reports `wikidata_status`, `wikidata_candidates`, `afi_catalog_results`, and `bfi_archive_results`.
 - Every READY JSON and `metadata/index.json` row records the `tmdb_id` explicitly. The `imdb_id` is also saved when TMDB supplies it; otherwise it remains null. TMDB IDs are never invented.
@@ -82,7 +83,7 @@ Required environment variables:
 - `POSTERS_BRANCH`: defaults to `main`.
 
 
-#Optional: `TMDB_LANGUAGE` (default `en-US`), `BATCH_LIMIT` (default `5`), `HTTP_TIMEOUT_SECONDS` (default `60`).
+#Optional: `TMDB_LANGUAGE` (default `en-US`), `BATCH_LIMIT` (default `5`), `HTTP_TIMEOUT_SECONDS` (default `60`), and `REVIEW_RESEARCH_ENABLED` (default `false`).
 
 ## Configuration preflight
 
@@ -103,7 +104,7 @@ python -m app.cli check-brightdata-config
 python -m app.cli run --limit 1
 ```
 
-The run command defaults to **DRY RUN** and does not write or move catalog files. It still performs live provider requests (Lens/Bright Data, Wikipedia, Wikidata, and TMDB) and may consume provider quotas. Use `--apply` only after reviewing the one-item result and explicitly intending to update the poster repository.
+The run command defaults to **DRY RUN** and does not write or move catalog files. It still performs live Lens/Bright Data requests and, when needed, a Google title search and TMDB verification. Wikipedia/Wikidata reviewer research adds extra requests only when `REVIEW_RESEARCH_ENABLED=true`. Live requests may consume provider quotas. Use `--apply` only after reviewing the one-item result and explicitly intending to update the poster repository.
 
 
 ## Output layout

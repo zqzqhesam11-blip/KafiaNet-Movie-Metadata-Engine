@@ -45,6 +45,55 @@ def _comparison_title_key(value: str | None) -> str:
     title = "".join(char for char in title if not unicodedata.combining(char))
     return re.sub(r"[^\w]+", " ", title.casefold(), flags=re.UNICODE).strip()
 
+def _tmdb_details_match_lens_title(
+    details: dict[str, Any],
+    title_hint: str,
+    year_hint: int | str | None,
+) -> bool:
+    """Match a Lens-derived primary title/year against an already-resolved TMDB record.
+
+    This helper may disambiguate official IDs returned by the title-scoped search;
+    it never creates an ID or authorizes a title-only identity.
+    """
+    hint_key = _comparison_title_key(title_hint)
+    if not hint_key:
+        return False
+
+    normalized = TMDBClient.normalize_details(details or {})
+    aliases = [
+        normalized.get("title"),
+        normalized.get("original_title"),
+    ]
+    aliases.extend(
+        row.get("title")
+        for row in (normalized.get("alternative_titles") or [])
+        if isinstance(row, dict)
+    )
+    compact_hint_key = "".join(hint_key.split())
+    title_matches = any(
+        _comparison_title_key(value) == hint_key
+        or "".join(_comparison_title_key(value).split()) == compact_hint_key
+        for value in aliases
+        if str(value or "").strip()
+    )
+    if not title_matches:
+        return False
+
+    try:
+        expected_year = int(year_hint) if year_hint is not None else None
+    except (TypeError, ValueError):
+        expected_year = None
+    if expected_year is None:
+        return True
+
+    actual_year = normalized.get("year")
+    try:
+        actual_year = int(actual_year) if actual_year is not None else None
+    except (TypeError, ValueError):
+        actual_year = None
+    return actual_year == expected_year
+
+
 def _identity_title_tokens(value: str | None) -> list[str]:
     """Normalize a title to Unicode-aware word tokens for exact phrase matching."""
     normalized = unicodedata.normalize("NFKD", str(value or ""))
@@ -122,19 +171,29 @@ def _folder_identity_consistency(
         folder_year is None
         or (candidate_year is not None and candidate_year == folder_year)
     )
-    allowed = title_match and year_match
+    # Folder labels often contain local-language names, transliterations, or
+    # incomplete years. Treat them as a veto only when BOTH fields explicitly
+    # contradict the already-verified official TMDB identity.
+    clear_title_and_year_conflict = (
+        not title_match
+        and folder_year is not None
+        and candidate_year is not None
+        and candidate_year != folder_year
+    )
+    allowed = not clear_title_and_year_conflict
     return {
-        "status": "passed" if allowed else "conflict",
+        "status": "conflict" if clear_title_and_year_conflict else "passed",
         "allowed": allowed,
         "reason": (
-            "TMDB title alias and release year are consistent with the source-folder label"
-            if allowed
-            else "Resolved TMDB identity conflicts with the source-folder title and/or year; automatic match blocked"
+            "Resolved TMDB identity conflicts with both the source-folder title and release year; automatic match blocked"
+            if clear_title_and_year_conflict
+            else "No confirmed title-and-year contradiction with the source-folder label"
         ),
         "folder_year": folder_year,
         "candidate_year": candidate_year,
         "title_match": title_match,
         "year_match": year_match,
+        "clear_title_and_year_conflict": clear_title_and_year_conflict,
         "matching_title_aliases": matching_aliases[:5],
         "folder_name_used_for_search": False,
         "folder_name_used_to_select_candidate": False,
@@ -458,16 +517,31 @@ class MetadataEngine:
         evidence["id_resolution"]["errors"] = imdb_find_errors
         tmdb_id_lookup["imdb_find_results"] = imdb_to_tmdb_ids
         tmdb_id_lookup["imdb_find_errors"] = imdb_find_errors
-        if imdb_find_errors:
-            tmdb_id_lookup["status"] = "imdb_id_unresolved"
+
+        direct_imdb_set = set(direct_imdb_ids)
+        direct_candidate_tmdb_ids = set(direct_tmdb_ids)
+        for imdb_id in direct_imdb_ids:
+            direct_candidate_tmdb_ids.update(imdb_to_tmdb_ids.get(imdb_id, []))
+
+        blocking_imdb_find_errors = [
+            row for row in imdb_find_errors
+            if str(row.get("imdb_id") or "") in direct_imdb_set
+        ]
+        ignored_secondary_imdb_errors = [
+            row for row in imdb_find_errors
+            if str(row.get("imdb_id") or "") not in direct_imdb_set
+        ]
+        evidence["id_resolution"]["ignored_secondary_imdb_errors"] = ignored_secondary_imdb_errors
+        if blocking_imdb_find_errors:
+            tmdb_id_lookup["status"] = "direct_imdb_id_unresolved"
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "One or more official IMDb IDs could not be resolved to a TMDB movie through /find",
+                "reason": "An official IMDb ID returned directly by Google Lens could not be resolved through TMDB /find",
                 "candidate_ids": sorted(set(lens_tmdb_ids).union(
                     value for ids in imdb_to_tmdb_ids.values() for value in ids
                 )),
-                "imdb_find_errors": imdb_find_errors,
+                "imdb_find_errors": blocking_imdb_find_errors,
             }, evidence
 
         candidate_tmdb_ids = list(dict.fromkeys([
@@ -533,14 +607,23 @@ class MetadataEngine:
         ]
         tmdb_id_lookup["details_resolved"] = len(resolved)
         tmdb_id_lookup["errors"] = details_errors
-        tmdb_id_lookup["status"] = "error" if details_errors else "resolved"
-        if details_errors:
+        blocking_details_errors = [
+            row for row in details_errors
+            if int(row.get("tmdb_id") or 0) in direct_candidate_tmdb_ids
+        ]
+        ignored_secondary_detail_errors = [
+            row for row in details_errors
+            if int(row.get("tmdb_id") or 0) not in direct_candidate_tmdb_ids
+        ]
+        evidence["id_resolution"]["ignored_secondary_detail_errors"] = ignored_secondary_detail_errors
+        if blocking_details_errors:
+            tmdb_id_lookup["status"] = "direct_tmdb_details_unverified"
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "One or more TMDB movie IDs could not be verified through official movie details",
+                "reason": "A TMDB movie ID returned directly by Google Lens could not be verified through official movie details",
                 "candidate_ids": sorted(candidate_tmdb_ids),
-                "details_errors": details_errors,
+                "details_errors": blocking_details_errors,
             }, evidence
 
         identities: list[dict[str, Any]] = []
@@ -586,15 +669,78 @@ class MetadataEngine:
             })
 
         evidence["candidate_identities"] = identities
-        if len(identities) != 1:
-            tmdb_id_lookup["status"] = "ambiguous_multiple_tmdb_ids"
+        selected: dict[str, Any] | None = None
+        identity_disambiguation: dict[str, Any] | None = None
+        secondary_search_noise = bool(
+            ignored_secondary_imdb_errors or ignored_secondary_detail_errors
+        )
+
+        if len(identities) == 1 and not secondary_search_noise:
+            selected = identities[0]
+        elif not direct_tmdb_ids and not direct_imdb_ids and identities:
+            # Use Lens title/year only to choose between official IDs already
+            # resolved and verified by TMDB. This never creates an ID or turns
+            # a title-only result into READY.
+            primary_title_hint = next(
+                (
+                    str(value).strip()
+                    for value in (title_search_diagnostics.get("title_hints") or [])
+                    if str(value or "").strip()
+                ),
+                "",
+            )
+            year_hint = title_search_diagnostics.get("year_hint")
+            matched_identities = [
+                row for row in identities
+                if _tmdb_details_match_lens_title(
+                    resolved[int(row["tmdb_id"])],
+                    primary_title_hint,
+                    year_hint,
+                )
+            ] if primary_title_hint else []
+
+            if len(matched_identities) == 1:
+                selected = matched_identities[0]
+                selected_id_for_match = int(selected["tmdb_id"])
+                ignored_tmdb_ids = sorted(
+                    set(candidate_tmdb_ids) - {selected_id_for_match}
+                )
+                ignored_imdb_ids = sorted({
+                    str(row.get("imdb_id") or "")
+                    for row in ignored_secondary_imdb_errors
+                    if row.get("imdb_id")
+                })
+                ignored_tmdb_ids.extend(
+                    int(row["tmdb_id"])
+                    for row in ignored_secondary_detail_errors
+                    if str(row.get("tmdb_id") or "").isdigit()
+                    and int(row["tmdb_id"]) not in ignored_tmdb_ids
+                )
+                identity_disambiguation = {
+                    "method": "exact_lens_primary_title_and_year_against_verified_tmdb_details",
+                    "title_hint": primary_title_hint,
+                    "year_hint": year_hint,
+                    "selected_tmdb_id": selected_id_for_match,
+                    "ignored_secondary_tmdb_ids": sorted(ignored_tmdb_ids),
+                    "ignored_secondary_imdb_ids": ignored_imdb_ids,
+                    "official_id_required": True,
+                    "tmdb_verification_required": True,
+                }
+
+        if selected is None:
+            tmdb_id_lookup["status"] = (
+                "no_verified_tmdb_candidates" if not identities
+                else "ambiguous_multiple_tmdb_ids"
+            )
+            reason = (
+                "No official candidate could be resolved and verified by TMDB"
+                if not identities
+                else "Multiple official movie candidates remain after exact Lens title/year disambiguation"
+            )
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": (
-                    "Google Lens or its title-derived search returned multiple different official "
-                    "TMDB movie IDs; the image identity is ambiguous"
-                ),
+                "reason": reason,
                 "candidate_ids": sorted(resolved),
                 "candidate_comparisons": [
                     {
@@ -605,10 +751,18 @@ class MetadataEngine:
                     }
                     for row in identities
                 ],
+                "imdb_find_errors": ignored_secondary_imdb_errors,
+                "details_errors": ignored_secondary_detail_errors,
             }, evidence
 
-        selected = identities[0]
         selected_id = int(selected["tmdb_id"])
+        tmdb_id_lookup["status"] = (
+            "resolved_after_lens_title_disambiguation"
+            if identity_disambiguation
+            else "resolved"
+        )
+        if identity_disambiguation:
+            evidence["identity_disambiguation"] = identity_disambiguation
         selected_candidate = resolved[selected_id]
         identity_consistency = _folder_identity_consistency(
             selected_candidate,
@@ -670,6 +824,7 @@ class MetadataEngine:
             "official_imdb_ids": list(lens_imdb_ids),
             "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
             "google_title_search_imdb_ids": list(title_search_imdb_ids),
+            "title_disambiguation": identity_disambiguation,
             "folder_name_used": False,
             "image_filename_used": False,
             "identity_consistency": identity_consistency,
@@ -1172,10 +1327,11 @@ class MetadataEngine:
         candidate, match, reverse_image_evidence = self._find_movie(
             reverse_image_results, expected_folder=folder
         )
-        wikipedia_tmdb_suggestions = (
-            self._wikipedia_tmdb_suggestions_from_lens(reverse_image_results)
-            if not candidate
-            else {
+        review_research_enabled = bool(
+            getattr(getattr(self, "settings", None), "review_research_enabled", False)
+        )
+        if candidate:
+            wikipedia_tmdb_suggestions = {
                 "provider": "wikipedia_mediawiki_api",
                 "tmdb_provider": "tmdb_search_movie",
                 "status": "skipped_official_identity_resolved",
@@ -1190,8 +1346,46 @@ class MetadataEngine:
                 "wikipedia": {},
                 "queries": [],
                 "errors": [],
+                "wikidata": {
+                    "provider": "wikidata_action_api",
+                    "status": "skipped_official_identity_resolved",
+                    "identity_evidence": False,
+                    "automatic_match_allowed": False,
+                    "candidate_count": 0,
+                    "candidates": [],
+                    "errors": [],
+                },
             }
-        )
+        elif review_research_enabled:
+            wikipedia_tmdb_suggestions = self._wikipedia_tmdb_suggestions_from_lens(
+                reverse_image_results
+            )
+        else:
+            wikipedia_tmdb_suggestions = {
+                "provider": "wikipedia_mediawiki_api",
+                "tmdb_provider": "tmdb_search_movie",
+                "status": "disabled_by_configuration",
+                "identity_evidence": False,
+                "automatic_match_allowed": False,
+                "title_hints": [],
+                "wikipedia_query_count": 0,
+                "wikipedia_article_count": 0,
+                "tmdb_query_count": 0,
+                "tmdb_result_count": 0,
+                "exact_title_year_match_count": 0,
+                "wikipedia": {},
+                "queries": [],
+                "errors": [],
+                "wikidata": {
+                    "provider": "wikidata_action_api",
+                    "status": "disabled_by_configuration",
+                    "identity_evidence": False,
+                    "automatic_match_allowed": False,
+                    "candidate_count": 0,
+                    "candidates": [],
+                    "errors": [],
+                },
+            }
         if not candidate and wikipedia_tmdb_suggestions.get("status") == "suggestions_only":
             match["wikipedia_tmdb_suggestion_count"] = wikipedia_tmdb_suggestions.get("tmdb_result_count", 0)
             match["wikipedia_tmdb_exact_title_year_matches"] = wikipedia_tmdb_suggestions.get(
