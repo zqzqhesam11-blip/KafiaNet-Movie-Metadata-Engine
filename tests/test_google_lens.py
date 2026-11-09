@@ -632,9 +632,9 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         ])
 
         self.assertEqual(year, 1988)
-        # A distinct direct Play Store title is prioritized as a useful alias.
-        self.assertEqual(hints[0].casefold(), "krótki film o zabijaniu")
-        self.assertIn("a short film about killing", [value.casefold() for value in hints])
+        # The Lens result caption is primary; a localized Play Store slug is a fallback alias.
+        self.assertEqual(hints[0].casefold(), "a short film about killing")
+        self.assertIn("krótki film o zabijaniu", [value.casefold() for value in hints])
         self.assertIn("krótki film o zabijaniu", [value.casefold() for value in hints])
         self.assertIn("öldürme üzerine kısa bir film", [value.casefold() for value in hints])
         self.assertNotIn("PRIVATE", " ".join(hints))

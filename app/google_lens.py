@@ -707,7 +707,7 @@ class BrightDataGoogleLensClient:
         cls,
         results: list[dict[str, Any]],
     ) -> tuple[list[str], int | None]:
-        """Rank repeated Lens title signals and retain direct Play Store aliases as suggestions.
+        """Rank Lens captions first and retain direct Play Store aliases as fallback suggestions.
 
         Opaque Google /goto URLs are never decoded or treated as identity evidence.
         Local filenames and source-folder labels are never accepted as title inputs.
@@ -783,13 +783,13 @@ class BrightDataGoogleLensClient:
 
         for row in repeated_lens:
             append_unique(str(row["title"]))
+        for row in single_lens:
+            append_unique(str(row["title"]))
         lens_title_keys = set(lens_buckets)
         for value in play_hints:
             key = re.sub(r"\W+", " ", value.casefold()).strip()
             if key not in lens_title_keys:
                 append_unique(value)
-        for row in single_lens:
-            append_unique(str(row["title"]))
 
         year: int | None = None
         if repeated_lens:
