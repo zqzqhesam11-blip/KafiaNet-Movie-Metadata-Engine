@@ -69,8 +69,10 @@ def _tmdb_details_match_lens_title(
         for row in (normalized.get("alternative_titles") or [])
         if isinstance(row, dict)
     )
+    compact_hint_key = "".join(hint_key.split())
     title_matches = any(
         _comparison_title_key(value) == hint_key
+        or "".join(_comparison_title_key(value).split()) == compact_hint_key
         for value in aliases
         if str(value or "").strip()
     )
