@@ -46,14 +46,15 @@ class Settings:
                 ". Store the API key and SERP zone in Hostless secrets/environment variables."
             )
 
-    def validate_for_processing(self, apply: bool) -> None:
+    def validate_for_processing(self, apply: bool, require_research: bool = True) -> None:
         missing = []
-        if not self.tmdb_bearer_token:
-            missing.append("TMDB_BEARER_TOKEN")
-        if not self.brightdata_api_key:
-            missing.append("BRIGHTDATA_API_KEY")
-        if not self.brightdata_serp_zone:
-            missing.append("BRIGHTDATA_SERP_ZONE")
+        if require_research:
+            if not self.tmdb_bearer_token:
+                missing.append("TMDB_BEARER_TOKEN")
+            if not self.brightdata_api_key:
+                missing.append("BRIGHTDATA_API_KEY")
+            if not self.brightdata_serp_zone:
+                missing.append("BRIGHTDATA_SERP_ZONE")
         if apply and not self.github_token:
             missing.append("GITHUB_TOKEN")
         if missing:
