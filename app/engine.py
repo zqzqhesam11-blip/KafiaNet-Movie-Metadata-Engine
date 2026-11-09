@@ -2396,13 +2396,15 @@ class MetadataEngine:
                 "items": sorted(projected, key=lambda row: str(row.get("source_folder", "")).casefold()),
             }
             files["metadata/index.json"] = json.dumps(index_doc, ensure_ascii=False, indent=2) + "\n"
-            commit_sha = self.github.commit_files(
-                files,
-                deletes=deletes,
-                moves=moves,
-                message=f"KafiaNet metadata and poster organization: {len(records)} films",
-                expected_head_sha=snapshot_head_sha,
-            )
+            commit_arguments = {
+                "deletes": deletes,
+                "moves": moves,
+                "message": f"KafiaNet metadata and poster organization: {len(records)} films",
+            }
+            if snapshot_head_sha:
+                # Production commits are bound to the exact preflight snapshot.
+                commit_arguments["expected_head_sha"] = snapshot_head_sha
+            commit_sha = self.github.commit_files(files, **commit_arguments)
             summary["commit_sha"] = commit_sha
             summary["written_files"] = len(files)
             summary["moved_image_files"] = len(moves)
