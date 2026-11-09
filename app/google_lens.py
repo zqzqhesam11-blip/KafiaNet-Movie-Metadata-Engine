@@ -1143,11 +1143,12 @@ class BrightDataGoogleLensClient:
         return normalized, rows, tab_diagnostics
 
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
-        """Search exact matches, then visual matches when exact results lack official IDs.
+        """Search exact matches first; use visual matches only if no usable title exists.
 
-        Google began wrapping some exact-match destinations in opaque /goto
-        URLs. A single visual_matches fallback is used to seek direct publisher
-        links. Opaque wrappers remain quarantined and are never parsed as IDs.
+        When exact matches already provide a usable title hint, the engine can
+        perform one official, site-scoped IMDb/TMDB search. Avoiding a redundant
+        visual tab saves a Bright Data round trip without weakening ID verification.
+        Opaque /goto wrappers remain quarantined and are never parsed as IDs.
         """
         self.last_official_search_diagnostics = {
             "status": "not_run",
@@ -1203,11 +1204,18 @@ class BrightDataGoogleLensClient:
         attempts = int(exact_diag.get("attempts") or 0)
         combined = list(exact_results)
         exact_ids = extract_tmdb_movie_ids(exact_results) or extract_imdb_ids(exact_results)
+        exact_title_hints, _exact_year_hint = self.title_hints_from_lens_results(exact_results)
         visual_results: list[dict[str, Any]] = []
+        visual_fallback_skipped_reason = (
+            "exact_matches_has_usable_title_hint"
+            if not exact_ids and exact_title_hints
+            else None
+        )
 
-        # Use visual_matches only when exact_matches did not produce an official
-        # IMDb/TMDB page. This is a bounded second request, not a batch retry loop.
-        if not exact_ids:
+        # A title from exact_matches is enough to try the official, site-scoped
+        # title search. Do not make a second Lens request unless exact_matches
+        # contained neither an official ID nor a usable title.
+        if not exact_ids and not exact_title_hints:
             try:
                 visual_results, visual_rows, visual_diag = self._request_lens_tab(
                     image_url, LENS_FALLBACK_TAB
@@ -1287,6 +1295,7 @@ class BrightDataGoogleLensClient:
             ),
             "exact_matches_result_count": len(exact_results),
             "visual_matches_result_count": len(visual_results),
+            "visual_fallback_skipped_reason": visual_fallback_skipped_reason,
             "raw_result_count": sum(
                 int(item.get("raw_result_count") or 0) for item in tabs.values()
             ),
