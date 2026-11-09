@@ -8,6 +8,23 @@ from app.engine import MetadataEngine
 
 
 class LensDerivedOfficialTitleResolutionTests(unittest.TestCase):
+    def test_ai_mode_and_navigation_captions_are_not_movie_title_hints(self):
+        from app.google_lens import BrightDataGoogleLensClient
+
+        for caption in ("AI Mode", "Google AI Overview", "โหมด AI", "Google Search"):
+            with self.subTest(caption=caption):
+                self.assertEqual(
+                    BrightDataGoogleLensClient._clean_title_hint(caption)[0],
+                    "",
+                )
+
+        hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results([
+            {"title": "AI Mode"},
+            {"title": "Google Search"},
+        ])
+        self.assertEqual(hints, [])
+        self.assertIsNone(year)
+
     def test_official_title_search_5xx_stops_batch(self):
         engine = MetadataEngine.__new__(MetadataEngine)
         engine._details_cache = {}
