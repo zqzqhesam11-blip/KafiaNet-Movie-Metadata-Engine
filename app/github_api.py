@@ -21,6 +21,8 @@ class GitHubAPI:
     ):
         self.repo = repo
         self.branch = branch
+        self.last_snapshot_head_sha: str | None = None
+        self.last_snapshot_tree_sha: str | None = None
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -40,7 +42,25 @@ class GitHubAPI:
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         response = self.client.post(path, json=body)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            try:
+                payload = response.json()
+            except (ValueError, TypeError):
+                payload = None
+            detail = ""
+            if isinstance(payload, dict):
+                detail = str(payload.get("message") or "")
+                errors = payload.get("errors")
+                if errors:
+                    detail += " " + str(errors)
+            if not detail:
+                detail = str(getattr(response, "text", "") or "").strip()
+            detail = " ".join(detail.split())[:1200] or "no response body"
+            raise RuntimeError(
+                f"GitHub POST {path} failed with HTTP {response.status_code}: {detail}"
+            ) from exc
         return response.json()
 
     def _patch(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -54,8 +74,14 @@ class GitHubAPI:
         commit = self._get(f"/git/commits/{commit_sha}")
         return commit_sha, commit["tree"]["sha"]
 
+    def current_head_sha(self) -> str:
+        ref = self._get(f"/git/ref/heads/{quote(self.branch, safe='')}")
+        return str(ref["object"]["sha"])
+
     def recursive_tree(self) -> list[dict[str, Any]]:
-        _, tree_sha = self._branch_commit()
+        head_sha, tree_sha = self._branch_commit()
+        self.last_snapshot_head_sha = head_sha
+        self.last_snapshot_tree_sha = tree_sha
         data = self._get(f"/git/trees/{tree_sha}", {"recursive": "1"})
         if data.get("truncated"):
             raise RuntimeError(
@@ -177,6 +203,7 @@ class GitHubAPI:
         deletes: list[str] | None = None,
         message: str = "Add KafiaNet movie metadata batch",
         moves: dict[str, dict[str, str]] | None = None,
+        expected_head_sha: str | None = None,
     ) -> str:
         deleted_paths = set(deletes or [])
         move_items: list[dict[str, Any]] = []
@@ -199,6 +226,10 @@ class GitHubAPI:
             raise ValueError("No files, moves, or deletions to commit")
 
         expected_head, base_tree = self._branch_commit()
+        if expected_head_sha and expected_head != expected_head_sha:
+            raise RuntimeError(
+                "Poster repository HEAD changed before commit; refusing to write a stale DRY_RUN/APPLY plan"
+            )
         tree_items: list[dict[str, Any]] = []
 
         for path, content in sorted(files.items()):
@@ -214,6 +245,19 @@ class GitHubAPI:
         for path in sorted(deleted_paths):
             tree_items.append(
                 {"path": path, "mode": "100644", "type": "blob", "sha": None}
+            )
+
+        seen_paths: set[str] = set()
+        duplicate_paths: set[str] = set()
+        for item in tree_items:
+            path = str(item.get("path") or "")
+            if path in seen_paths:
+                duplicate_paths.add(path)
+            seen_paths.add(path)
+        if duplicate_paths:
+            raise ValueError(
+                "Conflicting Git tree operations target the same path(s): "
+                + ", ".join(sorted(duplicate_paths)[:20])
             )
 
         tree = self._post(
