@@ -104,10 +104,21 @@ python -m app.cli check-brightdata-config
 python -m app.cli run --limit 1
 ```
 
-The run command defaults to **DRY RUN** and does not write or move catalog files. It still performs live Lens/Bright Data requests and, when needed, a Google title search and TMDB verification. Wikipedia/Wikidata reviewer research adds extra requests only when `REVIEW_RESEARCH_ENABLED=true`. Live requests may consume provider quotas. Use `--apply` only after reviewing the one-item result and explicitly intending to update the poster repository.
+The run command defaults to **DRY RUN** and does not write or move catalog files. It still performs live Lens/Bright Data requests and, when needed, a Google title search and TMDB verification. Wikipedia/Wikidata reviewer research adds extra requests only when `REVIEW_RESEARCH_ENABLED=true`. Live requests may consume provider quotas.
 
+## Deterministic DRY_RUN / APPLY
 
-## Output layout
+A normal `--apply` performs new live searches. To ensure APPLY uses the exact identity and evidence reviewed during DRY_RUN, save a local plan and apply that same plan:
+
+```bash
+python -u -m app.cli run --limit 5 --plan-out /tmp/kafianet-plan-001.json
+python -u -m app.cli run --apply --apply-plan /tmp/kafianet-plan-001.json
+```
+
+The plan contains the exact Lens/Google results, verified TMDB details, source image blob SHAs, and the poster-repository HEAD. APPLY checks that the repository and every selected image are unchanged, then writes the saved decisions without making Lens, Google Search, or TMDB requests. A successful commit consumes and deletes the local plan file. Keep both commands in the same running container because the plan file is local, not stored in the public poster repository.
+
+Previously processed posters with an unchanged image SHA keep their saved READY/REVIEW decision and do not trigger another search. Use `--refresh-evidence` only when you intentionally want a new lookup for unchanged REVIEW posters. A changed poster image is detected by its Git blob SHA and is processed as new evidence.
+
 
 - `جاهز/<exact-original-source-folder>/<canonical-title> (<year>).json`: verified TMDB match.
 - `مراجعة/<exact-original-source-folder>/<exact-original-source-folder>.json`: uncertain match.

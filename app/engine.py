@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from app.config import Settings
@@ -17,6 +20,7 @@ from app.wikidata import WikidataClient
 
 
 SCHEMA_VERSION = 3
+PLAN_SCHEMA_VERSION = 1
 MAX_LENS_TMDB_ID_CANDIDATES = 10
 MAX_OCR_TMDB_QUERIES = 3
 MAX_OCR_TMDB_RESULTS_PER_QUERY = 5
@@ -201,8 +205,12 @@ def _folder_identity_consistency(
     }
 
 
+def _canonical_plan_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 class MetadataEngine:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, research_enabled: bool = True):
         self.settings = settings
         self._stop_batch = False
         self._provider_stop_status: int | None = None
@@ -214,27 +222,40 @@ class MetadataEngine:
             token=settings.github_token,
             timeout=settings.http_timeout_seconds,
         )
-        self.tmdb = TMDBClient(
-            settings.tmdb_bearer_token,
-            settings.tmdb_language,
-            settings.http_timeout_seconds,
+        self.tmdb = (
+            TMDBClient(
+                settings.tmdb_bearer_token,
+                settings.tmdb_language,
+                settings.http_timeout_seconds,
+            )
+            if research_enabled else None
         )
-        self.wikipedia = WikipediaClient(timeout=settings.http_timeout_seconds)
-        self.reverse_image = BrightDataGoogleLensClient(
-            settings.brightdata_api_key,
-            settings.brightdata_serp_zone,
-            timeout=max(45, settings.http_timeout_seconds),
+        self.wikipedia = (
+            WikipediaClient(timeout=settings.http_timeout_seconds)
+            if research_enabled else None
         )
-        self.wikidata = WikidataClient(timeout=settings.http_timeout_seconds)
+        self.reverse_image = (
+            BrightDataGoogleLensClient(
+                settings.brightdata_api_key,
+                settings.brightdata_serp_zone,
+                timeout=max(45, settings.http_timeout_seconds),
+            )
+            if research_enabled else None
+        )
+        self.wikidata = (
+            WikidataClient(timeout=settings.http_timeout_seconds)
+            if research_enabled else None
+        )
         self.local_ocr = (
             LocalPosterOCR(timeout=settings.http_timeout_seconds)
-            if bool(getattr(settings, "local_ocr_enabled", False))
+            if research_enabled and bool(getattr(settings, "local_ocr_enabled", False))
             else None
         )
 
     def close(self) -> None:
         self.github.close()
-        self.tmdb.close()
+        if getattr(self, "tmdb", None):
+            self.tmdb.close()
         if getattr(self, "wikipedia", None):
             self.wikipedia.close()
         if self.reverse_image:
@@ -243,6 +264,60 @@ class MetadataEngine:
             self.wikidata.close()
         if getattr(self, "local_ocr", None):
             self.local_ocr.close()
+
+    @staticmethod
+    def _load_plan_file(path: str) -> dict[str, Any]:
+        plan_path = Path(path).expanduser()
+        try:
+            document = json.loads(plan_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise RuntimeError(f"Saved DRY_RUN plan does not exist: {plan_path}") from None
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Cannot read saved DRY_RUN plan {plan_path}: {type(exc).__name__}: {exc}"
+            ) from exc
+        if not isinstance(document, dict):
+            raise RuntimeError("Saved DRY_RUN plan is invalid: expected a JSON object")
+        expected_digest = str(document.get("sha256") or "")
+        digest_payload = dict(document)
+        digest_payload.pop("sha256", None)
+        actual_digest = hashlib.sha256(
+            _canonical_plan_json(digest_payload).encode("utf-8")
+        ).hexdigest()
+        if not expected_digest or expected_digest != actual_digest:
+            raise RuntimeError("Saved DRY_RUN plan integrity check failed; refusing to apply it")
+        if int(document.get("plan_schema_version") or 0) != PLAN_SCHEMA_VERSION:
+            raise RuntimeError("Saved DRY_RUN plan version is unsupported; create a new DRY_RUN plan")
+        if not isinstance(document.get("pending"), list) or not isinstance(document.get("records"), list):
+            raise RuntimeError("Saved DRY_RUN plan is incomplete: pending items or records are missing")
+        return document
+
+    @staticmethod
+    def _write_plan_file(path: str, document: dict[str, Any]) -> str:
+        plan_path = Path(path).expanduser()
+        if plan_path.exists():
+            raise FileExistsError(
+                f"Refusing to overwrite an existing DRY_RUN plan: {plan_path}"
+            )
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = dict(document)
+        payload.pop("sha256", None)
+        payload["sha256"] = hashlib.sha256(
+            _canonical_plan_json(payload).encode("utf-8")
+        ).hexdigest()
+        encoded = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        temporary_path = plan_path.with_name(plan_path.name + ".tmp")
+        try:
+            with temporary_path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+            temporary_path.replace(plan_path)
+        except Exception:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        return payload["sha256"]
 
     def _stop_for_provider_server_error(self, diagnostics: Any) -> bool:
         """Stop the remaining batch after an exhausted Bright Data 5xx response."""
@@ -1198,12 +1273,41 @@ class MetadataEngine:
 
     def _record_for_folder(
         self,
-        item: dict[str, str],
+        item: dict[str, Any],
         previous_output_path: str | None = None,
+        refresh_evidence: bool = False,
     ) -> dict[str, Any]:
         folder = item["folder"]
         image_path = item["image_path"]
         image_url = self.github.raw_url(image_path)
+        image_blob_sha = next(
+            (
+                str(row.get("sha") or "")
+                for row in (item.get("poster_files") or [])
+                if str(row.get("path") or "") == image_path
+            ),
+            "",
+        )
+
+        # Freeze the decision for an unchanged poster. A second batch must not
+        # replace a previously accepted Lens identity with a different live result.
+        # A new lookup is permitted only when --refresh-evidence is explicit.
+        if previous_output_path and image_blob_sha and not refresh_evidence:
+            previous_record = self.github.get_json_file(previous_output_path)
+            previous_source = (previous_record or {}).get("source") or {}
+            previous_status = str((previous_record or {}).get("status") or "")
+            if (
+                previous_record
+                and previous_status in {"ready", "review", "duplicate"}
+                and str(previous_source.get("image_blob_sha") or "") == image_blob_sha
+            ):
+                print(
+                    f"[KafiaNet] CACHED {folder}: poster SHA unchanged; "
+                    f"keeping saved {previous_status.upper()} decision. "
+                    "Use --refresh-evidence to search again.",
+                    flush=True,
+                )
+                return previous_record
 
         latest_reverse_image_results = self._reverse_image_results(image_url)
         latest_errors = [
@@ -1514,6 +1618,7 @@ class MetadataEngine:
                 "folder": folder,
                 "image_path": image_path,
                 "image_url": image_url,
+                "image_blob_sha": image_blob_sha or None,
             },
             "original": {
                 "folder_name": folder,
@@ -1609,27 +1714,93 @@ class MetadataEngine:
 
         return record
 
-    def run_batch(self, limit: int, apply: bool) -> dict[str, Any]:
+    def run_batch(
+        self,
+        limit: int,
+        apply: bool,
+        *,
+        plan_out: str | None = None,
+        apply_plan_path: str | None = None,
+        refresh_evidence: bool = False,
+    ) -> dict[str, Any]:
+        if plan_out and (apply or apply_plan_path):
+            raise ValueError("--plan-out is DRY_RUN-only and cannot be combined with APPLY")
+        if apply_plan_path and not apply:
+            raise ValueError("--apply-plan requires --apply")
+        if apply_plan_path and refresh_evidence:
+            raise ValueError("--refresh-evidence cannot be combined with --apply-plan")
         self._stop_batch = False
         self._provider_stop_status = None
         self._provider_stop_reason = None
-        self.settings.validate_for_processing(apply=apply)
+        if apply_plan_path:
+            self.settings.validate_for_processing(apply=apply, require_research=False)
+        else:
+            # Keep the original one-argument call compatible with lightweight
+            # settings doubles used by the repository's run_batch unit tests.
+            self.settings.validate_for_processing(apply=apply)
 
         print("[KafiaNet] Scanning poster repository...", flush=True)
         folders = self.github.list_film_folders()
+        snapshot_head_sha = getattr(self.github, "last_snapshot_head_sha", None)
         print(f"[KafiaNet] Found {len(folders)} source/review folders.", flush=True)
         index = self.github.get_json_file("metadata/index.json") or {"schema_version": 1, "items": []}
         old_items = list(index.get("items") or [])
         old_by_folder = {str(row.get("source_folder")): row for row in old_items}
+        if snapshot_head_sha and self.github.current_head_sha() != snapshot_head_sha:
+            raise RuntimeError(
+                "Poster repository changed while the batch snapshot was being read; "
+                "no files were processed or written. Restart from a fresh DRY_RUN."
+            )
 
-        # Root folders still need their first move even when the older index says
-        # READY. REVIEW folders are retried on later batches until resolved.
-        pending = [
-            item for item in folders
-            if item["folder"] not in old_by_folder
-            or old_by_folder[item["folder"]].get("status") == "review"
-            or item.get("source_prefix") == item["folder"]
-        ][: max(1, limit)]
+        plan_document: dict[str, Any] | None = None
+        plan_records_by_folder: dict[str, dict[str, Any]] | None = None
+        if apply_plan_path:
+            plan_document = self._load_plan_file(apply_plan_path)
+            if plan_document.get("source_repo") != self.settings.posters_repo:
+                raise RuntimeError("Saved plan belongs to a different poster repository")
+            if plan_document.get("branch") != self.settings.posters_branch:
+                raise RuntimeError("Saved plan belongs to a different poster branch")
+            if not snapshot_head_sha or plan_document.get("source_head_sha") != snapshot_head_sha:
+                raise RuntimeError(
+                    "Poster repository changed after this DRY_RUN plan was created; "
+                    "refusing to apply stale image paths or metadata. Create a new DRY_RUN."
+                )
+            if _canonical_plan_json(plan_document.get("old_items") or []) != _canonical_plan_json(old_items):
+                raise RuntimeError("Poster metadata index changed after DRY_RUN; refusing stale plan")
+            current_by_folder = {str(row.get("folder")): row for row in folders}
+            planned_items = plan_document["pending"]
+            planned_records = plan_document["records"]
+            if len(planned_items) != len(planned_records):
+                raise RuntimeError("Saved plan is incomplete: item/record count mismatch")
+            plan_records_by_folder = {}
+            for planned_item, planned_record in zip(planned_items, planned_records):
+                folder_name = str(planned_item.get("folder") or "")
+                current_item = current_by_folder.get(folder_name)
+                if not folder_name or current_item is None:
+                    raise RuntimeError(f"Saved plan source folder is missing: {folder_name or '(blank)'}")
+                if _canonical_plan_json(current_item) != _canonical_plan_json(planned_item):
+                    raise RuntimeError(
+                        f"Poster files changed after DRY_RUN for folder {folder_name}; refusing to apply"
+                    )
+                record_folder = str(((planned_record.get("source") or {}).get("folder")) or "")
+                if record_folder != folder_name or folder_name in plan_records_by_folder:
+                    raise RuntimeError("Saved plan has duplicate or mismatched film records")
+                plan_records_by_folder[folder_name] = planned_record
+            pending = list(planned_items)
+            print(
+                f"[KafiaNet] Loaded immutable plan {plan_document.get('plan_id')} "
+                f"for {len(pending)} film(s); Lens, Google Search, and TMDB will NOT be called.",
+                flush=True,
+            )
+        else:
+            # Root folders need their first move. Unchanged REVIEW posters reuse
+            # their last saved decision and do not spend research quota again.
+            pending = [
+                item for item in folders
+                if item["folder"] not in old_by_folder
+                or old_by_folder[item["folder"]].get("status") == "review"
+                or item.get("source_prefix") == item["folder"]
+            ][: max(1, limit)]
 
         records: list[dict[str, Any]] = []
         item_by_folder = {item["folder"]: item for item in pending}
@@ -1642,10 +1813,22 @@ class MetadataEngine:
             )
             previous_row = old_by_folder.get(item["folder"]) or {}
             try:
-                record = self._record_for_folder(
-                    item,
-                    previous_output_path=previous_row.get("output_path"),
-                )
+                if plan_records_by_folder is not None:
+                    # Reuse the exact saved DRY_RUN decision and evidence.
+                    # This branch performs no Lens, Google Search, or TMDB requests.
+                    record = plan_records_by_folder[item["folder"]]
+                else:
+                    if refresh_evidence:
+                        record = self._record_for_folder(
+                            item,
+                            previous_output_path=previous_row.get("output_path"),
+                            refresh_evidence=True,
+                        )
+                    else:
+                        record = self._record_for_folder(
+                            item,
+                            previous_output_path=previous_row.get("output_path"),
+                        )
             except Exception as exc:
                 # Isolate failures to this film. Persist it as REVIEW so a later
                 # batch can retry it; one invalid Lens backlink or API response
@@ -1653,6 +1836,14 @@ class MetadataEngine:
                 folder = item["folder"]
                 image_path = item["image_path"]
                 image_url = self.github.raw_url(image_path)
+                image_blob_sha = next(
+                    (
+                        str(row.get("sha") or "")
+                        for row in (item.get("poster_files") or [])
+                        if str(row.get("path") or "") == image_path
+                    ),
+                    "",
+                )
                 previous_record = None
                 if previous_row.get("output_path"):
                     try:
@@ -1677,6 +1868,7 @@ class MetadataEngine:
                         "folder": folder,
                         "image_path": image_path,
                         "image_url": image_url,
+                        "image_blob_sha": image_blob_sha or None,
                     },
                     "original": {
                         "folder_name": folder,
@@ -1688,7 +1880,7 @@ class MetadataEngine:
                         "reason": "Processing failed before a verified movie match; item is eligible for retry",
                     },
                     "reverse_image": {
-                        "enabled": self.reverse_image is not None,
+                        "enabled": getattr(self, "reverse_image", None) is not None,
                 "provider": "google_lens_brightdata",
                         "results": previous_reverse_image_results,
                         "results_source": "previous_saved" if previous_reverse_image_results else "none",
@@ -1897,6 +2089,9 @@ class MetadataEngine:
                 "next_pending_estimate": max(0, len(pending) - len(records)),
             }
 
+        # Snapshot actual decisions before output-path/duplicate reconciliation
+        # mutates the in-memory record objects below.
+        plan_records_snapshot = json.loads(json.dumps(records, ensure_ascii=False))
         projected = list(old_items)
         previous_by_folder = {str(row.get("source_folder")): row for row in projected}
 
@@ -2158,6 +2353,36 @@ class MetadataEngine:
             "next_pending_estimate": next_pending_estimate,
         }
 
+        if plan_out:
+            if not snapshot_head_sha:
+                raise RuntimeError("Cannot create a DRY_RUN plan without a verified GitHub snapshot SHA")
+            if self.github.current_head_sha() != snapshot_head_sha:
+                raise RuntimeError(
+                    "Poster repository changed during DRY_RUN; no plan was saved. "
+                    "Run DRY_RUN again against the current repository."
+                )
+            plan_document = {
+                "plan_schema_version": PLAN_SCHEMA_VERSION,
+                "plan_id": str(uuid.uuid4()),
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+                "source_repo": self.settings.posters_repo,
+                "branch": self.settings.posters_branch,
+                "source_head_sha": snapshot_head_sha,
+                "limit": int(limit),
+                "old_items": old_items,
+                "pending": pending,
+                "records": plan_records_snapshot,
+            }
+            plan_sha256 = self._write_plan_file(plan_out, plan_document)
+            summary["plan_file"] = str(Path(plan_out).expanduser())
+            summary["plan_id"] = plan_document["plan_id"]
+            summary["plan_sha256"] = plan_sha256
+            print(
+                f"[KafiaNet] DRY_RUN plan saved: {summary['plan_file']} "
+                f"(plan_id={summary['plan_id']}, sha256={plan_sha256})",
+                flush=True,
+            )
+
         if apply and (files or moves):
             print(
                 f"[KafiaNet] Preparing GitHub commit with {len(files) + 1} JSON file(s) "
@@ -2171,16 +2396,23 @@ class MetadataEngine:
                 "items": sorted(projected, key=lambda row: str(row.get("source_folder", "")).casefold()),
             }
             files["metadata/index.json"] = json.dumps(index_doc, ensure_ascii=False, indent=2) + "\n"
-            commit_sha = self.github.commit_files(
-                files,
-                deletes=deletes,
-                moves=moves,
-                message=f"KafiaNet metadata and poster organization: {len(records)} films",
-            )
+            commit_arguments = {
+                "deletes": deletes,
+                "moves": moves,
+                "message": f"KafiaNet metadata and poster organization: {len(records)} films",
+            }
+            if snapshot_head_sha:
+                # Production commits are bound to the exact preflight snapshot.
+                commit_arguments["expected_head_sha"] = snapshot_head_sha
+            commit_sha = self.github.commit_files(files, **commit_arguments)
             summary["commit_sha"] = commit_sha
             summary["written_files"] = len(files)
             summary["moved_image_files"] = len(moves)
             summary["deleted_old_files"] = len(deletes)
             print(f"[KafiaNet] GitHub commit completed: {commit_sha}", flush=True)
+            if apply_plan_path:
+                Path(apply_plan_path).expanduser().unlink(missing_ok=True)
+                summary["plan_consumed"] = True
+                print("[KafiaNet] Applied plan removed after successful commit.", flush=True)
 
         return summary
