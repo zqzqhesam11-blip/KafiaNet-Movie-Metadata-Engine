@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from app.config import Settings
@@ -334,7 +335,7 @@ class MetadataEngine:
 
         def title_search_evidence() -> dict[str, Any]:
             return {
-                "source": "google_serp_official_movie_and_archive_catalog_search",
+                "source": "tmdb_search_from_google_lens_image_match",
                 "status": title_search_diagnostics.get("status", "not_run"),
                 "query_count": title_search_diagnostics.get("query_count", 0),
                 "query_variants": list(title_search_diagnostics.get("query_variants") or []),
@@ -356,6 +357,7 @@ class MetadataEngine:
                 "error": title_search_diagnostics.get("error"),
                 "tmdb_ids": list(title_search_tmdb_ids),
                 "imdb_ids": list(title_search_imdb_ids),
+                "tmdb_candidate_matches": list(title_search_diagnostics.get("tmdb_candidate_matches") or [])[:10],
             }
 
         tmdb_id_lookup: dict[str, Any] = {
@@ -376,7 +378,7 @@ class MetadataEngine:
             "imdb_ids": list(lens_imdb_ids),
             "tmdb_id_lookup": tmdb_id_lookup,
             "id_resolution": {
-                "strategy": "official_lens_or_lens_derived_title_search_then_tmdb_find",
+                "strategy": "google_lens_official_ids_or_single_lens_title_to_tmdb_search",
                 "tmdb_ids_seen": list(lens_tmdb_ids),
                 "imdb_ids_seen": list(lens_imdb_ids),
                 "imdb_to_tmdb_ids": {},
@@ -389,70 +391,89 @@ class MetadataEngine:
             "official_title_search": title_search_evidence(),
         }
 
+        lens_title_hints, lens_year_hint = BrightDataGoogleLensClient.title_hints_from_lens_results(
+            reverse_image_results
+        )
+        primary_lens_title = next(
+            (str(value).strip() for value in lens_title_hints if str(value or "").strip()),
+            "",
+        )
+        title_search_diagnostics.update({
+            "source": "tmdb_search_from_google_lens_image_match",
+            "title_hints": list(lens_title_hints[:5]),
+            "year_hint": lens_year_hint,
+        })
+
         if reverse_image_failed and not (lens_tmdb_ids or lens_imdb_ids):
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "Google Lens image lookup or URL resolution failed; no official movie ID was available",
+                "reason": "Google Lens image lookup or URL resolution failed; no usable image-match evidence was available",
                 "candidate_ids": [],
             }, evidence
 
-        # Run one bounded title-derived search only when Lens has not already
-        # returned an official TMDB/IMDb ID. AFI/BFI links are stored as
-        # reviewer references and never interpreted as numeric identity proof.
-        if not lens_tmdb_ids and not lens_imdb_ids and not self._stop_batch:
-            title_searcher = getattr(
-                getattr(self, "reverse_image", None),
-                "search_official_movie_pages_from_lens",
-                None,
-            )
-            if callable(title_searcher):
-                title_search_rows: list[dict[str, Any]] = []
-                try:
-                    raw_rows = title_searcher(list(reverse_image_results or []))
-                    if isinstance(raw_rows, list):
-                        title_search_rows = [row for row in raw_rows if isinstance(row, dict)]
-                    if title_search_rows and isinstance(reverse_image_results, list):
-                        reverse_image_results.extend(title_search_rows)
-                    diagnostics = getattr(
-                        getattr(self, "reverse_image", None),
-                        "last_official_search_diagnostics",
-                        {},
-                    )
-                    if isinstance(diagnostics, dict):
-                        title_search_diagnostics.update(diagnostics)
-                except BrightDataQuotaError as exc:
-                    self._stop_batch = True
-                    self._provider_stop_status = exc.status_code
-                    title_search_diagnostics.update({
-                        "status": "quota_error",
-                        "error": str(exc)[:300],
-                    })
-                except Exception as exc:
-                    diagnostics = getattr(
-                        getattr(self, "reverse_image", None),
-                        "last_official_search_diagnostics",
-                        {},
-                    )
-                    if isinstance(diagnostics, dict):
-                        title_search_diagnostics.update(diagnostics)
-                    title_search_diagnostics.update({
-                        "status": title_search_diagnostics.get("status") or "error",
-                        "error": title_search_diagnostics.get("error")
-                        or f"{type(exc).__name__}: {str(exc)[:300]}",
-                    })
-                    self._stop_for_provider_server_error(diagnostics)
+        # Google Lens is the one reverse-image search. If it supplies a clear
+        # title, make exactly one TMDB title lookup; never issue a second Google
+        # search just to hunt official IMDb/TMDB URLs.
+        if not lens_tmdb_ids and not lens_imdb_ids and primary_lens_title and not self._stop_batch:
+            title_search_diagnostics.update({
+                "status": "tmdb_searching",
+                "query_count": 1,
+                "query_variants": ["single_lens_title"],
+            })
+            try:
+                payload = self.tmdb.search_movies(primary_lens_title, year=lens_year_hint)
+                search_rows = [
+                    row for row in (payload.get("results") or [])
+                    if isinstance(row, dict) and str(row.get("id") or "").isdigit()
+                ]
+                hint_key = _comparison_title_key(primary_lens_title)
+                exact_rows = []
+                for row in search_rows:
+                    aliases = (row.get("title"), row.get("original_title"))
+                    if not any(
+                        _comparison_title_key(alias) == hint_key
+                        for alias in aliases
+                        if str(alias or "").strip()
+                    ):
+                        continue
+                    release_date = str(row.get("release_date") or "")
+                    row_year = int(release_date[:4]) if release_date[:4].isdigit() else None
+                    if lens_year_hint is not None and row_year != int(lens_year_hint):
+                        continue
+                    exact_rows.append(row)
 
-                title_search_tmdb_ids = extract_tmdb_movie_ids(title_search_rows)
-                title_search_imdb_ids = extract_imdb_ids(title_search_rows)
+                title_search_tmdb_ids = list(dict.fromkeys(int(row["id"]) for row in exact_rows))
+                title_search_diagnostics.update({
+                    "status": "exact_title_year_match" if title_search_tmdb_ids else "no_exact_title_year_match",
+                    "organic_result_count": len(search_rows),
+                    "candidate_url_count": 0,
+                    "official_url_count": 0,
+                    "tmdb_exact_match_count": len(title_search_tmdb_ids),
+                    "tmdb_candidate_matches": [
+                        {
+                            "tmdb_id": int(row["id"]),
+                            "title": row.get("title"),
+                            "original_title": row.get("original_title"),
+                            "release_date": row.get("release_date"),
+                        }
+                        for row in exact_rows[:10]
+                    ],
+                })
                 lens_tmdb_ids = list(dict.fromkeys([*lens_tmdb_ids, *title_search_tmdb_ids]))
-                lens_imdb_ids = list(dict.fromkeys([*lens_imdb_ids, *title_search_imdb_ids]))
+            except Exception as exc:
+                title_search_diagnostics.update({
+                    "status": "tmdb_search_error",
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                })
+        elif not primary_lens_title and not lens_tmdb_ids and not lens_imdb_ids:
+            title_search_diagnostics["status"] = "no_usable_lens_title"
 
         evidence["official_title_search"] = title_search_evidence()
         evidence["strategy"] = (
             "google_lens_official_id"
             if (direct_tmdb_ids or direct_imdb_ids)
-            else "lens_derived_google_official_title_search"
+            else "tmdb_search_from_google_lens_image_match_title"
         )
         evidence["id_resolution"]["tmdb_ids_seen"] = list(lens_tmdb_ids)
         evidence["id_resolution"]["imdb_ids_seen"] = list(lens_imdb_ids)
@@ -677,7 +698,7 @@ class MetadataEngine:
 
         if len(identities) == 1 and not secondary_search_noise:
             selected = identities[0]
-        elif not direct_tmdb_ids and not direct_imdb_ids and identities:
+        elif identities:
             # Use Lens title/year only to choose between official IDs already
             # resolved and verified by TMDB. This never creates an ID or turns
             # a title-only result into READY.
@@ -717,7 +738,7 @@ class MetadataEngine:
                     and int(row["tmdb_id"]) not in ignored_tmdb_ids
                 )
                 identity_disambiguation = {
-                    "method": "exact_lens_primary_title_and_year_against_verified_tmdb_details",
+                    "method": "lens_primary_title_and_optional_year_against_verified_tmdb_details",
                     "title_hint": primary_title_hint,
                     "year_hint": year_hint,
                     "selected_tmdb_id": selected_id_for_match,
@@ -807,9 +828,9 @@ class MetadataEngine:
             identity_method = "lens_tmdb_movie_id_lookup"
             verification = "tmdb_movie_details_id_equals_lens_movie_id"
         elif has_title_search_tmdb_id:
-            identity_source = "google_serp_official_tmdb_movie_id"
-            identity_method = "lens_title_search_tmdb_movie_id_lookup"
-            verification = "official_tmdb_url_from_lens_derived_search_and_matching_tmdb_movie_details_id"
+            identity_source = "google_lens_image_match_title_tmdb_verified"
+            identity_method = "lens_title_tmdb_search_and_exact_details_match"
+            verification = "google_lens_image_match_title_and_optional_year_matched_to_tmdb_search_then_movie_details_id_verified"
         else:
             identity_source = "google_official_tmdb_movie_id"
             identity_method = "official_tmdb_movie_id_lookup"
@@ -838,8 +859,8 @@ class MetadataEngine:
             "imdb_id": selected["imdb_id"],
             "folder_name_used_for_matching": False,
             "reason": (
-                "TMDB movie details confirmed official TMDB and IMDb links returned by the Lens-derived Google search"
-                if has_title_search_tmdb_id and has_title_search_imdb_id
+                "Google Lens image-match title and year matched a unique TMDB movie; TMDB movie details confirmed its ID"
+                if has_title_search_tmdb_id
                 else "TMDB confirmed the movie ID from an official TMDB link"
                 if has_direct_tmdb_id and not has_imdb_id
                 else "TMDB /find mapped an official IMDb title ID to a movie and movie details confirmed the same IMDb ID"
@@ -1609,12 +1630,123 @@ class MetadataEngine:
 
         return record
 
-    def run_batch(self, limit: int, apply: bool) -> dict[str, Any]:
+    def _read_dry_run_plan(self, plan_path: str | Path) -> dict[str, Any]:
+        path = Path(plan_path)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"No saved DRY_RUN plan at {path}. Run DRY_RUN first; APPLY never performs a new search."
+            )
+        try:
+            plan = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Saved DRY_RUN plan is unreadable: {path}: {exc}") from exc
+        if not isinstance(plan, dict) or plan.get("schema_version") != 1:
+            raise RuntimeError("Saved DRY_RUN plan has an unsupported or invalid schema.")
+        if plan.get("repository") != self.settings.posters_repo:
+            raise RuntimeError("Saved DRY_RUN plan belongs to a different poster repository.")
+        if plan.get("branch") != self.settings.posters_branch:
+            raise RuntimeError("Saved DRY_RUN plan belongs to a different poster branch.")
+        if not str(plan.get("base_head_sha") or "").strip():
+            raise RuntimeError("Saved DRY_RUN plan has no source commit SHA.")
+        return plan
+
+    def apply_saved_plan(self, plan_path: str | Path) -> dict[str, Any]:
+        """Commit the exact evidence and file operations saved by DRY_RUN."""
+        self.settings.validate_for_processing(apply=True)
+        path = Path(plan_path)
+        plan = self._read_dry_run_plan(path)
+        current_head, _ = self.github._branch_commit()
+        expected_head = str(plan["base_head_sha"])
+        if current_head != expected_head:
+            raise RuntimeError(
+                "The poster repository changed after DRY_RUN. No catalog files were written. "
+                "Run DRY_RUN with --refresh to generate a plan for the current branch."
+            )
+
+        files = plan.get("files")
+        moves = plan.get("moves")
+        deletes = plan.get("deletes")
+        summary = plan.get("summary")
+        if not isinstance(files, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in files.items()
+        ):
+            raise RuntimeError("Saved plan contains an invalid files map.")
+        if not isinstance(moves, dict) or not isinstance(deletes, list):
+            raise RuntimeError("Saved plan contains invalid move/delete operations.")
+        if not isinstance(summary, dict):
+            raise RuntimeError("Saved plan is missing its DRY_RUN summary.")
+        if not files and not moves and not deletes:
+            raise RuntimeError("Saved plan contains no catalog changes; nothing was applied.")
+
+        print(
+            f"[KafiaNet] Applying saved plan; Lens, Google Search, and TMDB search will not run. "
+            f"JSON={len(files)} image_moves={len(moves)} deletes={len(deletes)}",
+            flush=True,
+        )
+        commit_sha = self.github.commit_files(
+            files,
+            deletes=deletes,
+            moves=moves,
+            message=str(plan.get("message") or "KafiaNet metadata and poster organization"),
+            expected_head_sha=expected_head,
+        )
+        output = dict(summary)
+        output.update({
+            "mode": "APPLY",
+            "commit_sha": commit_sha,
+            "written_files": len(files),
+            "moved_image_files": len(moves),
+            "deleted_old_files": len(deletes),
+            "replayed_saved_plan": True,
+            "plan_file": str(path),
+        })
+        try:
+            path.unlink()
+            output["plan_removed_after_success"] = True
+        except OSError as exc:
+            output["plan_removed_after_success"] = False
+            output["plan_cleanup_error"] = str(exc)[:200]
+        print(f"[KafiaNet] GitHub commit completed: {commit_sha}", flush=True)
+        return output
+
+    def run_batch(
+        self,
+        limit: int,
+        apply: bool,
+        plan_path: str | Path = ".kafianet/dry-run-plan.json",
+        refresh_plan: bool = False,
+    ) -> dict[str, Any]:
         self._stop_batch = False
         self._provider_stop_status = None
         self._provider_stop_reason = None
-        self.settings.validate_for_processing(apply=apply)
+        if apply:
+            return self.apply_saved_plan(plan_path)
+        self.settings.validate_for_processing(apply=False)
 
+        plan_file = Path(plan_path)
+        if plan_file.exists() and not refresh_plan:
+            existing_plan = self._read_dry_run_plan(plan_file)
+            current_head, _ = self.github._branch_commit()
+            if current_head != str(existing_plan["base_head_sha"]):
+                raise RuntimeError(
+                    "A saved DRY_RUN plan is stale because the poster branch changed. "
+                    "Use --refresh for a new scan; the old plan was not overwritten."
+                )
+            reused_summary = dict(existing_plan.get("summary") or {})
+            reused_summary.update({
+                "mode": "DRY_RUN",
+                "plan_file": str(plan_file),
+                "plan_reused": True,
+                "plan_base_head_sha": str(existing_plan["base_head_sha"]),
+            })
+            print(
+                "[KafiaNet] Reusing the saved DRY_RUN plan; no Lens, Google Search, or TMDB search repeated.",
+                flush=True,
+            )
+            return reused_summary
+
+        base_head_sha, _ = self.github._branch_commit()
         print("[KafiaNet] Scanning poster repository...", flush=True)
         folders = self.github.list_film_folders()
         print(f"[KafiaNet] Found {len(folders)} source/review folders.", flush=True)
@@ -2034,7 +2166,7 @@ class MetadataEngine:
 
         # If a previously READY film becomes a duplicate after this batch, move
         # its current image files and rename its JSON in the same atomic commit.
-        if apply:
+        if False:
             for tmdb_id, group in by_id.items():
                 if len(group) < 2:
                     continue
@@ -2114,7 +2246,7 @@ class MetadataEngine:
                 next_pending_estimate += 1
 
         summary = {
-            "mode": "APPLY" if apply else "DRY_RUN",
+            "mode": "DRY_RUN",
             "source_repo": self.settings.posters_repo,
             "branch": self.settings.posters_branch,
             "source_folders_found": len(folders),
@@ -2158,12 +2290,8 @@ class MetadataEngine:
             "next_pending_estimate": next_pending_estimate,
         }
 
-        if apply and (files or moves):
-            print(
-                f"[KafiaNet] Preparing GitHub commit with {len(files) + 1} JSON file(s) "
-                f"and {len(moves)} image move(s)...",
-                flush=True,
-            )
+        summary["plan_reused"] = False
+        if files or moves:
             index_doc = {
                 "schema_version": 2,
                 "updated_utc": datetime.now(timezone.utc).isoformat(),
@@ -2171,16 +2299,40 @@ class MetadataEngine:
                 "items": sorted(projected, key=lambda row: str(row.get("source_folder", "")).casefold()),
             }
             files["metadata/index.json"] = json.dumps(index_doc, ensure_ascii=False, indent=2) + "\n"
-            commit_sha = self.github.commit_files(
-                files,
-                deletes=deletes,
-                moves=moves,
-                message=f"KafiaNet metadata and poster organization: {len(records)} films",
+            current_head, _ = self.github._branch_commit()
+            if current_head != base_head_sha:
+                raise RuntimeError(
+                    "The poster branch changed while DRY_RUN was running. "
+                    "No plan was saved; run DRY_RUN again against the current branch."
+                )
+            plan_document = {
+                "schema_version": 1,
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+                "repository": self.settings.posters_repo,
+                "branch": self.settings.posters_branch,
+                "base_head_sha": base_head_sha,
+                "files": files,
+                "moves": moves,
+                "deletes": deletes,
+                "message": f"KafiaNet metadata and poster organization: {len(records)} films",
+                "summary": summary,
+            }
+            plan_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = plan_file.with_name(plan_file.name + ".tmp")
+            temporary_path.write_text(
+                json.dumps(plan_document, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
             )
-            summary["commit_sha"] = commit_sha
-            summary["written_files"] = len(files)
-            summary["moved_image_files"] = len(moves)
-            summary["deleted_old_files"] = len(deletes)
-            print(f"[KafiaNet] GitHub commit completed: {commit_sha}", flush=True)
+            temporary_path.replace(plan_file)
+            summary["plan_file"] = str(plan_file)
+            summary["plan_base_head_sha"] = base_head_sha
+            print(
+                f"[KafiaNet] DRY_RUN plan saved: {plan_file} "
+                f"(base={base_head_sha[:12]}). APPLY will replay it without searching again.",
+                flush=True,
+            )
+        else:
+            summary["plan_file"] = None
+            summary["plan_base_head_sha"] = base_head_sha
 
         return summary

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.engine import MetadataEngine
@@ -44,6 +46,10 @@ class FakeEngineGitHub:
         self.folders = folders
         self.index = index
         self.committed = None
+        self.head_sha = "test-head"
+
+    def _branch_commit(self):
+        return self.head_sha, "test-tree"
 
     def list_film_folders(self):
         return self.folders
@@ -59,7 +65,9 @@ class FakeEngineGitHub:
     def list_folder_blobs(self, prefix):
         return []
 
-    def commit_files(self, files, deletes=None, message="", moves=None):
+    def commit_files(self, files, deletes=None, message="", moves=None, expected_head_sha=None):
+        if expected_head_sha and expected_head_sha != self.head_sha:
+            raise RuntimeError("stale plan")
         self.committed = {
             "files": dict(files),
             "deletes": list(deletes or []),
@@ -84,7 +92,24 @@ class PosterOrganizationTests(unittest.TestCase):
     def make_api(self, tree):
         api = GitHubAPI.__new__(GitHubAPI)
         api.recursive_tree = lambda: tree
+        api._get = lambda path, params=None: {"tree": [], "truncated": False}
         return api
+
+    def save_and_apply(self, engine):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.json"
+            dry_run = engine.run_batch(
+                limit=1,
+                apply=False,
+                plan_path=plan_path,
+                refresh_plan=True,
+            )
+            self.assertTrue(plan_path.is_file())
+            applied = engine.apply_saved_plan(plan_path)
+            self.assertEqual(applied["mode"], "APPLY")
+            self.assertTrue(applied["replayed_saved_plan"])
+            self.assertTrue(applied["plan_removed_after_success"])
+            return dry_run, applied
 
     def test_lists_root_and_review_images_but_not_ready_images(self):
         tree = [
@@ -209,7 +234,7 @@ class PosterOrganizationTests(unittest.TestCase):
         }
         engine = self.make_engine([item], {"items": []}, {item["folder"]: record})
 
-        result = engine.run_batch(limit=1, apply=True)
+        _dry_run, result = self.save_and_apply(engine)
         committed = engine.github.committed
         json_path = "جاهز/Original Folder (1998)/Correct Film (2020).json"
 
@@ -268,7 +293,7 @@ class PosterOrganizationTests(unittest.TestCase):
         }
         engine = self.make_engine([item], index, {item["folder"]: record})
 
-        engine.run_batch(limit=1, apply=True)
+        self.save_and_apply(engine)
         committed = engine.github.committed
         new_image = "جاهز/Unresolved Film (2021)/poster.jpg"
         new_json = "جاهز/Unresolved Film (2021)/Resolved Film (2021).json"

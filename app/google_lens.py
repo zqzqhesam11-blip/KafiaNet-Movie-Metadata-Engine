@@ -694,6 +694,8 @@ class BrightDataGoogleLensClient:
             "prime video", "amazon prime video", "netflix", "apple tv",
             "imdb", "tmdb", "the movie database", "wikipedia",
             "letterboxd", "rotten tomatoes",
+            "ai mode", "google ai mode", "google ai overview",
+            "google search", "google lens", "google", "search", "search results", "images",
             "movie", "movies", "film", "films",
             "official site", "watch online", "full movie", "movie trailer",
         }:
@@ -1153,11 +1155,10 @@ class BrightDataGoogleLensClient:
         return normalized, rows, tab_diagnostics
 
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
-        """Search exact matches first; use visual matches only if no usable title exists.
+        """Search Google Lens once; add visual matches only when exact matches have no usable title.
 
-        When exact matches already provide a usable title hint, the engine can
-        perform one official, site-scoped IMDb/TMDB search. Avoiding a redundant
-        visual tab saves a Bright Data round trip without weakening ID verification.
+        The engine resolves a Lens title through one TMDB lookup. It does not issue
+        a second Google web-search request to hunt for official URL backlinks.
         Opaque /goto wrappers remain quarantined and are never parsed as IDs.
         """
         self.last_official_search_diagnostics = {
