@@ -97,16 +97,24 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         rows = api.search_by_image_url("https://example.com/poster.jpg")
 
         self.assertEqual(rows, [])
-        self.assertEqual(api.client.post.call_count, 1)
-        request_url = api.client.post.call_args.kwargs["json"]["url"]
+        self.assertEqual(api.client.post.call_count, 2)
         from urllib.parse import parse_qs, urlparse
-        query = parse_qs(urlparse(request_url).query)
-        self.assertEqual(query["url"], ["https://example.com/poster.jpg"])
-        self.assertEqual(query["brd_lens"], ["exact_matches"])
-        self.assertEqual(query["hl"], ["en"])
-        self.assertEqual(api.last_lens_diagnostics["lens_tab"], "exact_matches")
-        self.assertNotIn("q", query)
-        self.assertNotIn("query", query)
+        exact_query = parse_qs(urlparse(
+            api.client.post.call_args_list[0].kwargs["json"]["url"]
+        ).query)
+        visual_query = parse_qs(urlparse(
+            api.client.post.call_args_list[1].kwargs["json"]["url"]
+        ).query)
+        self.assertEqual(exact_query["url"], ["https://example.com/poster.jpg"])
+        self.assertEqual(exact_query["brd_lens"], ["exact_matches"])
+        self.assertEqual(visual_query["brd_lens"], ["visual_matches"])
+        self.assertEqual(exact_query["hl"], ["en"])
+        self.assertEqual(
+            api.last_lens_diagnostics["lens_tabs_attempted"],
+            ["exact_matches", "visual_matches"],
+        )
+        self.assertNotIn("q", exact_query)
+        self.assertNotIn("query", exact_query)
 
     def test_accepts_brightdata_images_array_and_original_image(self):
         api = self.make_client({
@@ -164,12 +172,12 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         recovered.json.return_value = {"exact_matches": []}
 
         api = self.make_client()
-        api.client.post.side_effect = [empty, recovered]
+        api.client.post.side_effect = [empty, recovered, recovered]
         with patch("app.google_lens.time.sleep"):
             self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
 
-        self.assertEqual(api.client.post.call_count, 2)
-        self.assertEqual(api.last_lens_diagnostics["attempts"], 2)
+        self.assertEqual(api.client.post.call_count, 3)
+        self.assertEqual(api.last_lens_diagnostics["attempts"], 3)
         self.assertEqual(api.last_lens_diagnostics["status"], "no_matches")
 
     def test_empty_json_response_retries_then_reports_http_metadata(self):
@@ -207,9 +215,25 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         with self.assertRaisesRegex(BrightDataAPIError, r"general=object\[query\]"):
             api.search_by_image_url("https://example.com/poster.jpg")
 
-    def test_empty_exact_matches_returns_empty_list(self):
+    def test_empty_exact_matches_returns_empty_list_after_visual_fallback(self):
         api = self.make_client({"exact_matches": []})
         self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
+        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(
+            api.last_lens_diagnostics["lens_tabs_attempted"],
+            ["exact_matches", "visual_matches"],
+        )
+
+    def test_prefers_populated_visual_matches_over_empty_exact_matches(self):
+        rows = BrightDataGoogleLensClient._rows_from_payload({
+            "exact_matches": [],
+            "visual_matches": [{
+                "title": "A Short Film About Killing",
+                "link": "https://www.imdb.com/title/tt0095468/",
+            }],
+        })
+        self.assertEqual(len(rows or []), 1)
+        self.assertEqual(rows[0]["title"], "A Short Film About Killing")
 
     def test_supports_nested_generic_results_wrapper(self):
         rows = BrightDataGoogleLensClient._rows_from_payload({
@@ -247,10 +271,64 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             api.search_by_image_url("https://example.com/poster.jpg")
         self.assertEqual(api.client.post.call_count, 1)
 
-    def test_429_reports_request_limit(self):
+    def test_429_without_retry_after_or_cooldown_is_not_retried(self):
         api = self.make_client({"error": "rate limit"}, status=429, body="rate limit")
-        with self.assertRaisesRegex(BrightDataAPIError, "quota"):
+        with self.assertRaisesRegex(BrightDataAPIError, "HTTP 429"):
             api.search_by_image_url("https://example.com/poster.jpg")
+        self.assertEqual(api.client.post.call_count, 1)
+
+    def test_retries_explicit_brightdata_same_query_cooldown(self):
+        cooldown = Mock()
+        cooldown.status_code = 429
+        cooldown.text = (
+            "This query recently failed and cannot be attempted at this time. "
+            "Please try again later, after a minimum of 15 seconds."
+        )
+        cooldown.json.return_value = {"error": cooldown.text}
+        cooldown.headers = {}
+
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = '{"exact_matches":[{"title":"A Short Film About Killing","link":"https://www.imdb.com/title/tt0095468/"}]}'
+        recovered.json.return_value = {
+            "exact_matches": [{
+                "title": "A Short Film About Killing",
+                "link": "https://www.imdb.com/title/tt0095468/",
+            }]
+        }
+        api = self.make_client()
+        api.client.post.side_effect = [cooldown, recovered]
+
+        with patch("app.google_lens.time.sleep") as sleep:
+            rows = api.search_by_image_url("https://example.com/poster.jpg")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(api.client.post.call_count, 2)
+        sleep.assert_called_once_with(15)
+        self.assertEqual(api.last_lens_diagnostics["rate_limit_retries"], 1)
+        self.assertEqual(api.last_lens_diagnostics["rate_limit_wait_seconds"], 15)
+        self.assertEqual(api.last_lens_diagnostics["attempts"], 2)
+
+    def test_retries_rate_limit_from_retry_after_header(self):
+        throttled = Mock()
+        throttled.status_code = 429
+        throttled.text = "Too Many Requests"
+        throttled.json.return_value = {"error": "temporary throttling"}
+        throttled.headers = {"retry-after": "7"}
+
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = '{"exact_matches":[]}'
+        recovered.json.return_value = {"exact_matches": []}
+
+        api = self.make_client()
+        api.client.post.side_effect = [throttled, recovered, recovered]
+        with patch("app.google_lens.time.sleep") as sleep:
+            self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
+
+        sleep.assert_called_once_with(7)
+        self.assertEqual(api.last_lens_diagnostics["rate_limit_retries"], 1)
+        self.assertEqual(api.last_lens_diagnostics["rate_limit_wait_seconds"], 7)
 
     def test_transient_502_is_retried_and_parsed(self):
         failed = Mock()
@@ -262,10 +340,10 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         recovered.text = '{"exact_matches":[]}'
         recovered.json.return_value = {"exact_matches": []}
         api = self.make_client()
-        api.client.post.side_effect = [failed, recovered]
+        api.client.post.side_effect = [failed, recovered, recovered]
         with patch("app.google_lens.time.sleep"):
             self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
-        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(api.client.post.call_count, 3)
         self.assertEqual(api.client.post.call_args.kwargs["json"]["format"], "raw")
 
     def test_transient_network_error_is_retried(self):
@@ -274,10 +352,14 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         recovered.text = '{"exact_matches":[]}'
         recovered.json.return_value = {"exact_matches": []}
         api = self.make_client()
-        api.client.post.side_effect = [httpx.ConnectError("temporary failure"), recovered]
+        api.client.post.side_effect = [
+            httpx.ConnectError("temporary failure"),
+            recovered,
+            recovered,
+        ]
         with patch("app.google_lens.time.sleep"):
             self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
-        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(api.client.post.call_count, 3)
 
     def test_retries_inner_502_envelope_for_lens(self):
         failed = Mock()
@@ -289,13 +371,13 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         recovered.text = '{"exact_matches":[]}'
         recovered.json.return_value = {"exact_matches": []}
         api = self.make_client()
-        api.client.post.side_effect = [failed, recovered]
+        api.client.post.side_effect = [failed, recovered, recovered]
 
         with patch("app.google_lens.time.sleep"):
             self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
 
-        self.assertEqual(api.client.post.call_count, 2)
-        self.assertEqual(api.last_lens_diagnostics["attempts"], 2)
+        self.assertEqual(api.client.post.call_count, 3)
+        self.assertEqual(api.last_lens_diagnostics["attempts"], 3)
         self.assertEqual(api.last_lens_diagnostics["status"], "no_matches")
 
     def test_retries_remote_protocol_errors(self):
@@ -307,11 +389,12 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         api.client.post.side_effect = [
             httpx.RemoteProtocolError("peer closed connection"),
             recovered,
+            recovered,
         ]
 
         with patch("app.google_lens.time.sleep"):
             self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
-        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(api.client.post.call_count, 3)
 
     def test_non_json_response_is_not_mistaken_for_no_matches(self):
         response = Mock()
@@ -346,6 +429,45 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {})
         # No redirect_client exists: the resolver no longer calls Google /goto.
         self.assertFalse(hasattr(api, "redirect_client"))
+
+    def test_visual_matches_fallback_recovers_direct_official_page_from_opaque_exact_match(self):
+        exact = Mock()
+        exact.status_code = 200
+        exact.text = ""
+        exact.json.return_value = {
+            "exact_matches": [{
+                "title": "A Short Film About Killing (1988)",
+                "link": "https://lens.google.com/goto?url=CAES_PRIVATE_TOKEN",
+                "image_url": "https://images.example.test/exact-poster.jpg",
+            }]
+        }
+        visual = Mock()
+        visual.status_code = 200
+        visual.text = ""
+        visual.json.return_value = {
+            "visual_matches": [{
+                "title": "A Short Film About Killing (1988)",
+                "link": "https://www.imdb.com/title/tt0095468/",
+                "image": "https://images.example.test/visual-poster.jpg",
+            }]
+        }
+        api = self.make_client()
+        api.client.post.side_effect = [exact, visual]
+
+        rows = api.search_by_image_url("https://example.com/poster.jpg")
+
+        self.assertIn(
+            "https://www.imdb.com/title/tt0095468/",
+            [row["url"] for row in rows],
+        )
+        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["json"]["url"].split("brd_lens=")[-1] for call in api.client.post.call_args_list],
+            ["exact_matches", "visual_matches"],
+        )
+        self.assertEqual(api.last_lens_diagnostics["exact_matches_result_count"], 1)
+        self.assertEqual(api.last_lens_diagnostics["visual_matches_result_count"], 1)
+        self.assertEqual(api.last_lens_diagnostics["status"], "ok")
 
     def test_direct_official_links_are_kept_while_google_goto_is_skipped(self):
         api = self.make_client({"exact_matches": []})
@@ -444,6 +566,21 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(hints[0], "Apollo 10 e meio aventura na era espacial")
         self.assertIn("Unrelated poster caption number one", hints)
         self.assertIsNone(year)
+
+    def test_repeated_lens_title_ranks_above_conflicting_play_store_aliases(self):
+        hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results([
+            {"title": "Unrelated poster blog headline about Polish films"},
+            {"title": "A Short Film About Killing (1988) - IMDb"},
+            {"title": "A Short Film About Killing on Cinobo | Watch the film online"},
+            {"title": "A Short Film About Killing | The Disapproving Swede"},
+            {
+                "url": "https://play.google.com/store/movies/details/kr%C3%B3tki_film_o_zabijaniu"
+            },
+        ])
+
+        self.assertEqual(hints[0], "A Short Film About Killing")
+        self.assertEqual(year, 1988)
+        self.assertIn("krótki film o zabijaniu", [value.casefold() for value in hints])
 
     def test_title_hint_year_is_not_guessed_from_play_store_slug(self):
         hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results([
@@ -591,6 +728,44 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         query = parse_qs(urlparse(call.kwargs["json"]["url"]).query)
         self.assertEqual(call.kwargs["json"]["format"], "json")
         self.assertEqual(query["brd_json"], ["1"])
+
+    def test_official_title_search_retries_explicit_brightdata_cooldown(self):
+        cooldown = Mock()
+        cooldown.status_code = 429
+        cooldown.text = (
+            "This query recently failed and cannot be attempted at this time. "
+            "Please try again later, after a minimum of 15 seconds."
+        )
+        cooldown.json.return_value = {"error": cooldown.text}
+        cooldown.headers = {}
+
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = ""
+        recovered.json.return_value = {
+            "organic": [{
+                "title": "A Short Film About Killing (1988) - IMDb",
+                "link": "https://www.imdb.com/title/tt0095468/",
+            }]
+        }
+        api = self.make_client()
+        api.client.post.side_effect = [cooldown, recovered]
+
+        with patch("app.google_lens.time.sleep") as sleep:
+            rows = api.search_official_movie_pages_from_lens([
+                {"title": "A Short Film About Killing (1988)"}
+            ])
+
+        self.assertEqual([row["url"] for row in rows], [
+            "https://www.imdb.com/title/tt0095468/"
+        ])
+        self.assertEqual(api.client.post.call_count, 2)
+        sleep.assert_called_once_with(15)
+        diagnostics = api.last_official_search_diagnostics
+        self.assertEqual(diagnostics["query_count"], 1)
+        self.assertEqual(diagnostics["attempts"], 2)
+        self.assertEqual(diagnostics["rate_limit_retries"], 1)
+        self.assertEqual(diagnostics["rate_limit_wait_seconds"], 15)
 
     def test_title_search_parses_structured_json_inside_brightdata_body_envelope(self):
         organic = [{
