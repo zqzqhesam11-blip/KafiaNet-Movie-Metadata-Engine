@@ -31,6 +31,8 @@ def format_summary(result: dict[str, Any]) -> str:
             f"planned_image_moves={len(result.get('planned_image_moves') or [])} "
             f"planned_deletes={len(result.get('planned_source_image_deletes') or [])}"
         )
+        if result.get("plan_file"):
+            lines.append(f"plan_file={result['plan_file']} plan_id={result.get('plan_id', 'unknown')}")
         lines.append(
             "NOTE: DRY_RUN performs live Google Lens lookups and, when no official ID is found, "
             "one Google Search query for official TMDB/IMDb pages; these requests consume free-tier quota."
@@ -71,18 +73,54 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="Write result JSON to the public poster repository")
     parser.add_argument("--dry-run", action="store_true", help="Explicitly force read-only catalog planning mode")
     parser.add_argument("--verbose", action="store_true", help="Print the full JSON report")
+    parser.add_argument(
+        "--plan-out",
+        type=str,
+        default=None,
+        help="Save the full DRY_RUN decision/evidence plan to a local JSON file",
+    )
+    parser.add_argument(
+        "--apply-plan",
+        type=str,
+        default=None,
+        help="Apply a saved DRY_RUN plan without Lens, Google Search, or TMDB calls",
+    )
+    parser.add_argument(
+        "--refresh-evidence",
+        action="store_true",
+        help="Explicitly rerun Google Lens/TMDB for unchanged REVIEW posters",
+    )
     args = parser.parse_args()
     settings = Settings.from_env()
     if args.command == "check-brightdata-config":
-        if args.limit is not None or args.apply or args.dry_run or args.verbose:
+        if (
+            args.limit is not None or args.apply or args.dry_run or args.verbose
+            or args.plan_out or args.apply_plan or args.refresh_evidence
+        ):
             parser.error("check-brightdata-config does not accept batch or write options")
         return check_brightdata_config(settings)
+    if args.plan_out and (args.apply or args.apply_plan):
+        parser.error("--plan-out is DRY_RUN-only; do not combine it with --apply or --apply-plan")
+    if args.apply_plan and (not args.apply or args.dry_run):
+        parser.error("--apply-plan requires --apply and cannot be combined with --dry-run")
+    if args.apply_plan and args.refresh_evidence:
+        parser.error("--refresh-evidence cannot be combined with --apply-plan")
+
     apply = bool(args.apply and not args.dry_run)
-    settings.validate_for_processing(apply=apply)
+    settings.validate_for_processing(
+        apply=apply,
+        require_research=not bool(args.apply_plan),
+    )
     limit = args.limit or settings.batch_limit
-    engine = MetadataEngine(settings)
+    engine = MetadataEngine(settings, research_enabled=not bool(args.apply_plan))
     try:
-        result = engine.run_batch(limit=limit, apply=apply)
+        result = engine.run_batch(
+            limit=limit,
+            apply=apply,
+            plan_out=args.plan_out,
+            apply_plan_path=args.apply_plan,
+            refresh_evidence=args.refresh_evidence,
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.verbose else format_summary(result))
         return 0
     finally:
