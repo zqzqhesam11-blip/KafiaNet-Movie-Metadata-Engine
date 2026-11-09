@@ -2166,59 +2166,58 @@ class MetadataEngine:
 
         # If a previously READY film becomes a duplicate after this batch, move
         # its current image files and rename its JSON in the same atomic commit.
-        if True:
-            for tmdb_id, group in by_id.items():
-                if len(group) < 2:
+        for tmdb_id, group in by_id.items():
+            if len(group) < 2:
+                continue
+            for row in group:
+                previous_path = row.get("output_path")
+                if not previous_path or not previous_path.startswith("جاهز/"):
                     continue
-                for row in group:
-                    previous_path = row.get("output_path")
-                    if not previous_path or not previous_path.startswith("جاهز/"):
-                        continue
-                    old_record = self.github.get_json_file(previous_path)
-                    if not old_record:
-                        raise RuntimeError(
-                            f"Cannot safely move duplicate metadata; existing file is missing: {previous_path}"
-                        )
-                    source_folder = str(row["source_folder"])
-                    old_prefix = f"جاهز/{source_folder}"
-                    new_prefix = f"مكرر/{tmdb_id}/{source_folder}"
-                    original_image_path = (
-                        row.get("original_image_path") or row.get("image_path")
+                old_record = self.github.get_json_file(previous_path)
+                if not old_record:
+                    raise RuntimeError(
+                        f"Cannot safely move duplicate metadata; existing file is missing: {previous_path}"
                     )
-                    moved_images = self.github.list_folder_blobs(old_prefix)
-                    image_source_prefix = old_prefix
-                    # During the first migration, older READY JSON files may
-                    # exist while their images are still in the original root.
-                    if not moved_images:
-                        moved_images = self.github.list_folder_blobs(source_folder)
-                        image_source_prefix = source_folder
-                    for poster in moved_images:
-                        source_path = poster["path"]
-                        relative_path = source_path[len(image_source_prefix) + 1:]
-                        target_path = f"{new_prefix}/{relative_path}"
-                        moves[target_path] = {"sha": poster["sha"], "mode": poster["mode"]}
-                        image_deletes.append(source_path)
-                        if row.get("image_path") == source_path:
-                            row["image_path"] = target_path
-                            old_record["source"]["image_path"] = target_path
-                            old_record["source"]["image_url"] = self.github.raw_url(target_path)
-                    old_record["source"].setdefault("original_image_path", original_image_path)
-                    row["original_image_path"] = original_image_path
+                source_folder = str(row["source_folder"])
+                old_prefix = f"جاهز/{source_folder}"
+                new_prefix = f"مكرر/{tmdb_id}/{source_folder}"
+                original_image_path = (
+                    row.get("original_image_path") or row.get("image_path")
+                )
+                moved_images = self.github.list_folder_blobs(old_prefix)
+                image_source_prefix = old_prefix
+                # During the first migration, older READY JSON files may
+                # exist while their images are still in the original root.
+                if not moved_images:
+                    moved_images = self.github.list_folder_blobs(source_folder)
+                    image_source_prefix = source_folder
+                for poster in moved_images:
+                    source_path = poster["path"]
+                    relative_path = source_path[len(image_source_prefix) + 1:]
+                    target_path = f"{new_prefix}/{relative_path}"
+                    moves[target_path] = {"sha": poster["sha"], "mode": poster["mode"]}
+                    image_deletes.append(source_path)
+                    if row.get("image_path") == source_path:
+                        row["image_path"] = target_path
+                        old_record["source"]["image_path"] = target_path
+                        old_record["source"]["image_url"] = self.github.raw_url(target_path)
+                old_record["source"].setdefault("original_image_path", original_image_path)
+                row["original_image_path"] = original_image_path
 
-                    old_record["status"] = "duplicate"
-                    old_record["duplicate_group"] = {
-                        "tmdb_id": int(tmdb_id),
-                        "source_folders": sorted(x["source_folder"] for x in group),
-                    }
-                    old_record["output_path"] = (
-                        f"{new_prefix}/{json_filename(old_record, source_folder)}"
-                    )
-                    files[old_record["output_path"]] = json.dumps(
-                        old_record, ensure_ascii=False, indent=2
-                    ) + "\n"
-                    deletes.append(previous_path)
-                    row["status"] = "duplicate"
-                    row["output_path"] = old_record["output_path"]
+                old_record["status"] = "duplicate"
+                old_record["duplicate_group"] = {
+                    "tmdb_id": int(tmdb_id),
+                    "source_folders": sorted(x["source_folder"] for x in group),
+                }
+                old_record["output_path"] = (
+                    f"{new_prefix}/{json_filename(old_record, source_folder)}"
+                )
+                files[old_record["output_path"]] = json.dumps(
+                    old_record, ensure_ascii=False, indent=2
+                ) + "\n"
+                deletes.append(previous_path)
+                row["status"] = "duplicate"
+                row["output_path"] = old_record["output_path"]
 
         # Reconcile all output paths and deduplicate delete operations.
         for record in records:

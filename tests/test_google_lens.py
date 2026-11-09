@@ -569,6 +569,16 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(hints, ["não matarás"])
         self.assertIsNone(year)
 
+    def test_ai_mode_and_google_search_labels_are_not_movie_titles(self):
+        hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results([
+            {"title": "AI Mode"},
+            {"title": "Google Search"},
+            {"title": "Google AI Overview"},
+            {"title": "Dìdi (2024)"},
+        ])
+        self.assertEqual(hints, ["Dìdi"])
+        self.assertEqual(year, 2024)
+
     def test_platform_only_caption_does_not_suppress_visual_matches_fallback(self):
         exact = Mock()
         exact.status_code = 200
