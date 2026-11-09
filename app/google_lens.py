@@ -683,6 +683,12 @@ class BrightDataGoogleLensClient:
         text = re.sub(r"\s+", " ", text).strip(" \t\r\n-–—|:;,.")
         if len(text) < 5 or not re.search(r"[A-Za-zÀ-ž]", text):
             return "", year
+        if re.fullmatch(
+            r"(?:google\s+)?(?:ai\s+mode|ai\s+overview|search|overview|gemini|ask\s+google)",
+            text,
+            flags=re.I,
+        ) or re.fullmatch(r"(?:โหมด|mode)\s*ai", text, flags=re.I):
+            return "", year
         # Lens can expose the publisher/platform name as the result title
         # (for example, dozens of rows labelled only "YouTube"). Such labels
         # are not film-title evidence and must never outrank a direct movie
@@ -696,6 +702,8 @@ class BrightDataGoogleLensClient:
             "letterboxd", "rotten tomatoes",
             "movie", "movies", "film", "films",
             "official site", "watch online", "full movie", "movie trailer",
+            "ai", "ai mode", "ai overview", "google ai mode",
+            "google search", "search", "overview", "gemini", "ask google",
         }:
             return "", year
         return text[:180], year
