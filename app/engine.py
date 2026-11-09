@@ -1828,6 +1828,14 @@ class MetadataEngine:
                 folder = item["folder"]
                 image_path = item["image_path"]
                 image_url = self.github.raw_url(image_path)
+                image_blob_sha = next(
+                    (
+                        str(row.get("sha") or "")
+                        for row in (item.get("poster_files") or [])
+                        if str(row.get("path") or "") == image_path
+                    ),
+                    "",
+                )
                 previous_record = None
                 if previous_row.get("output_path"):
                     try:
@@ -1852,6 +1860,7 @@ class MetadataEngine:
                         "folder": folder,
                         "image_path": image_path,
                         "image_url": image_url,
+                        "image_blob_sha": image_blob_sha or None,
                     },
                     "original": {
                         "folder_name": folder,
@@ -2391,5 +2400,9 @@ class MetadataEngine:
             summary["moved_image_files"] = len(moves)
             summary["deleted_old_files"] = len(deletes)
             print(f"[KafiaNet] GitHub commit completed: {commit_sha}", flush=True)
+            if apply_plan_path:
+                Path(apply_plan_path).expanduser().unlink(missing_ok=True)
+                summary["plan_consumed"] = True
+                print("[KafiaNet] Applied plan removed after successful commit.", flush=True)
 
         return summary
