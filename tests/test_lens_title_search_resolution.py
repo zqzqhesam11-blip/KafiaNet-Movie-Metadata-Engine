@@ -11,11 +11,12 @@ class LensDerivedOfficialTitleResolutionTests(unittest.TestCase):
     def test_ai_mode_and_navigation_captions_are_not_movie_title_hints(self):
         from app.google_lens import BrightDataGoogleLensClient
 
-        for caption in ("AI Mode", "Google AI Overview", "โหมด AI", "Google Search"):
+        for caption in ("AI Mode", "Google AI Overview", "โหมด AI", "Google Search", "Breathless English Subtitled"):
             with self.subTest(caption=caption):
+                expected = "" if caption != "Breathless English Subtitled" else "Breathless"
                 self.assertEqual(
                     BrightDataGoogleLensClient._clean_title_hint(caption)[0],
-                    "",
+                    expected,
                 )
 
         hints, year = BrightDataGoogleLensClient.title_hints_from_lens_results([
@@ -156,6 +157,138 @@ class LensDerivedOfficialTitleResolutionTests(unittest.TestCase):
         self.assertFalse(evidence["resolved_identity"]["image_filename_used"])
         self.assertIn(tmdb_url, [row.get("url") for row in lens_rows])
         self.assertIn(imdb_url, [row.get("url") for row in lens_rows])
+
+    def test_exact_lens_title_uses_unique_tmdb_match_without_google_search(self):
+        from app.google_lens import BrightDataGoogleLensClient
+
+        engine = MetadataEngine.__new__(MetadataEngine)
+        engine._details_cache = {}
+        engine._stop_batch = False
+        engine._provider_stop_status = None
+        details = {
+            "id": 10754,
+            "title": "A Short Film About Killing",
+            "original_title": "Krótki film o zabijaniu",
+            "release_date": "1988-03-11",
+            "original_language": "pl",
+            "external_ids": {"imdb_id": "tt0095468"},
+            "production_countries": [{"name": "Poland", "iso_3166_1": "PL"}],
+            "credits": {"cast": [], "crew": []},
+            "release_dates": {"results": []},
+            "alternative_titles": {"titles": []},
+            "keywords": {"keywords": []},
+            "images": {"posters": []},
+        }
+        engine.tmdb = Mock()
+        engine.tmdb.search_movies.return_value = {
+            "total_results": 1,
+            "results": [{
+                "id": 10754,
+                "title": "A Short Film About Killing",
+                "original_title": "Krótki film o zabijaniu",
+                "release_date": "1988-03-11",
+            }],
+        }
+        engine.tmdb.movie_details.return_value = details
+        fallback_search = Mock(return_value=[])
+        engine.reverse_image = SimpleNamespace(
+            title_hints_from_lens_results=BrightDataGoogleLensClient.title_hints_from_lens_results,
+            last_lens_diagnostics={
+                "lens_tab": "exact_matches",
+                "lens_tabs_attempted": ["exact_matches"],
+            },
+            search_official_movie_pages_from_lens=fallback_search,
+            last_official_search_diagnostics={"status": "not_run", "query_count": 0},
+        )
+
+        candidate, match, evidence = engine._find_movie([{
+            "title": "A Short Film About Killing (1988)",
+            "lens_tab": "exact_matches",
+        }])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 10754)
+        self.assertEqual(match["identity_source"], "google_lens_exact_title_tmdb_match")
+        engine.tmdb.search_movies.assert_called_once_with("A Short Film About Killing", year=1988)
+        engine.tmdb.movie_details.assert_called_once_with(10754)
+        fallback_search.assert_not_called()
+        self.assertEqual(evidence["lens_title_resolution"]["status"], "resolved")
+        self.assertEqual(evidence["lens_title_resolution"]["selected_tmdb_id"], 10754)
+        self.assertEqual(evidence["official_title_search"]["status"], "skipped_exact_lens_title_resolved")
+
+    def test_ambiguous_lens_title_stays_review_and_uses_existing_official_fallback(self):
+        from app.google_lens import BrightDataGoogleLensClient
+
+        engine = MetadataEngine.__new__(MetadataEngine)
+        engine._details_cache = {}
+        engine._stop_batch = False
+        engine._provider_stop_status = None
+        engine.tmdb = Mock()
+        engine.tmdb.search_movies.return_value = {
+            "total_results": 2,
+            "results": [
+                {"id": 269, "title": "Breathless", "original_title": "À bout de souffle", "release_date": "1960-03-16"},
+                {"id": 1537, "title": "Breathless", "original_title": "Breathless", "release_date": "1983-05-13"},
+            ],
+        }
+        fallback_search = Mock(return_value=[])
+        engine.reverse_image = SimpleNamespace(
+            title_hints_from_lens_results=BrightDataGoogleLensClient.title_hints_from_lens_results,
+            last_lens_diagnostics={
+                "lens_tab": "exact_matches",
+                "lens_tabs_attempted": ["exact_matches"],
+            },
+            search_official_movie_pages_from_lens=fallback_search,
+            last_official_search_diagnostics={"status": "no_official_results", "query_count": 1},
+        )
+
+        candidate, match, evidence = engine._find_movie([{
+            "title": "Breathless English Subtitled",
+            "lens_tab": "exact_matches",
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(evidence["lens_title_resolution"]["status"], "ambiguous_exact_tmdb_title")
+        self.assertEqual(evidence["lens_title_resolution"]["title_hint"], "Breathless")
+        self.assertEqual(evidence["lens_title_resolution"]["candidate_tmdb_ids"], [269, 1537])
+        engine.tmdb.movie_details.assert_not_called()
+        fallback_search.assert_called_once()
+
+    def test_visual_matches_caption_cannot_trigger_tmdb_title_fast_path(self):
+        from app.google_lens import BrightDataGoogleLensClient
+
+        engine = MetadataEngine.__new__(MetadataEngine)
+        engine._details_cache = {}
+        engine._stop_batch = False
+        engine._provider_stop_status = None
+        engine.tmdb = Mock()
+        fallback_search = Mock(return_value=[])
+        engine.reverse_image = SimpleNamespace(
+            title_hints_from_lens_results=BrightDataGoogleLensClient.title_hints_from_lens_results,
+            last_lens_diagnostics={
+                "lens_tab": "exact_matches+visual_matches",
+                "lens_tabs_attempted": ["exact_matches", "visual_matches"],
+            },
+            search_official_movie_pages_from_lens=fallback_search,
+            last_official_search_diagnostics={"status": "no_official_results", "query_count": 1},
+        )
+
+        candidate, match, evidence = engine._find_movie([{
+            "title": "A tempting but unverified visual result",
+            "lens_tab": "visual_matches",
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(
+            evidence["lens_title_resolution"]["status"],
+            "skipped_no_exact_lens_rows",
+        )
+        engine.tmdb.search_movies.assert_not_called()
+        fallback_search.assert_called_once()
 
 
 if __name__ == "__main__":

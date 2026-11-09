@@ -361,6 +361,213 @@ class MetadataEngine:
             return [result]
 
 
+    def _resolve_unique_exact_lens_tmdb_title(
+        self,
+        reverse_image_results: list[dict[str, Any]],
+    ) -> tuple[list[int], dict[str, Any]]:
+        """Resolve a title caption from Lens exact_matches only when TMDB has one exact result.
+
+        This is a quota-saving fast path, not fuzzy title matching: folder names,
+        filenames, visual_matches captions, Play Store slugs, and generic Google
+        captions are excluded. A partial or ambiguous TMDB result falls back to
+        the existing official IMDb/TMDB page search and remains REVIEW otherwise.
+        """
+        diagnostics: dict[str, Any] = {
+            "status": "not_run",
+            "provider": "tmdb_search_movie",
+            "query_count": 0,
+            "title_hint": None,
+            "year_hint": None,
+            "exact_candidate_count": 0,
+            "candidate_tmdb_ids": [],
+            "selected_tmdb_id": None,
+            "details_verified": False,
+            "reason": None,
+        }
+        lens_client = getattr(self, "reverse_image", None)
+        hint_extractor = getattr(lens_client, "title_hints_from_lens_results", None)
+        if not callable(hint_extractor):
+            diagnostics.update({
+                "status": "skipped_title_extractor_unavailable",
+                "reason": "Google Lens title extractor is unavailable",
+            })
+            return [], diagnostics
+
+        exact_rows = [
+            row for row in (reverse_image_results or [])
+            if isinstance(row, dict)
+            and not row.get("error")
+            and row.get("lens_tab") == "exact_matches"
+        ]
+
+        # Backward compatibility for providers/tests that return only the exact
+        # tab and expose its tab diagnostics, but did not tag individual rows.
+        lens_diagnostics = getattr(lens_client, "last_lens_diagnostics", {}) or {}
+        attempted_tabs = list(lens_diagnostics.get("lens_tabs_attempted") or [])
+        if (
+            not exact_rows
+            and attempted_tabs == ["exact_matches"]
+            and lens_diagnostics.get("lens_tab") == "exact_matches"
+        ):
+            exact_rows = [
+                row for row in (reverse_image_results or [])
+                if isinstance(row, dict)
+                and not row.get("error")
+                and "lens_tab" not in row
+            ]
+
+        if not exact_rows:
+            diagnostics.update({
+                "status": "skipped_no_exact_lens_rows",
+                "reason": "No title-bearing rows were confirmed as Google Lens exact_matches",
+            })
+            return [], diagnostics
+
+        # Pass captions only. This deliberately excludes Play Store slugs and
+        # wrapped Google destinations, which can describe unrelated content.
+        caption_rows = [
+            {"title": str(row.get("title") or "")}
+            for row in exact_rows
+            if str(row.get("title") or "").strip()
+        ]
+        try:
+            title_hints, year_hint = hint_extractor(caption_rows)
+        except Exception as exc:
+            diagnostics.update({
+                "status": "title_extraction_error",
+                "reason": f"{type(exc).__name__}: {str(exc)[:220]}",
+            })
+            return [], diagnostics
+
+        title_hint = next(
+            (str(value).strip() for value in (title_hints or []) if str(value or "").strip()),
+            "",
+        )
+        diagnostics["title_hint"] = title_hint or None
+        diagnostics["year_hint"] = year_hint
+        if not title_hint:
+            diagnostics.update({
+                "status": "skipped_no_usable_exact_title",
+                "reason": "Lens exact_matches returned no usable movie title caption",
+            })
+            return [], diagnostics
+
+        tmdb = getattr(self, "tmdb", None)
+        search_movies = getattr(tmdb, "search_movies", None)
+        if not callable(search_movies):
+            diagnostics.update({
+                "status": "skipped_tmdb_search_unavailable",
+                "reason": "TMDB title search is unavailable",
+            })
+            return [], diagnostics
+
+        diagnostics["query_count"] = 1
+        try:
+            payload = search_movies(title_hint, year=year_hint)
+        except Exception as exc:
+            diagnostics.update({
+                "status": "tmdb_search_error",
+                "reason": f"{type(exc).__name__}: {str(exc)[:220]}",
+            })
+            return [], diagnostics
+
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            diagnostics.update({
+                "status": "invalid_tmdb_search_response",
+                "reason": "TMDB title search returned an invalid result payload",
+            })
+            return [], diagnostics
+
+        search_rows = [row for row in payload.get("results") or [] if isinstance(row, dict)]
+        raw_total = payload.get("total_results")
+        try:
+            total_results = int(raw_total)
+        except (TypeError, ValueError):
+            diagnostics.update({
+                "status": "incomplete_tmdb_search_response",
+                "reason": "TMDB did not return total_results; uniqueness cannot be proven",
+            })
+            return [], diagnostics
+
+        if total_results > len(search_rows):
+            diagnostics.update({
+                "status": "incomplete_tmdb_search_response",
+                "reason": (
+                    f"TMDB returned {len(search_rows)} of {total_results} results; "
+                    "uniqueness cannot be proven from a partial page"
+                ),
+                "tmdb_total_results": total_results,
+                "tmdb_returned_results": len(search_rows),
+            })
+            return [], diagnostics
+
+        expected_title = _comparison_title_key(title_hint)
+        exact_by_id: dict[int, dict[str, Any]] = {}
+        for row in search_rows:
+            title_matches = expected_title in {
+                _comparison_title_key(str(row.get("title") or "")),
+                _comparison_title_key(str(row.get("original_title") or "")),
+            }
+            if not title_matches:
+                continue
+            if year_hint is not None:
+                release_date = str(row.get("release_date") or "")
+                release_year = int(release_date[:4]) if release_date[:4].isdigit() else None
+                if release_year != int(year_hint):
+                    continue
+            raw_id = row.get("id")
+            if str(raw_id or "").isdigit():
+                exact_by_id.setdefault(int(raw_id), row)
+
+        candidate_ids = sorted(exact_by_id)
+        diagnostics.update({
+            "tmdb_total_results": total_results,
+            "tmdb_returned_results": len(search_rows),
+            "exact_candidate_count": len(candidate_ids),
+            "candidate_tmdb_ids": candidate_ids,
+        })
+        if len(candidate_ids) != 1:
+            diagnostics.update({
+                "status": (
+                    "ambiguous_exact_tmdb_title"
+                    if len(candidate_ids) > 1
+                    else "no_exact_tmdb_title"
+                ),
+                "reason": (
+                    "More than one TMDB movie exactly matches the Lens title; refusing an automatic choice"
+                    if len(candidate_ids) > 1
+                    else "No TMDB movie exactly matches the Lens title and available Lens year"
+                ),
+            })
+            return [], diagnostics
+
+        selected_id = candidate_ids[0]
+        try:
+            details = tmdb.movie_details(selected_id)
+            if not isinstance(details, dict) or int(details.get("id") or 0) != selected_id:
+                raise ValueError("TMDB details returned a different movie ID")
+            if not _tmdb_details_match_lens_title(details, title_hint, year_hint):
+                raise ValueError(
+                    "TMDB movie details did not confirm the exact Lens title and available Lens year"
+                )
+        except Exception as exc:
+            diagnostics.update({
+                "status": "tmdb_details_verification_failed",
+                "reason": f"{type(exc).__name__}: {str(exc)[:220]}",
+            })
+            return [], diagnostics
+
+        if not isinstance(getattr(self, "_details_cache", None), dict):
+            self._details_cache = {}
+        self._details_cache[selected_id] = details
+        diagnostics.update({
+            "status": "resolved",
+            "selected_tmdb_id": selected_id,
+            "details_verified": True,
+            "reason": "One exact Lens title matched one complete TMDB result and official movie details confirmed it",
+        })
+        return [selected_id], diagnostics
+
     def _find_movie(
         self,
         reverse_image_results: list[dict[str, Any]],
@@ -464,6 +671,36 @@ class MetadataEngine:
             "official_title_search": title_search_evidence(),
         }
 
+        lens_title_tmdb_ids: list[int] = []
+        lens_title_resolution: dict[str, Any] = {
+            "status": "skipped_official_lens_id_present"
+            if (lens_tmdb_ids or lens_imdb_ids)
+            else "not_run",
+            "query_count": 0,
+            "title_hint": None,
+            "year_hint": None,
+            "exact_candidate_count": 0,
+            "candidate_tmdb_ids": [],
+            "selected_tmdb_id": None,
+            "details_verified": False,
+            "reason": None,
+        }
+        if not reverse_image_failed and not (lens_tmdb_ids or lens_imdb_ids):
+            lens_title_tmdb_ids, lens_title_resolution = self._resolve_unique_exact_lens_tmdb_title(
+                reverse_image_results
+            )
+            if lens_title_tmdb_ids:
+                lens_tmdb_ids = list(dict.fromkeys([*lens_tmdb_ids, *lens_title_tmdb_ids]))
+                title_search_diagnostics.update({
+                    "status": "skipped_exact_lens_title_resolved",
+                    "title_hints": [lens_title_resolution.get("title_hint")]
+                    if lens_title_resolution.get("title_hint") else [],
+                    "year_hint": lens_title_resolution.get("year_hint"),
+                })
+        evidence["lens_title_resolution"] = lens_title_resolution
+        evidence["id_resolution"]["lens_title_tmdb_ids"] = list(lens_title_tmdb_ids)
+        tmdb_id_lookup["lens_title_tmdb_ids"] = list(lens_title_tmdb_ids)
+
         if reverse_image_failed and not (lens_tmdb_ids or lens_imdb_ids):
             return None, {
                 "status": "review",
@@ -527,9 +764,12 @@ class MetadataEngine:
         evidence["strategy"] = (
             "google_lens_official_id"
             if (direct_tmdb_ids or direct_imdb_ids)
+            else "google_lens_exact_title_tmdb_match"
+            if lens_title_tmdb_ids
             else "lens_derived_google_official_title_search"
         )
         evidence["id_resolution"]["tmdb_ids_seen"] = list(lens_tmdb_ids)
+        evidence["id_resolution"]["lens_title_tmdb_ids"] = list(lens_title_tmdb_ids)
         evidence["id_resolution"]["imdb_ids_seen"] = list(lens_imdb_ids)
         evidence["id_resolution"]["google_title_search_tmdb_ids"] = list(title_search_tmdb_ids)
         evidence["id_resolution"]["google_title_search_imdb_ids"] = list(title_search_imdb_ids)
@@ -540,6 +780,7 @@ class MetadataEngine:
             "imdb_ids": list(lens_imdb_ids),
             "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
             "google_title_search_imdb_ids": list(title_search_imdb_ids),
+            "lens_title_tmdb_ids": list(lens_title_tmdb_ids),
         })
         evidence["tmdb_ids"] = list(lens_tmdb_ids)
         evidence["imdb_ids"] = list(lens_imdb_ids)
@@ -855,6 +1096,7 @@ class MetadataEngine:
             }, evidence
 
         has_direct_tmdb_id = selected_id in direct_tmdb_ids
+        has_lens_title_tmdb_id = selected_id in lens_title_tmdb_ids
         has_title_search_tmdb_id = selected_id in title_search_tmdb_ids
         has_imdb_id = bool(expected_imdb_ids_by_tmdb.get(selected_id))
         has_title_search_imdb_id = any(
@@ -865,6 +1107,10 @@ class MetadataEngine:
             identity_source = "google_lens_official_tmdb_and_imdb_ids"
             identity_method = "lens_tmdb_and_imdb_id_lookup"
             verification = "official_tmdb_url_plus_tmdb_find_imdb_id_and_movie_details"
+        elif has_lens_title_tmdb_id:
+            identity_source = "google_lens_exact_title_tmdb_match"
+            identity_method = "lens_exact_title_tmdb_search"
+            verification = "exact_google_lens_title_then_unique_complete_tmdb_search_and_matching_movie_details"
         elif has_title_search_tmdb_id and has_title_search_imdb_id:
             identity_source = "google_serp_official_tmdb_and_imdb_ids"
             identity_method = "lens_title_search_tmdb_and_imdb_id_lookup"
@@ -895,8 +1141,9 @@ class MetadataEngine:
             "imdb_id": selected["imdb_id"],
             "source": identity_source,
             "verification": verification,
-            "official_tmdb_ids": list(lens_tmdb_ids),
-            "official_imdb_ids": list(lens_imdb_ids),
+            "official_tmdb_ids": list(direct_tmdb_ids),
+            "official_imdb_ids": list(direct_imdb_ids),
+            "lens_title_tmdb_ids": list(lens_title_tmdb_ids),
             "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
             "google_title_search_imdb_ids": list(title_search_imdb_ids),
             "title_disambiguation": identity_disambiguation,
@@ -915,6 +1162,8 @@ class MetadataEngine:
             "reason": (
                 "TMDB movie details confirmed official TMDB and IMDb links returned by the Lens-derived Google search"
                 if has_title_search_tmdb_id and has_title_search_imdb_id
+                else "The exact Google Lens title resolved to one exact TMDB movie and its official details confirmed the same title"
+                if has_lens_title_tmdb_id
                 else "TMDB confirmed the movie ID from an official TMDB link"
                 if has_direct_tmdb_id and not has_imdb_id
                 else "TMDB /find mapped an official IMDb title ID to a movie and movie details confirmed the same IMDb ID"
@@ -1517,7 +1766,12 @@ class MetadataEngine:
         title_search_diag = reverse_image_evidence.get("official_title_search") or {}
         if not isinstance(title_search_diag, dict):
             title_search_diag = {}
+        lens_title_resolution = reverse_image_evidence.get("lens_title_resolution") or {}
         lens_diagnostics.update({
+            "lens_tmdb_title_resolution_status": lens_title_resolution.get("status", "not_run"),
+            "lens_tmdb_title_query_count": lens_title_resolution.get("query_count", 0),
+            "lens_tmdb_title_hint": lens_title_resolution.get("title_hint"),
+            "lens_tmdb_title_selected_id": lens_title_resolution.get("selected_tmdb_id"),
             "title_search_status": title_search_diag.get("status", "not_run"),
             "title_search_response_format": title_search_diag.get("response_format", "unknown"),
             "title_search_http_status": title_search_diag.get("http_status"),
