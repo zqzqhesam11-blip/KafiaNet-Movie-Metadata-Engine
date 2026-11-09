@@ -763,7 +763,6 @@ class MetadataEngine:
         )
         if identity_disambiguation:
             evidence["identity_disambiguation"] = identity_disambiguation
-        selected_id = int(selected["tmdb_id"])
         selected_candidate = resolved[selected_id]
         identity_consistency = _folder_identity_consistency(
             selected_candidate,
