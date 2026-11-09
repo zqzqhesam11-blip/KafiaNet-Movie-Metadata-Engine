@@ -452,6 +452,32 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertTrue(evidence["identity_consistency"]["title_match"])
         self.assertTrue(evidence["identity_consistency"]["year_match"])
 
+    def test_reviewer_only_research_is_skipped_by_default_to_keep_batch_fast(self):
+        engine = self.make_engine()
+        engine._reverse_image_results = lambda _image_url: [{
+            "title": "Some useful Lens title",
+            "url": "https://play.google.com/store/movies/details/some_useful_lens_title",
+        }]
+        engine._wikipedia_tmdb_suggestions_from_lens = Mock(
+            side_effect=AssertionError("reviewer-only sources must be opt-in")
+        )
+
+        record = engine._record_for_folder({
+            "folder": "Some useful Lens title",
+            "image_path": "Posters/example.jpg",
+        })
+
+        self.assertEqual(record["status"], "review")
+        engine._wikipedia_tmdb_suggestions_from_lens.assert_not_called()
+        self.assertEqual(
+            record["reverse_image"]["latest_query"]["diagnostics"]["wikipedia_status"],
+            "disabled_by_configuration",
+        )
+        self.assertEqual(
+            record["reverse_image"]["latest_query"]["diagnostics"]["wikidata_status"],
+            "disabled_by_configuration",
+        )
+
     def test_lens_failure_does_not_reuse_previous_film_title_search_diagnostics(self):
         engine = self.make_engine()
         engine.reverse_image.last_lens_diagnostics = {
