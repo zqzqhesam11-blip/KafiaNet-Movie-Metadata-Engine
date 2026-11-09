@@ -1732,10 +1732,12 @@ class MetadataEngine:
         self._stop_batch = False
         self._provider_stop_status = None
         self._provider_stop_reason = None
-        self.settings.validate_for_processing(
-            apply=apply,
-            require_research=not bool(apply_plan_path),
-        )
+        if apply_plan_path:
+            self.settings.validate_for_processing(apply=apply, require_research=False)
+        else:
+            # Keep the original one-argument call compatible with lightweight
+            # settings doubles used by the repository's run_batch unit tests.
+            self.settings.validate_for_processing(apply=apply)
 
         print("[KafiaNet] Scanning poster repository...", flush=True)
         folders = self.github.list_film_folders()
