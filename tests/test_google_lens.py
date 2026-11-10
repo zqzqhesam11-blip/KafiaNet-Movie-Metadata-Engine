@@ -75,8 +75,12 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_lens_diagnostics["data_format"], "parsed_light")
         target = call.kwargs["json"]["url"]
         self.assertIn("lens.google.com/uploadbyurl?", target)
-        self.assertIn("brd_json=1", target)
+        self.assertNotIn("brd_json", target)
         self.assertIn("brd_lens=exact_matches", target)
+        self.assertEqual(call.kwargs["headers"], {"x-unblock-data-format": "parsed_light"})
+        self.assertEqual(api.last_lens_diagnostics["response_modes_attempted"], {
+            "exact_matches": ["parsed_light"],
+        })
         self.assertIn("raw.githubusercontent.com", target)
 
     def test_captures_raw_result_fields_and_redacted_link_paths(self):
@@ -164,7 +168,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         with self.assertRaisesRegex(BrightDataAPIError, "BRIGHTDATA_API_KEY"):
             api.search_by_image_url("https://example.com/poster.jpg")
 
-    def test_retries_empty_http_200_response_and_recovers(self):
+    def test_empty_parsed_light_response_uses_one_full_json_fallback(self):
         empty = Mock()
         empty.status_code = 200
         empty.text = ""
@@ -183,10 +187,29 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             self.assertEqual(api.search_by_image_url("https://example.com/poster.jpg"), [])
 
         self.assertEqual(api.client.post.call_count, 3)
+        first, fallback, visual = api.client.post.call_args_list
+        self.assertEqual(
+            first.kwargs["headers"],
+            {"x-unblock-data-format": "parsed_light"},
+        )
+        self.assertNotIn("brd_json", first.kwargs["json"]["url"])
+        self.assertIsNone(fallback.kwargs["headers"])
+        self.assertIn("brd_json=1", fallback.kwargs["json"]["url"])
+        self.assertEqual(
+            visual.kwargs["headers"],
+            {"x-unblock-data-format": "parsed_light"},
+        )
         self.assertEqual(api.last_lens_diagnostics["attempts"], 3)
         self.assertEqual(api.last_lens_diagnostics["status"], "no_matches")
+        self.assertEqual(
+            api.last_lens_diagnostics["response_modes_attempted"],
+            {
+                "exact_matches": ["parsed_light", "brd_json"],
+                "visual_matches": ["parsed_light"],
+            },
+        )
 
-    def test_empty_json_response_retries_then_reports_http_metadata(self):
+    def test_empty_lens_response_stops_after_two_distinct_formats(self):
         response = Mock()
         response.status_code = 200
         response.text = ""
@@ -198,8 +221,37 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             with self.assertRaisesRegex(BrightDataAPIError, "content-length=0"):
                 api.search_by_image_url("https://example.com/poster.jpg")
 
-        self.assertEqual(api.client.post.call_count, 3)
-        self.assertEqual(api.last_lens_diagnostics["attempts"], 3)
+        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(api.last_lens_diagnostics["attempts"], 2)
+        self.assertEqual(api.last_lens_diagnostics["http_status"], 200)
+        self.assertEqual(
+            api.last_lens_diagnostics["response_modes_attempted"],
+            ["parsed_light", "brd_json"],
+        )
+
+    def test_unparsed_light_json_uses_full_json_format_once(self):
+        unparsed = Mock()
+        unparsed.status_code = 200
+        unparsed.text = '{"unexpected":{"version":1}}'
+        unparsed.headers = {"content-type": "application/json"}
+        unparsed.json.return_value = {"unexpected": {"version": 1}}
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = '{"exact_matches":[{"title":"The Matrix","link":"https://www.imdb.com/title/tt0133093/"}]}'
+        recovered.headers = {"content-type": "application/json"}
+        recovered.json.return_value = {
+            "exact_matches": [{
+                "title": "The Matrix",
+                "link": "https://www.imdb.com/title/tt0133093/",
+            }]
+        }
+        api = self.make_client()
+        api.client.post.side_effect = [unparsed, recovered]
+        rows = api.search_by_image_url("https://example.com/poster.jpg")
+        self.assertEqual(rows[0]["url"], "https://www.imdb.com/title/tt0133093/")
+        self.assertEqual(api.client.post.call_count, 2)
+        self.assertIsNone(api.client.post.call_args_list[1].kwargs["headers"])
+        self.assertEqual(api.last_lens_diagnostics["data_format"], "json")
 
     def test_unwraps_json_encoded_brightdata_body(self):
         nested = {
