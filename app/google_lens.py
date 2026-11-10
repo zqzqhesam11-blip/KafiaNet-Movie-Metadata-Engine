@@ -275,6 +275,7 @@ class BrightDataGoogleLensClient:
             item.pop("url_resolution_errors", None)
 
         self.last_result_url_diagnostics = stats
+        self.last_lens_diagnostics.update(stats)
         return prepared
 
     @staticmethod
