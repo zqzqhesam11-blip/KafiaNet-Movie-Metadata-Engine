@@ -1172,11 +1172,10 @@ class BrightDataGoogleLensClient:
         return normalized, rows, tab_diagnostics
 
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
-        """Search exact matches first; use visual matches only if no usable title exists.
+        """Search Google Lens exact matches, then visual matches when no official ID is found.
 
-        When exact matches already provide a usable title hint, the engine can
-        perform one official, site-scoped IMDb/TMDB search. Avoiding a redundant
-        visual tab saves a Bright Data round trip without weakening ID verification.
+        Captions are not used to create or infer identifiers. The engine accepts
+        only official TMDB/IMDb IDs surfaced by Lens and verifies them through TMDB.
         Opaque /goto wrappers remain quarantined and are never parsed as IDs.
         """
         self.last_official_search_diagnostics = {
@@ -1234,18 +1233,14 @@ class BrightDataGoogleLensClient:
         attempts = int(exact_diag.get("attempts") or 0)
         combined = list(exact_results)
         exact_ids = extract_tmdb_movie_ids(exact_results) or extract_imdb_ids(exact_results)
-        exact_title_hints, _exact_year_hint = self.title_hints_from_lens_results(exact_results)
         visual_results: list[dict[str, Any]] = []
         visual_fallback_skipped_reason = (
-            "exact_matches_has_usable_title_hint"
-            if not exact_ids and exact_title_hints
-            else None
+            "exact_matches_has_official_id" if exact_ids else None
         )
 
-        # A title from exact_matches is enough to try the official, site-scoped
-        # title search. Do not make a second Lens request unless exact_matches
-        # contained neither an official ID nor a usable title.
-        if not exact_ids and not exact_title_hints:
+        # If exact_matches yields no official identifier, also inspect the
+        # visual_matches tab. Titles/captions do not suppress this lookup.
+        if not exact_ids:
             try:
                 visual_results, visual_rows, visual_diag = self._request_lens_tab(
                     image_url, LENS_FALLBACK_TAB
