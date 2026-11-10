@@ -449,7 +449,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         # No redirect_client exists: the resolver no longer calls Google /goto.
         self.assertFalse(hasattr(api, "redirect_client"))
 
-    def test_visual_matches_is_skipped_when_exact_matches_has_usable_title(self):
+    def test_visual_matches_is_requested_when_exact_matches_only_has_title(self):
         exact = Mock()
         exact.status_code = 200
         exact.text = ""
@@ -460,20 +460,32 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
                 "image_url": "https://images.example.test/exact-poster.jpg",
             }]
         }
+        visual = Mock()
+        visual.status_code = 200
+        visual.text = ""
+        visual.json.return_value = {
+            "visual_matches": [{
+                "title": "A Short Film About Killing",
+                "link": "https://www.themoviedb.org/movie/10754",
+                "image": "https://images.example.test/visual-poster.jpg",
+            }]
+        }
         api = self.make_client()
-        api.client.post.side_effect = [exact]
+        api.client.post.side_effect = [exact, visual]
 
         rows = api.search_by_image_url("https://example.com/poster.jpg")
 
-        self.assertEqual(api.client.post.call_count, 1)
-        self.assertEqual(api.last_lens_diagnostics["lens_tabs_attempted"], ["exact_matches"])
-        self.assertEqual(api.last_lens_diagnostics["visual_matches_result_count"], 0)
+        self.assertEqual(api.client.post.call_count, 2)
         self.assertEqual(
-            api.last_lens_diagnostics["visual_fallback_skipped_reason"],
-            "exact_matches_has_usable_title_hint",
+            api.last_lens_diagnostics["lens_tabs_attempted"],
+            ["exact_matches", "visual_matches"],
         )
-        self.assertEqual(len(rows), 1)
+        self.assertEqual(api.last_lens_diagnostics["visual_matches_result_count"], 1)
+        self.assertIsNone(api.last_lens_diagnostics["visual_fallback_skipped_reason"])
+        self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["title"], "A Short Film About Killing (1988)")
+        self.assertEqual(rows[1]["lens_tab"], "visual_matches")
+        self.assertEqual(rows[1]["url"], "https://www.themoviedb.org/movie/10754")
 
     def test_visual_matches_fallback_runs_when_exact_matches_has_no_usable_title(self):
         exact = Mock()
