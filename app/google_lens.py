@@ -108,6 +108,24 @@ class BrightDataGoogleLensClient:
         )
 
     @staticmethod
+    def _canonical_google_goto_url(value: str) -> str:
+        """Use Google's Search host for Lens outbound /goto wrappers.
+
+        Lens uploads/results live on lens.google.com, but outbound result
+        wrappers are served by www.google.com. Some SERP responses expose the
+        wrapper with the Lens host, which returns 404 for this route. Preserve
+        the opaque query string exactly while correcting only that hostname.
+        """
+        try:
+            parsed = urlparse(str(value or "").strip())
+            host = (parsed.hostname or "").casefold().rstrip(".")
+        except ValueError:
+            return value
+        if host != "lens.google.com" or parsed.username or parsed.password:
+            return value
+        return parsed._replace(netloc="www.google.com").geturl()
+
+    @staticmethod
     def _is_official_movie_destination(value: str) -> bool:
         """Only retain resolved Google redirects that identify an official movie page."""
         return bool(
@@ -126,9 +144,10 @@ class BrightDataGoogleLensClient:
         client = getattr(self, "redirect_client", None)
         if client is None or not callable(getattr(client, "get", None)):
             return None, None, "resolver_unavailable"
+        request_url = self._canonical_google_goto_url(value)
         try:
             response = client.get(
-                value,
+                request_url,
                 follow_redirects=False,
                 timeout=GOOGLE_GOTO_TIMEOUT_SECONDS,
             )
@@ -136,7 +155,7 @@ class BrightDataGoogleLensClient:
             headers = getattr(response, "headers", {}) or {}
             location = headers.get("location") if hasattr(headers, "get") else None
             if status in {301, 302, 303, 307, 308} and location:
-                destination = urljoin(value, str(location).strip())
+                destination = urljoin(request_url, str(location).strip())
                 # Google sometimes places a plain /url wrapper in Location.
                 destination = _resolved_destination_url(destination)
                 try:
