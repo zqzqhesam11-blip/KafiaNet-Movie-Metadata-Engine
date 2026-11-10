@@ -2090,6 +2090,18 @@ class MetadataEngine:
                 for key in safe_header_keys
                 if isinstance(response_headers, dict) and response_headers.get(key)
             ) or "none"
+            raw_paths_by_field = lens_diag.get("raw_link_paths_by_field") or {}
+            raw_paths_by_field_text = ",".join(
+                f"{field}:" + "|".join(
+                    f"{path}={count}" for path, count in paths.items()
+                )
+                for field, paths in raw_paths_by_field.items()
+                if isinstance(paths, dict)
+            ) or "none"
+            raw_field_types_text = ",".join(
+                f"{field}:{value}"
+                for field, value in (lens_diag.get("raw_result_field_types") or {}).items()
+            ) or "none"
             tmdb_lookup = identity_evidence.get("tmdb_id_lookup") or {}
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
@@ -2147,8 +2159,9 @@ class MetadataEngine:
                 f"result_hosts='{safe_log_detail(','.join(f'{host}:{count}' for host, count in (lens_diag.get('result_hosts') or {}).items()), 220)}' "
                 f"result_paths='{safe_log_detail(','.join(f'{path}:{count}' for path, count in (lens_diag.get('result_url_paths') or {}).items()), 260)}' "
                 f"raw_fields='{safe_log_detail(','.join(lens_diag.get('raw_result_fields') or []), 240)}' "
-                f"raw_field_types='{safe_log_detail(','.join(f'{name}:{types}' for name, types in (lens_diag.get('raw_result_field_types') or {}).items()), 200)}' "
+                f"raw_field_types='{safe_log_detail(raw_field_types_text, 220)}' "
                 f"raw_link_paths='{safe_log_detail(','.join(f'{path}:{count}' for path, count in (lens_diag.get('raw_link_paths') or {}).items()), 260)}' "
+                f"raw_link_fields='{safe_log_detail(raw_paths_by_field_text, 400)}' "
                 f"lens_error='{lens_error}' "
                 f"tmdb_id_lookup={tmdb_lookup.get('status', 'unknown')} "
                 f"tmdb_ids={','.join(str(value) for value in (tmdb_lookup.get('tmdb_ids') or [])[:10]) or 'none'} "
