@@ -767,6 +767,48 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         result = api.search_by_image_url("https://example.com/poster.jpg")
         self.assertEqual(result[0]["url"], "https://www.themoviedb.org/movie/10754")
 
+    def test_normalizes_nested_lens_link_objects_without_treating_images_as_pages(self):
+        goto_url = "https://lens.google.com/goto?url=PRIVATE_LINK_TOKEN"
+        tmdb_url = "https://www.themoviedb.org/movie/10754-a-short-film-about-killing"
+        image_url = "https://lens.google.com/goto?url=PRIVATE_IMAGE_TOKEN"
+
+        rows = BrightDataGoogleLensClient._normalize_matches([{
+            "title": "A Short Film About Killing",
+            "link": {
+                "result": {"href": goto_url},
+                "alternates": [{"target": tmdb_url}],
+                "thumbnail": {"image_url": image_url},
+            },
+            "image_url": "https://encrypted-tbn0.gstatic.com/images?q=preview",
+        }])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["url"], goto_url)
+        self.assertEqual(rows[0]["url_candidates"], [goto_url, tmdb_url])
+        self.assertNotIn(image_url, rows[0]["url_candidates"])
+        self.assertFalse(any("encrypted-tbn0" in url for url in rows[0]["url_candidates"]))
+
+    def test_raw_url_diagnostics_attribute_nested_paths_to_their_source_field(self):
+        diagnostics = BrightDataGoogleLensClient._raw_result_diagnostics([{
+            "link": {
+                "result": {"href": "https://lens.google.com/goto?url=PRIVATE"},
+            },
+            "image_url": {
+                "url": "https://encrypted-tbn0.gstatic.com/images?q=PRIVATE",
+            },
+        }])
+
+        self.assertEqual(
+            diagnostics["raw_link_paths_by_field"]["link"]["lens.google.com/goto"],
+            1,
+        )
+        self.assertEqual(
+            diagnostics["raw_link_paths_by_field"]["image_url"][
+                "encrypted-tbn0.gstatic.com/images"
+            ],
+            1,
+        )
+
     def test_ignores_platform_only_lens_titles_and_uses_direct_play_store_movie_alias(self):
         lens_rows = [
             {
