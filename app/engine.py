@@ -1450,15 +1450,22 @@ class MetadataEngine:
                 or (previous_reverse_image.get("evidence") or {}).get("lens_diagnostics")
                 or {}
             )
-            # Evidence from the former visual_matches tab is deliberately stale:
-            # only results explicitly tagged as exact_matches may be reused.
-            saved_results = (
-                previous_reverse_image.get("results") or []
-                if saved_query_diagnostics.get("lens_tab") == "exact_matches"
-                else []
-            )
+            # Reuse only exact_matches evidence. Newer records tag each row with
+            # its source tab, so exact rows remain distinguishable even when the
+            # aggregate query also attempted visual_matches and that tab failed.
+            saved_results = previous_reverse_image.get("results") or []
+            saved_lens_tab = str(saved_query_diagnostics.get("lens_tab") or "")
+            if saved_lens_tab == "exact_matches":
+                # Legacy single-tab records may predate per-row lens_tab tags.
+                exact_saved_results = saved_results
+            else:
+                exact_saved_results = [
+                    result for result in saved_results
+                    if isinstance(result, dict)
+                    and result.get("lens_tab") == "exact_matches"
+                ]
             reusable_results = [
-                result for result in saved_results
+                result for result in exact_saved_results
                 if isinstance(result, dict)
                 and not result.get("error")
                 and any(result.get(key) for key in ("title", "url", "source"))
