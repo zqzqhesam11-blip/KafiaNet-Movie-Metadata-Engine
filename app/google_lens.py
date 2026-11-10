@@ -1390,8 +1390,7 @@ class BrightDataGoogleLensClient:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         """Fetch one Lens tab, with a single format fallback for empty/unparsed 200s.
 
-        Primary: Bright Data's documented Lens header
-            x-unblock-data-format: parsed_light
+        Primary: Bright Data REST API's documented JSON-body data_format=parsed_light.
         Fallback: Bright Data's documented brd_json=1 URL parameter.
         Each request uses exactly one selector. We do not spend two extra
         requests repeating the same empty request format.
