@@ -176,7 +176,8 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(engine.tmdb.find_calls, ["tt0000000"])
         self.assertEqual(engine.tmdb.details_calls, [])
 
-    def test_tmdb_and_imdb_official_ids_must_resolve_to_same_movie(self):
+
+    def test_direct_lens_tmdb_id_takes_priority_over_secondary_imdb_ids(self):
         engine = self.make_engine()
         engine.tmdb.find_results["tt0095468"] = {"movie_results": [{"id": 31056}]}
 
@@ -185,10 +186,12 @@ class IdOnlyIdentityTests(unittest.TestCase):
             {"url": "https://www.imdb.com/title/tt0095468/"},
         ])
 
-        self.assertIsNone(candidate)
-        self.assertEqual(match["status"], "review")
-        self.assertEqual(set(match["candidate_ids"]), {10754, 31056})
-        self.assertEqual(set(engine.tmdb.details_calls), {10754, 31056})
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 10754)
+        self.assertEqual(engine.tmdb.details_calls, [10754])
+        self.assertEqual(engine.tmdb.find_calls, [])
+        self.assertEqual(evidence["id_resolution"]["ignored_secondary_lens_imdb_ids"], ["tt0095468"])
 
     def test_title_only_result_does_not_call_tmdb_text_search(self):
         engine = self.make_engine()
@@ -202,7 +205,8 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(match["status"], "review")
         self.assertEqual(engine.tmdb.details_calls, [])
 
-    def test_multiple_official_tmdb_movie_ids_remain_review(self):
+
+    def test_first_ranked_lens_tmdb_id_is_used_and_secondary_ids_are_recorded(self):
         engine = self.make_engine()
         rows = [
             {
@@ -219,28 +223,23 @@ class IdOnlyIdentityTests(unittest.TestCase):
 
         candidate, match, evidence = engine._find_movie(rows)
 
-        self.assertIsNone(candidate)
-        self.assertEqual(match["status"], "review")
-        self.assertEqual(set(match["candidate_ids"]), {10754, 31056})
-        self.assertEqual(set(engine.tmdb.details_calls), {10754, 31056})
-        self.assertEqual(len(evidence["candidate_identities"]), 2)
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 10754)
+        self.assertEqual(engine.tmdb.details_calls, [10754])
+        self.assertEqual(evidence["id_resolution"]["observed_lens_tmdb_ids"], [10754, 31056])
+        self.assertEqual(evidence["id_resolution"]["ignored_secondary_lens_tmdb_ids"], [31056])
 
-    def test_title_search_disambiguates_two_official_ids_using_exact_lens_title_and_year(self):
+
+    def test_lens_caption_without_movie_identifier_stays_review_without_search(self):
         engine = self.make_engine()
         searcher = Mock(return_value=[
             {"url": "https://www.imdb.com/title/tt0095468/"},
-            {"url": "https://www.imdb.com/title/tt0095467/"},
         ])
         engine.reverse_image = SimpleNamespace(
             resolve_result_urls=lambda rows: rows,
             search_official_movie_pages_from_lens=searcher,
-            last_official_search_diagnostics={
-                "status": "ok",
-                "query_count": 1,
-                "title_hints": ["A Short Film About Killing"],
-                "year_hint": 1988,
-                "official_url_count": 2,
-            },
+            last_official_search_diagnostics={"status": "not_run", "query_count": 0},
         )
 
         candidate, match, evidence = engine._find_movie([{
@@ -248,24 +247,15 @@ class IdOnlyIdentityTests(unittest.TestCase):
             "url": "https://play.google.com/store/movies/details/a_short_film_about_killing",
         }])
 
-        self.assertIsNotNone(candidate)
-        self.assertEqual(candidate["id"], 10754)
-        self.assertEqual(match["status"], "ready")
-        self.assertEqual(match["imdb_id"], "tt0095468")
-        self.assertEqual(set(engine.tmdb.find_calls), {"tt0095468", "tt0095467"})
-        self.assertEqual(set(engine.tmdb.details_calls), {10754, 31056})
-        self.assertEqual(
-            evidence["identity_disambiguation"]["method"],
-            "exact_lens_primary_title_and_year_against_verified_tmdb_details",
-        )
-        self.assertEqual(
-            evidence["identity_disambiguation"]["selected_tmdb_id"],
-            10754,
-        )
-        self.assertTrue(evidence["resolved_identity"]["tmdb_id"] == 10754)
-        self.assertTrue(evidence["resolved_identity"]["verification"])
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(evidence["lens_title_resolution"]["status"], "disabled_id_only_mode")
+        self.assertEqual(evidence["official_title_search"]["status"], "disabled_id_only_mode")
+        searcher.assert_not_called()
+        self.assertEqual(engine.tmdb.details_calls, [])
 
-    def test_unresolved_secondary_title_search_id_does_not_block_unique_verified_match(self):
+
+    def test_only_first_official_imdb_id_from_lens_is_resolved_by_tmdb(self):
         engine = self.make_engine()
         apollo = movie_details(
             664996,
@@ -277,46 +267,22 @@ class IdOnlyIdentityTests(unittest.TestCase):
         engine.tmdb.find_results["tt7978758"] = {
             "movie_results": [{"id": 664996}]
         }
-        searcher = Mock(return_value=[
+
+        candidate, match, evidence = engine._find_movie([
             {"url": "https://www.imdb.com/title/tt7978758/"},
             {"url": "https://www.imdb.com/title/tt28422574/"},
         ])
-        engine.reverse_image = SimpleNamespace(
-            resolve_result_urls=lambda rows: rows,
-            search_official_movie_pages_from_lens=searcher,
-            last_official_search_diagnostics={
-                "status": "ok",
-                "query_count": 1,
-                "title_hints": ["Apollo 10 1 2 A Space Age Childhood"],
-                "year_hint": 2022,
-                "official_url_count": 2,
-            },
-        )
 
-        candidate, match, evidence = engine._find_movie([{
-            "title": "Apollo 10 1 2 A Space Age Childhood (2022)",
-            "url": "https://play.google.com/store/movies/details/apollo_10_1_2_a_space_age_childhood",
-        }])
-
-        self.assertIsNotNone(candidate)
         self.assertEqual(candidate["id"], 664996)
         self.assertEqual(match["status"], "ready")
         self.assertEqual(match["imdb_id"], "tt7978758")
-        self.assertEqual(
-            evidence["identity_disambiguation"]["selected_tmdb_id"],
-            664996,
-        )
-        self.assertEqual(
-            evidence["identity_disambiguation"]["ignored_secondary_imdb_ids"],
-            ["tt28422574"],
-        )
-        self.assertIn("tt28422574", evidence["id_resolution"]["imdb_to_tmdb_ids"])
-        self.assertEqual(
-            evidence["tmdb_id_lookup"]["status"],
-            "resolved_after_lens_title_disambiguation",
-        )
+        self.assertEqual(engine.tmdb.find_calls, ["tt7978758"])
+        self.assertEqual(evidence["id_resolution"]["observed_lens_imdb_ids"], [
+            "tt7978758", "tt28422574"
+        ])
 
-    def test_folder_title_mismatch_alone_does_not_veto_verified_official_id(self):
+
+    def test_source_folder_label_is_not_part_of_lens_id_resolution(self):
         engine = self.make_engine()
 
         candidate, match, evidence = engine._find_movie(
@@ -324,14 +290,12 @@ class IdOnlyIdentityTests(unittest.TestCase):
             expected_folder="عنوان محلي مختلف (1988)",
         )
 
-        self.assertIsNotNone(candidate)
         self.assertEqual(candidate["id"], 10754)
         self.assertEqual(match["status"], "ready")
         consistency = evidence["identity_consistency"]
-        self.assertFalse(consistency["title_match"])
-        self.assertTrue(consistency["year_match"])
-        self.assertFalse(consistency["clear_title_and_year_conflict"])
+        self.assertEqual(consistency["status"], "not_applied_id_only_mode")
         self.assertTrue(consistency["allowed"])
+        self.assertFalse(consistency["folder_name_used_for_conflict_veto"])
 
     def test_non_tmdb_url_with_movie_path_is_not_accepted_as_tmdb_id(self):
         engine = self.make_engine()
@@ -361,6 +325,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertNotIn("queries", evidence["tmdb_id_lookup"])
         self.assertEqual(engine.tmdb.details_calls, [])
 
+
     def test_record_saves_tmdb_details_and_tmdb_poster_urls(self):
         engine = self.make_engine()
         engine._reverse_image_results = lambda _image_url: [{
@@ -378,35 +343,18 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(record["tmdb_id"], 10754)
         self.assertEqual(record["imdb_id"], "tt0095468")
         self.assertEqual(record["tmdb"]["title"], "A Short Film About Killing")
-        self.assertEqual(
-            record["tmdb"]["poster_url"],
-            "https://image.tmdb.org/t/p/w500/primary-poster.jpg",
-        )
-        self.assertEqual(
-            record["tmdb"]["posters"][0]["url"],
-            "https://image.tmdb.org/t/p/w500/poster-a.jpg",
-        )
-        self.assertEqual(
-            record["tmdb"]["posters"][0]["original_url"],
-            "https://image.tmdb.org/t/p/original/poster-a.jpg",
-        )
-        self.assertEqual(
-            record["identity"]["source"],
-            "google_lens_official_tmdb_movie_id",
-        )
+        self.assertEqual(record["tmdb"]["poster_url"], "https://image.tmdb.org/t/p/w500/primary-poster.jpg")
+        self.assertEqual(record["tmdb"]["posters"][0]["url"], "https://image.tmdb.org/t/p/w500/poster-a.jpg")
+        self.assertEqual(record["tmdb"]["posters"][0]["original_url"], "https://image.tmdb.org/t/p/original/poster-a.jpg")
+        self.assertEqual(record["identity"]["source"], "google_lens_official_tmdb_movie_id")
         self.assertFalse(record["original"]["folder_name_used_for_matching"])
-        self.assertEqual(
-            record["reverse_image"]["evidence"]["identity_consistency"]["status"],
-            "passed",
-        )
-        self.assertFalse(
-            record["reverse_image"]["evidence"]["identity_consistency"]["folder_name_used_for_search"]
-        )
-        self.assertTrue(
-            record["reverse_image"]["evidence"]["identity_consistency"]["folder_name_used_for_conflict_veto"]
-        )
+        consistency = record["reverse_image"]["evidence"]["identity_consistency"]
+        self.assertEqual(consistency["status"], "not_applied_id_only_mode")
+        self.assertFalse(consistency["folder_name_used_for_search"])
+        self.assertFalse(consistency["folder_name_used_for_conflict_veto"])
 
-    def test_bulado_folder_conflict_blocks_wrong_imdb_to_tmdb_identity(self):
+
+    def test_wrong_folder_label_does_not_override_lens_imdb_id_verified_by_tmdb(self):
         engine = self.make_engine()
         wrong_movie = movie_details(634, "tt0243155", "Bridget Jones's Diary")
         wrong_movie["release_date"] = "2001-04-13"
@@ -418,18 +366,13 @@ class IdOnlyIdentityTests(unittest.TestCase):
             expected_folder="Buladó (2020)",
         )
 
-        self.assertIsNone(candidate)
-        self.assertEqual(match["status"], "review")
-        self.assertEqual(match["candidate_ids"], [634])
-        self.assertEqual(evidence["identity_consistency"]["status"], "conflict")
-        self.assertFalse(evidence["identity_consistency"]["title_match"])
-        self.assertFalse(evidence["identity_consistency"]["year_match"])
-        self.assertEqual(
-            evidence["identity_consistency"]["reason"],
-            "Resolved TMDB identity conflicts with both the source-folder title and release year; automatic match blocked",
-        )
+        self.assertEqual(candidate["id"], 634)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 634)
+        self.assertEqual(evidence["identity_consistency"]["status"], "not_applied_id_only_mode")
 
-    def test_fraction_title_alias_and_year_are_normalized_for_consistency(self):
+
+    def test_localized_folder_label_is_not_used_to_veto_lens_id(self):
         engine = self.make_engine()
         apollo = movie_details(664996, "tt7978758", "Apollo 10½: A Space Age Childhood")
         apollo["release_date"] = "2022-04-01"
@@ -441,16 +384,10 @@ class IdOnlyIdentityTests(unittest.TestCase):
             expected_folder="Apollo 101⁄2 A Space Age Childhood (2022)",
         )
 
-        self.assertIsNotNone(
-            candidate,
-            msg=f"match={match!r}; identity_consistency={evidence.get('identity_consistency')!r}; "
-            f"identity_lookup={evidence.get('tmdb_id_lookup')!r}",
-        )
+        self.assertIsNotNone(candidate)
         self.assertEqual(candidate["id"], 664996)
         self.assertEqual(match["status"], "ready")
-        self.assertEqual(evidence["identity_consistency"]["status"], "passed")
-        self.assertTrue(evidence["identity_consistency"]["title_match"])
-        self.assertTrue(evidence["identity_consistency"]["year_match"])
+        self.assertEqual(evidence["identity_consistency"]["status"], "not_applied_id_only_mode")
 
     def test_reviewer_only_research_is_skipped_by_default_to_keep_batch_fast(self):
         engine = self.make_engine()
@@ -478,7 +415,8 @@ class IdOnlyIdentityTests(unittest.TestCase):
             "disabled_by_configuration",
         )
 
-    def test_lens_failure_does_not_reuse_previous_film_title_search_diagnostics(self):
+
+    def test_lens_failure_keeps_google_search_disabled(self):
         engine = self.make_engine()
         engine.reverse_image.last_lens_diagnostics = {
             "status": "error",
@@ -502,12 +440,10 @@ class IdOnlyIdentityTests(unittest.TestCase):
         })
 
         diagnostics = record["reverse_image"]["latest_query"]["diagnostics"]
-        self.assertEqual(diagnostics["title_search_status"], "skipped_lens_error")
+        self.assertEqual(diagnostics["title_search_status"], "disabled_id_only_mode")
         self.assertEqual(diagnostics["title_search_query_count"], 0)
         self.assertEqual(diagnostics["title_search_hints"], [])
         self.assertEqual(diagnostics["title_search_candidate_domains"], {})
-
-
 
     def test_tmdb_url_diagnostics_count_only_official_movie_destinations(self):
         diagnostics = tmdb_movie_url_diagnostics([
