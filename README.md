@@ -19,7 +19,7 @@ To keep this project free:
 - Do not add a payment card, deposit funds, or activate a paid plan.
 - Do not configure automatic top-ups or any paid balance.
 - HTTP 402 stops the batch without retry. HTTP 429 uses a small bounded backoff; a persistent limit stops the batch safely. Do not add funds.
-- Google Lens is the only image-discovery provider. The engine reads official TMDB movie IDs or IMDb title IDs from Lens results; when Exact Matches has no ID, it also checks Lens Visual Matches.
+- Google Lens is the only image-discovery provider. The engine reads official TMDB movie IDs or IMDb title IDs from Lens results; IMDb title IDs are accepted from the canonical title page or its official `/mediaviewer/rm…/` route (not unrelated subpages such as `/news`). When Exact Matches has no ID, it also checks Lens Visual Matches.
 - TMDB is then queried by identifier only: `/movie/{id}` for a TMDB ID or `/find/{imdb_id}` for an IMDb ID, followed by `/movie/{id}` details verification. No Google Search or TMDB title search is used to establish identity.
 - Optional reviewer-only research from Wikipedia, Wikidata, and TMDB text suggestions is **disabled by default** (`REVIEW_RESEARCH_ENABLED=false`). It adds serial network requests but cannot establish identity or authorize READY; enable it only for manual investigation.
 - AFI Catalog and BFI National Archive are not queried by the ID-only automatic identity path. Any pre-existing catalogue references remain reviewer context only and are never proof of identity.

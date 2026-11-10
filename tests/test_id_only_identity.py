@@ -161,6 +161,14 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(engine.tmdb.find_calls, ["tt0095468"])
         self.assertEqual(engine.tmdb.details_calls, [10754])
 
+    def test_extracts_imdb_id_from_official_media_viewer_url(self):
+        url = "https://www.imdb.com/title/tt0053472/mediaviewer/rm567149056/"
+        self.assertEqual(extract_imdb_ids([{"url": url}]), ["tt0053472"])
+
+    def test_imdb_news_subpages_are_not_accepted_as_title_identity(self):
+        url = "https://www.imdb.com/title/tt0053472/news/"
+        self.assertEqual(extract_imdb_ids([{"url": url}]), [])
+
     def test_official_imdb_id_without_tmdb_movie_match_stays_in_review(self):
         engine = self.make_engine()
         engine.tmdb.find_results["tt0000000"] = {"movie_results": []}

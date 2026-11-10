@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 TMDB_MOVIE_RE = re.compile(r"^/movie/(\d+)(?:[-/]|$)", re.IGNORECASE)
-IMDB_TITLE_RE = re.compile(r"^/title/(tt\d+)/?$", re.IGNORECASE)
+IMDB_TITLE_RE = re.compile(r"^/title/(tt\d+)(?:/mediaviewer(?:/rm\d+)?)?/?$", re.IGNORECASE)
 
 
 def _allowed_host(url: str, root: str) -> bool:
@@ -34,7 +34,7 @@ def tmdb_movie_id_from_url(url: str) -> int | None:
 
 
 def imdb_id_from_url(url: str) -> str | None:
-    """Accept an IMDb title identifier only from an official IMDb title URL."""
+    """Accept official IMDb title pages and their media-viewer URLs, but not other subpages."""
     try:
         parsed = urlparse(str(url or "").strip())
     except ValueError:
