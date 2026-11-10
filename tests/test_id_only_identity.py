@@ -177,7 +177,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(engine.tmdb.details_calls, [])
 
 
-    def test_direct_lens_tmdb_id_takes_priority_over_secondary_imdb_ids(self):
+    def test_direct_lens_tmdb_id_stays_first_priority_when_imdb_is_also_present(self):
         engine = self.make_engine()
         engine.tmdb.find_results["tt0095468"] = {"movie_results": [{"id": 31056}]}
 
@@ -190,8 +190,25 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(match["status"], "ready")
         self.assertEqual(match["tmdb_id"], 10754)
         self.assertEqual(engine.tmdb.details_calls, [10754])
-        self.assertEqual(engine.tmdb.find_calls, [])
-        self.assertEqual(evidence["id_resolution"]["ignored_secondary_lens_imdb_ids"], ["tt0095468"])
+        self.assertEqual(engine.tmdb.find_calls, ["tt0095468"])
+        self.assertEqual(evidence["id_resolution"]["ignored_secondary_lens_imdb_ids"], [])
+
+    def test_lens_imdb_id_fallback_is_used_when_direct_tmdb_id_cannot_be_verified(self):
+        engine = self.make_engine()
+
+        candidate, match, evidence = engine._find_movie([
+            {"url": "https://www.themoviedb.org/movie/99999"},
+            {"url": "https://www.imdb.com/title/tt0095468/"},
+        ])
+
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 10754)
+        self.assertEqual(match["imdb_id"], "tt0095468")
+        self.assertEqual(match["identity_source"], "google_lens_official_imdb_id_via_tmdb_find")
+        self.assertEqual(engine.tmdb.find_calls, ["tt0095468"])
+        self.assertEqual(engine.tmdb.details_calls, [99999, 10754])
+        self.assertEqual(evidence["tmdb_id_lookup"]["status"], "resolved_via_imdb_fallback")
 
     def test_title_only_result_does_not_call_tmdb_text_search(self):
         engine = self.make_engine()
