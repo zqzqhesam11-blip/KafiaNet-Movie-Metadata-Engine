@@ -20,8 +20,9 @@ LENS_TAB = "exact_matches"
 LENS_FALLBACK_TAB = "visual_matches"
 MAX_NORMALIZED_RESULTS = 80
 MAX_TRANSIENT_RETRIES = 2
-MAX_RATE_LIMIT_RETRIES = 1
-MAX_RATE_LIMIT_WAIT_SECONDS = 30
+RATE_LIMIT_BACKOFF_SECONDS = (5, 15, 30)
+MAX_RATE_LIMIT_RETRIES = len(RATE_LIMIT_BACKOFF_SECONDS)
+MAX_RATE_LIMIT_WAIT_SECONDS = 60
 TRANSIENT_HTTP_STATUSES = {500, 502, 503, 504}
 
 
@@ -524,10 +525,7 @@ class BrightDataGoogleLensClient:
 
         if not delays:
             return None
-        delay = max(delays)
-        if delay > MAX_RATE_LIMIT_WAIT_SECONDS:
-            return None
-        return delay
+        return max(delays)
 
     def _post_serp_with_retries(
         self,
@@ -537,10 +535,11 @@ class BrightDataGoogleLensClient:
         parsed_light_header: bool = True,
         response_format: str = "raw",
     ) -> tuple[httpx.Response, Any, int, int]:
-        """POST one SERP request with bounded transport, gateway, and explicit cooldown retries.
+        """POST one SERP request with bounded transport and HTTP 429 backoff.
 
-        Generic 429 responses are not retried. A retry is allowed only when Bright Data
-        supplies Retry-After or its explicit "query recently failed" cooldown message.
+        Explicit Retry-After/cooldown values are honored up to 60 seconds. Generic
+        throttling gets three bounded waits (5, 15, 30 seconds); a continuing 429
+        stops the batch. HTTP 402 credit exhaustion is never retried.
         """
         if response_format not in {"raw", "json"}:
             raise BrightDataAPIError(
@@ -630,7 +629,11 @@ class BrightDataGoogleLensClient:
 
             if effective_status == 429 and rate_limit_retries < MAX_RATE_LIMIT_RETRIES:
                 delay = self._rate_limit_retry_delay(response, payload)
-                if delay is not None:
+                if delay is None:
+                    delay = RATE_LIMIT_BACKOFF_SECONDS[rate_limit_retries]
+                # Never override a provider-supplied long Retry-After with a shorter
+                # local delay. Fall back only when the provider gave no cooldown.
+                if delay <= MAX_RATE_LIMIT_WAIT_SECONDS:
                     rate_limit_retries += 1
                     wait_seconds += delay
                     time.sleep(delay)
