@@ -783,9 +783,6 @@ class MetadataEngine:
         tmdb_id_lookup["imdb_find_errors"] = imdb_find_errors
 
         direct_imdb_set = set(direct_imdb_ids)
-        direct_candidate_tmdb_ids = set(direct_tmdb_ids)
-        for imdb_id in direct_imdb_ids:
-            direct_candidate_tmdb_ids.update(imdb_to_tmdb_ids.get(imdb_id, []))
 
         blocking_imdb_find_errors = [
             row for row in imdb_find_errors
