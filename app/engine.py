@@ -1031,15 +1031,9 @@ class MetadataEngine:
             "imdb_id": selected["imdb_id"],
             "folder_name_used_for_matching": False,
             "reason": (
-                "TMDB movie details confirmed official TMDB and IMDb links returned by the Lens-derived Google search"
-                if has_title_search_tmdb_id and has_title_search_imdb_id
-                else "The exact Google Lens title resolved to one exact TMDB movie and its official details confirmed the same title"
-                if has_lens_title_tmdb_id
-                else "TMDB confirmed the movie ID from an official TMDB link"
-                if has_direct_tmdb_id and not has_imdb_id
-                else "TMDB /find mapped an official IMDb title ID to a movie and movie details confirmed the same IMDb ID"
-                if has_imdb_id and not has_direct_tmdb_id
-                else "TMDB movie details confirmed the official TMDB URL and the IMDb ID resolved through TMDB /find"
+                "TMDB movie details verified the official movie ID returned by Google Lens"
+                if has_direct_tmdb_id
+                else "TMDB /find resolved the IMDb title ID returned by Google Lens and movie details verified the same IMDb ID"
             ),
         }, evidence
 
