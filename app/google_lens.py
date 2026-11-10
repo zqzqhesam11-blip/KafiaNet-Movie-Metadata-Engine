@@ -360,16 +360,18 @@ class BrightDataGoogleLensClient:
             "thumbnail_url",
         }
 
-        def collect_strings(value: Any):
+        def collect_strings(value: Any, depth: int = 0):
+            if depth > 6:
+                return
             if isinstance(value, str):
                 yield value
             elif isinstance(value, list):
-                for child in value[:20]:
-                    yield from collect_strings(child)
+                for child in value[:40]:
+                    yield from collect_strings(child, depth + 1)
             elif isinstance(value, dict):
-                for name in ("url", "link", "href", "src", "target", "original_url"):
-                    if name in value:
-                        yield from collect_strings(value[name])
+                for child in list(value.values())[:40]:
+                    if isinstance(child, (str, list, dict)):
+                        yield from collect_strings(child, depth + 1)
 
         for row in rows[:MAX_NORMALIZED_RESULTS]:
             if not isinstance(row, dict):
