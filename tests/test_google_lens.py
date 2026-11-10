@@ -321,7 +321,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             },
         )
 
-    def test_empty_lens_response_stops_after_two_distinct_formats(self):
+    def test_empty_lens_response_stops_after_two_distinct_formats_per_tab(self):
         response = Mock()
         response.status_code = 200
         response.text = ""
@@ -333,12 +333,16 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             with self.assertRaisesRegex(BrightDataAPIError, "content-length=0"):
                 api.search_by_image_url("https://example.com/poster.jpg")
 
-        self.assertEqual(api.client.post.call_count, 2)
-        self.assertEqual(api.last_lens_diagnostics["attempts"], 2)
+        # Each tab tries parsed_light and then its one documented JSON fallback.
+        self.assertEqual(api.client.post.call_count, 4)
+        self.assertEqual(api.last_lens_diagnostics["attempts"], 4)
         self.assertEqual(api.last_lens_diagnostics["http_status"], 200)
         self.assertEqual(
             api.last_lens_diagnostics["response_modes_attempted"],
-            ["parsed_light", "brd_json"],
+            {
+                "exact_matches": ["parsed_light", "brd_json"],
+                "visual_matches": ["parsed_light", "brd_json"],
+            },
         )
 
     def test_unparsed_light_json_uses_full_json_format_once(self):
