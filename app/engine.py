@@ -2059,6 +2059,30 @@ class MetadataEngine:
                 lens_error = safe_log_detail(
                     f"{first_error.get('type', 'ProviderError')}: {first_error.get('message') or first_error.get('error')}"
                 )
+            response_modes = lens_diag.get("response_modes_attempted") or {}
+            if isinstance(response_modes, dict):
+                response_modes_text = ",".join(
+                    f"{tab}:{'+'.join(str(mode) for mode in (modes or []))}"
+                    for tab, modes in response_modes.items()
+                ) or "none"
+            elif isinstance(response_modes, (list, tuple)):
+                response_modes_text = "+".join(str(mode) for mode in response_modes) or "none"
+            else:
+                response_modes_text = str(response_modes)
+            response_headers = lens_diag.get("response_headers") or {}
+            safe_header_keys = (
+                "content-type",
+                "content-length",
+                "x-brd-error-code",
+                "x-brd-err-code",
+                "x-brd-rate-limit",
+                "x-brd-rate-limit-period-ms",
+            )
+            response_headers_text = ",".join(
+                f"{key}={response_headers[key]}"
+                for key in safe_header_keys
+                if isinstance(response_headers, dict) and response_headers.get(key)
+            ) or "none"
             tmdb_lookup = identity_evidence.get("tmdb_id_lookup") or {}
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
@@ -2067,6 +2091,8 @@ class MetadataEngine:
                 f"reverse_image={latest_query_status} evidence={reverse_image_source} "
                 f"lens_tab={lens_diag.get('lens_tab', 'unknown')} "
                 f"lens_data_format={lens_diag.get('data_format', 'unknown')} "
+                f"lens_modes='{safe_log_detail(response_modes_text, 150)}' "
+                f"lens_headers='{safe_log_detail(response_headers_text, 180)}' "
                 f"lens_http={lens_diag.get('http_status', 'none')} "
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
