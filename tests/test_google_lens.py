@@ -176,6 +176,43 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         )
         self.assertNotIn("PRIVATE", repr(api.last_result_url_diagnostics))
 
+    def test_exact_matches_provider_error_still_attempts_visual_matches(self):
+        exact_error = Mock()
+        exact_error.status_code = 200
+        exact_error.text = "reject element"
+        exact_error.headers = {"x-brd-error-code": "reject_element"}
+        exact_error.json.side_effect = ValueError("not JSON")
+
+        visual_response = Mock()
+        visual_response.status_code = 200
+        visual_response.text = '{"visual_matches":[{"title":"Visual result","link":"https://www.imdb.com/title/tt0053472/"}]}'
+        visual_response.headers = {"content-type": "application/json"}
+        visual_response.json.return_value = {
+            "visual_matches": [{
+                "title": "Visual result",
+                "link": "https://www.imdb.com/title/tt0053472/",
+            }]
+        }
+
+        api = self.make_client()
+        api.client.post.side_effect = [exact_error, exact_error, visual_response]
+
+        rows = api.search_by_image_url("https://example.com/poster.jpg")
+
+        self.assertEqual(api.client.post.call_count, 3)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["lens_tab"], "visual_matches")
+        self.assertEqual(rows[0]["url"], "https://www.imdb.com/title/tt0053472/")
+        diagnostics = api.last_lens_diagnostics
+        self.assertEqual(diagnostics["status"], "partial_error")
+        self.assertEqual(
+            diagnostics["lens_tabs_attempted"],
+            ["exact_matches", "visual_matches"],
+        )
+        self.assertEqual(diagnostics["lens_tab_diagnostics"]["exact_matches"]["status"], "error")
+        self.assertEqual(diagnostics["visual_matches_result_count"], 1)
+        self.assertIn("BrightDataAPIError", diagnostics["lens_tab_diagnostics"]["exact_matches"]["error"])
+
     def test_lens_image_search_uses_documented_parameters_only(self):
         api = self.make_client({"exact_matches": []})
 
