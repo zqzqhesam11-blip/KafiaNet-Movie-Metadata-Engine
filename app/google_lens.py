@@ -1615,6 +1615,9 @@ class BrightDataGoogleLensClient:
                 name: list(diag.get("response_modes_attempted") or [])
                 for name, diag in tabs.items()
             },
+            "response_headers": dict(
+                tabs.get(LENS_FALLBACK_TAB, tabs[LENS_TAB]).get("response_headers") or {}
+            ),
             "attempts": attempts,
             "rate_limit_retries": sum(
                 int(item.get("rate_limit_retries") or 0) for item in tabs.values()
