@@ -287,9 +287,23 @@ class BrightDataGoogleLensClient:
         return prepared
 
     @staticmethod
-    def _lens_request_url(image_url: str, tab: str = LENS_TAB) -> str:
+    def _lens_request_url(
+        image_url: str,
+        tab: str = LENS_TAB,
+        response_mode: str = "parsed_light",
+    ) -> str:
+        """Build one Lens URL with exactly one Bright Data JSON selector.
+
+        Bright Data documents two independent ways to request parsed results:
+        the x-unblock-data-format header (preferred for Lens parsed_light), or
+        the brd_json URL parameter. Do not send both selectors in one request.
+        """
         if tab not in {LENS_TAB, LENS_FALLBACK_TAB}:
             raise BrightDataAPIError(f"Unsupported Google Lens tab: {tab}")
+        if response_mode not in {"parsed_light", "brd_json"}:
+            raise BrightDataAPIError(
+                f"Unsupported Google Lens response mode: {response_mode}"
+            )
         parsed = urlparse(str(image_url or "").strip())
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
             raise BrightDataAPIError(
@@ -298,9 +312,10 @@ class BrightDataGoogleLensClient:
         query = {
             "url": image_url,
             "hl": "en",
-            "brd_json": "1",
             "brd_lens": tab,
         }
+        if response_mode == "brd_json":
+            query["brd_json"] = "1"
         return f"{GOOGLE_LENS_URL}?{urlencode(query)}"
 
     @staticmethod
@@ -669,12 +684,15 @@ class BrightDataGoogleLensClient:
         *,
         parsed_light_header: bool = True,
         response_format: str = "raw",
+        retry_empty_success: bool = True,
     ) -> tuple[httpx.Response, Any, int, int]:
         """POST one SERP request with bounded transport and HTTP 429 backoff.
 
-        Explicit Retry-After/cooldown values are honored up to 60 seconds. Generic
-        throttling gets three bounded waits (5, 15, 30 seconds); a continuing 429
-        stops the batch. HTTP 402 credit exhaustion is never retried.
+        Empty HTTP-200 bodies can be retried for ordinary requests. Google Lens
+        disables identical empty-body retries and instead makes one controlled
+        request using Bright Data's alternative documented JSON selector.
+        Explicit Retry-After/cooldown values are honored up to 60 seconds.
+        HTTP 402 credit exhaustion is never retried.
         """
         if response_format not in {"raw", "json"}:
             raise BrightDataAPIError(
@@ -755,7 +773,10 @@ class BrightDataGoogleLensClient:
             )
 
             if (
-                (effective_status in TRANSIENT_HTTP_STATUSES or empty_success_body)
+                (
+                    effective_status in TRANSIENT_HTTP_STATUSES
+                    or (empty_success_body and retry_empty_success)
+                )
                 and transient_retries < MAX_TRANSIENT_RETRIES
             ):
                 time.sleep(min(2 ** transient_retries, 2))
@@ -774,10 +795,36 @@ class BrightDataGoogleLensClient:
                     time.sleep(delay)
                     continue
 
+            headers = getattr(response, "headers", {}) or {}
+            safe_header_names = (
+                "content-type",
+                "content-length",
+                "x-brd-error-code",
+                "x-brd-error",
+                "x-brd-err-code",
+                "x-brd-err-msg",
+                "x-brd-rate-limit",
+                "x-brd-rate-limit-period-ms",
+                "x-response-id",
+            )
+            safe_response_headers = {}
+            for name in safe_header_names:
+                try:
+                    value = headers.get(name) if hasattr(headers, "get") else None
+                except Exception:
+                    value = None
+                if value is not None and str(value).strip():
+                    safe_response_headers[name] = str(value).strip()[:180]
+
+            response_text = str(getattr(response, "text", "") or "")
             self.last_request_diagnostics.update({
                 "attempts": attempt,
                 "rate_limit_retries": rate_limit_retries,
                 "rate_limit_wait_seconds": wait_seconds,
+                "http_status": effective_status,
+                "response_headers": safe_response_headers,
+                "response_body_empty": not bool(response_text.strip()),
+                "response_body_bytes": len(response_text.encode("utf-8", errors="replace")),
             })
             return response, payload, effective_status, attempt
 
@@ -1242,16 +1289,48 @@ class BrightDataGoogleLensClient:
         image_url: str,
         tab: str,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-        """Fetch and normalize one documented Google Lens tab."""
-        target_url = self._lens_request_url(image_url, tab=tab)
-        response, payload, effective_status, attempts = self._post_serp_with_retries(
-            target_url,
-            f"Google Lens {tab} image search",
-        )
-        body = getattr(response, "text", "") or ""
-        if effective_status < 200 or effective_status >= 300:
+        """Fetch one Lens tab, with a single format fallback for empty/unparsed 200s.
+
+        Primary: Bright Data's documented Lens header
+            x-unblock-data-format: parsed_light
+        Fallback: Bright Data's documented brd_json=1 URL parameter.
+        Each request uses exactly one selector. We do not spend two extra
+        requests repeating the same empty request format.
+        """
+        response_modes: list[str] = []
+        request_diagnostics: list[dict[str, Any]] = []
+        total_attempts = 0
+
+        def request_mode(mode: str):
+            nonlocal total_attempts
+            target_url = self._lens_request_url(
+                image_url, tab=tab, response_mode=mode
+            )
+            response, payload, effective_status, attempts = self._post_serp_with_retries(
+                target_url,
+                f"Google Lens {tab} image search ({mode})",
+                parsed_light_header=(mode == "parsed_light"),
+                retry_empty_success=False,
+            )
+            total_attempts += int(attempts or 0)
+            response_modes.append(mode)
+            request_diagnostics.append(
+                dict(getattr(self, "last_request_diagnostics", {}) or {})
+            )
+            return response, payload, effective_status
+
+        def raise_for_http_status(
+            effective_status: int,
+            payload: Any,
+            response: httpx.Response,
+        ) -> None:
+            if 200 <= effective_status < 300:
+                return
+            body = getattr(response, "text", "") or ""
             error_payload = payload.get("body") if (
-                isinstance(payload, dict) and "status_code" in payload and "body" in payload
+                isinstance(payload, dict)
+                and "status_code" in payload
+                and "body" in payload
             ) else payload
             message = self._http_error(
                 effective_status,
@@ -1261,47 +1340,102 @@ class BrightDataGoogleLensClient:
                 raise BrightDataQuotaError(effective_status, message)
             raise BrightDataAPIError(message)
 
-        if payload is None:
-            headers = getattr(response, "headers", {}) or {}
-            content_type = headers.get("content-type", "unknown") if hasattr(headers, "get") else "unknown"
-            content_length = headers.get("content-length", "unknown") if hasattr(headers, "get") else "unknown"
-            raise BrightDataAPIError(
-                "Bright Data returned an empty or non-JSON response "
-                f"(HTTP {effective_status}, content-type={content_type}, "
-                f"content-length={content_length})"
-            )
-
-        if isinstance(payload, dict) and "status_code" in payload and "body" in payload:
-            inner_body = payload.get("body")
-            if not str(inner_body or "").strip():
+        def reject_provider_error(payload: Any) -> None:
+            if isinstance(payload, dict) and any(
+                payload.get(key) for key in ("error", "errors")
+            ):
+                detail = self._error_detail(payload)
                 raise BrightDataAPIError(
-                    "Bright Data API envelope was received but its body is empty "
-                    f"(inner HTTP {effective_status}); no Google Lens results were delivered"
+                    f"Bright Data returned an API error: {detail or 'unknown provider error'}"
                 )
 
-        if isinstance(payload, dict) and any(payload.get(key) for key in ("error", "errors")):
-            detail = self._error_detail(payload)
-            raise BrightDataAPIError(
-                f"Bright Data returned an API error: {detail or 'unknown provider error'}"
-            )
+        def parse_rows(payload: Any) -> list[dict[str, Any]] | None:
+            if payload is None:
+                return None
+            if (
+                isinstance(payload, dict)
+                and "status_code" in payload
+                and "body" in payload
+                and not str(payload.get("body") or "").strip()
+            ):
+                return None
+            return self._rows_from_payload(payload)
 
-        rows = self._rows_from_payload(payload)
+        # Attempt 1: the Lens-specific parsed_light response documented by
+        # Bright Data. Do not also append brd_json=1 to this URL.
+        response, payload, effective_status = request_mode("parsed_light")
+        raise_for_http_status(effective_status, payload, response)
+        reject_provider_error(payload)
+        rows = parse_rows(payload)
+        selected_mode = "parsed_light"
+
+        # An empty or unrecognized HTTP-200 body is not a successful empty
+        # search. Try one alternate, documented full-JSON selector exactly once.
         if rows is None:
-            shape = self._payload_shape(payload)
-            raise BrightDataAPIError(
-                "Bright Data returned JSON, but no recognized Google Lens result list was present; "
-                + shape
-            )
+            response, payload, effective_status = request_mode("brd_json")
+            raise_for_http_status(effective_status, payload, response)
+            reject_provider_error(payload)
+            rows = parse_rows(payload)
+            selected_mode = "brd_json"
+
+        # Preserve aggregate request diagnostics even when the provider failed
+        # both response modes, so the CLI can show the real HTTP status/headers.
+        last_request = request_diagnostics[-1] if request_diagnostics else {}
+        aggregate_diagnostics = {
+            "attempts": total_attempts,
+            "rate_limit_retries": sum(
+                int(item.get("rate_limit_retries") or 0)
+                for item in request_diagnostics
+            ),
+            "rate_limit_wait_seconds": sum(
+                int(item.get("rate_limit_wait_seconds") or 0)
+                for item in request_diagnostics
+            ),
+            "http_status": last_request.get("http_status", effective_status),
+            "response_headers": dict(last_request.get("response_headers") or {}),
+            "response_body_empty": last_request.get("response_body_empty"),
+            "response_body_bytes": last_request.get("response_body_bytes"),
+            "response_modes_attempted": list(response_modes),
+            "data_format": "parsed_light" if selected_mode == "parsed_light" else "json",
+        }
+        self.last_request_diagnostics = aggregate_diagnostics
+
+        if rows is None:
+            if payload is None or (
+                isinstance(payload, dict)
+                and "status_code" in payload
+                and "body" in payload
+                and not str(payload.get("body") or "").strip()
+            ):
+                details = (
+                    f"HTTP {aggregate_diagnostics.get('http_status')}, "
+                    f"headers={aggregate_diagnostics.get('response_headers') or 'none'}, "
+                    f"body_bytes={aggregate_diagnostics.get('response_body_bytes')}"
+                )
+                message = (
+                    "Bright Data returned an empty/non-JSON Google Lens response "
+                    f"after trying parsed_light and brd_json once each ({details})"
+                )
+            else:
+                message = (
+                    "Bright Data returned JSON, but no recognized Google Lens result list "
+                    "was present after trying parsed_light and brd_json; "
+                    + self._payload_shape(payload)
+                )
+            raise BrightDataAPIError(message)
 
         normalized = self._normalize_matches(rows)
-        request_diagnostics = dict(getattr(self, "last_request_diagnostics", {}) or {})
         tab_diagnostics = {
             "status": "ok" if normalized else "no_matches",
-            "http_status": effective_status,
-            "attempts": attempts,
+            "http_status": aggregate_diagnostics["http_status"],
+            "attempts": total_attempts,
             "result_count": len(normalized),
             "raw_result_count": len(rows),
-            **request_diagnostics,
+            "rate_limit_retries": aggregate_diagnostics["rate_limit_retries"],
+            "rate_limit_wait_seconds": aggregate_diagnostics["rate_limit_wait_seconds"],
+            "data_format": aggregate_diagnostics["data_format"],
+            "response_modes_attempted": list(response_modes),
+            "response_headers": aggregate_diagnostics["response_headers"],
             **self._raw_result_diagnostics(rows),
         }
         return normalized, rows, tab_diagnostics
@@ -1360,6 +1494,10 @@ class BrightDataGoogleLensClient:
                         **request_diag,
                     }
                 },
+                "http_status": request_diag.get("http_status"),
+                "data_format": request_diag.get("data_format", "parsed_light"),
+                "response_modes_attempted": request_diag.get("response_modes_attempted", []),
+                "response_headers": request_diag.get("response_headers", {}),
                 "attempts": request_diag.get("attempts", 1),
                 "rate_limit_retries": request_diag.get("rate_limit_retries", 0),
                 "rate_limit_wait_seconds": request_diag.get("rate_limit_wait_seconds", 0),
@@ -1468,6 +1606,11 @@ class BrightDataGoogleLensClient:
             "lens_tabs_attempted": list(tabs),
             "lens_tab_diagnostics": tabs,
             "http_status": tabs.get(LENS_FALLBACK_TAB, tabs[LENS_TAB]).get("http_status"),
+            "data_format": tabs.get(LENS_FALLBACK_TAB, tabs[LENS_TAB]).get("data_format", "parsed_light"),
+            "response_modes_attempted": {
+                name: list(diag.get("response_modes_attempted") or [])
+                for name, diag in tabs.items()
+            },
             "attempts": attempts,
             "rate_limit_retries": sum(
                 int(item.get("rate_limit_retries") or 0) for item in tabs.values()
