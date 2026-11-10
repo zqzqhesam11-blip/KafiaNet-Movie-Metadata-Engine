@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 TMDB_MOVIE_RE = re.compile(r"^/movie/(\d+)(?:[-/]|$)", re.IGNORECASE)
-IMDB_TITLE_RE = re.compile(r"^/title/(tt\d+)(?:/|$)", re.IGNORECASE)
+IMDB_TITLE_RE = re.compile(r"^/title/(tt\d+)/?$", re.IGNORECASE)
 
 
 def _allowed_host(url: str, root: str) -> bool:
