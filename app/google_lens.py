@@ -6,11 +6,17 @@ import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import unquote, urlencode, urlparse
+from urllib.parse import unquote, urlencode, urljoin, urlparse, parse_qs
 
 import httpx
 
-from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, _resolved_destination_url
+from app.image_evidence import (
+    extract_imdb_ids,
+    extract_tmdb_movie_ids,
+    imdb_id_from_url,
+    tmdb_movie_id_from_url,
+    _resolved_destination_url,
+)
 
 
 BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
@@ -19,6 +25,8 @@ GOOGLE_SEARCH_URL = "https://www.google.com/search"
 LENS_TAB = "exact_matches"
 LENS_FALLBACK_TAB = "visual_matches"
 MAX_NORMALIZED_RESULTS = 80
+MAX_GOOGLE_GOTO_RESOLUTIONS = 3
+GOOGLE_GOTO_TIMEOUT_SECONDS = 8.0
 MAX_TRANSIENT_RETRIES = 2
 RATE_LIMIT_BACKOFF_SECONDS = (5, 15, 30)
 MAX_RATE_LIMIT_RETRIES = len(RATE_LIMIT_BACKOFF_SECONDS)
@@ -57,40 +65,129 @@ class BrightDataGoogleLensClient:
             },
             timeout=max(15.0, float(timeout)),
         )
+        # Use a separate unauthenticated client for Google redirects. Never send
+        # the Bright Data bearer token to Google or follow redirects automatically.
+        self.redirect_client = httpx.Client(
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/130.0.0.0 Safari/537.36"
+                ),
+            },
+            timeout=GOOGLE_GOTO_TIMEOUT_SECONDS,
+            follow_redirects=False,
+        )
+        self.last_result_url_diagnostics: dict[str, Any] = {}
         self.last_lens_diagnostics: dict[str, Any] = {}
         self.last_official_search_diagnostics: dict[str, Any] = {}
 
     def close(self) -> None:
         self.client.close()
+        redirect_client = getattr(self, "redirect_client", None)
+        if redirect_client is not None:
+            redirect_client.close()
 
     @staticmethod
     def _is_google_goto_url(value: str) -> bool:
+        """Recognize only HTTPS Google /goto URLs carrying an opaque url token."""
         try:
             parsed = urlparse(str(value or "").strip())
             host = (parsed.hostname or "").casefold().rstrip(".")
+            port = parsed.port
+            query = parse_qs(parsed.query)
         except ValueError:
             return False
         return (
             parsed.scheme == "https"
-            and (host == "google.com" or host.endswith(".google.com"))
+            and host in {"google.com", "www.google.com", "lens.google.com"}
+            and port in {None, 443}
             and parsed.path.rstrip("/") == "/goto"
+            and bool(str((query.get("url") or [""])[0]).strip())
         )
 
-    def resolve_result_urls(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Keep direct page URLs and quarantine undocumented Google /goto wrappers.
+    @staticmethod
+    def _is_official_movie_destination(value: str) -> bool:
+        """Only retain resolved Google redirects that identify an official movie page."""
+        return bool(
+            tmdb_movie_id_from_url(value) is not None
+            or imdb_id_from_url(value) is not None
+        )
 
-        Bright Data documents parsed Lens results, but Google does not publish a
-        /goto resolution API. In our live run every Lens /goto returned HTTP 404
-        for both HEAD and GET, without Location. Do not repeat those requests or
-        treat wrapper URLs as movie identity. Only direct HTTP(S) result URLs are
-        eligible for official IMDb/TMDB identifier extraction.
+    def _resolve_one_google_goto(self, value: str) -> tuple[str | None, int | None, str]:
+        """Resolve one opaque Google token from its HTTP Location header only.
+
+        No protobuf/base64 decoding, HTML scraping, JavaScript execution, or
+        automatic redirect following is used. An untrusted final host is rejected.
+        """
+        if not self._is_google_goto_url(value):
+            return None, None, "not_google_goto"
+        client = getattr(self, "redirect_client", None)
+        if client is None or not callable(getattr(client, "get", None)):
+            return None, None, "resolver_unavailable"
+        try:
+            response = client.get(
+                value,
+                follow_redirects=False,
+                timeout=GOOGLE_GOTO_TIMEOUT_SECONDS,
+            )
+            status = int(getattr(response, "status_code", 0) or 0)
+            headers = getattr(response, "headers", {}) or {}
+            location = headers.get("location") if hasattr(headers, "get") else None
+            if status in {301, 302, 303, 307, 308} and location:
+                destination = urljoin(value, str(location).strip())
+                # Google sometimes places a plain /url wrapper in Location.
+                destination = _resolved_destination_url(destination)
+                try:
+                    parsed = urlparse(destination)
+                except ValueError:
+                    return None, status, "invalid_location"
+                if parsed.scheme != "https" or not parsed.netloc:
+                    return None, status, "non_https_location"
+                if not self._is_official_movie_destination(destination):
+                    return None, status, "non_official_destination"
+                return destination, status, "resolved"
+            if status in {401, 403, 429}:
+                return None, status, "google_rate_limited_or_blocked"
+            if status == 404:
+                return None, status, "google_goto_not_found"
+            if 200 <= status < 300:
+                return None, status, "no_redirect_interstitial_or_page"
+            return None, status, "unexpected_http_status"
+        except (httpx.RequestError, ValueError, TypeError) as exc:
+            return None, None, f"request_error_{type(exc).__name__}"
+        except Exception as exc:
+            # Keep the batch alive for one bad redirect; diagnostics expose only
+            # the exception class, never the signed Google token or response body.
+            return None, None, f"request_error_{type(exc).__name__}"
+
+    def resolve_result_urls(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Resolve at most three Lens /goto links per tab, keeping only safe destinations.
+
+        Direct result URLs are preserved. Opaque /goto tokens are requested with
+        GET and follow_redirects=False; only an HTTPS IMDb/TMDB Location is added.
+        Requests are sequential and stop on a block/interstitial response to avoid
+        triggering Google's per-results-page redirect throttling.
         """
         if not isinstance(getattr(self, "last_lens_diagnostics", None), dict):
             self.last_lens_diagnostics = {}
 
         prepared = [dict(item) for item in (results or []) if isinstance(item, dict)]
-        goto_skipped = 0
-        direct_urls_kept = 0
+        stats: dict[str, Any] = {
+            "google_goto_candidates": 0,
+            "google_goto_resolved": 0,
+            "google_goto_failed": 0,
+            "google_goto_skipped": 0,
+            "google_goto_direct_urls_kept": 0,
+            "google_goto_http_statuses": {},
+            "google_goto_methods": {},
+            "google_goto_error_kinds": {},
+            "google_goto_error_samples": [],
+            "google_goto_resolution_limit": MAX_GOOGLE_GOTO_RESOLUTIONS,
+        }
+        attempted = 0
+        stop_for_block = False
 
         for item in prepared:
             candidates: list[str] = []
@@ -108,7 +205,11 @@ class BrightDataGoogleLensClient:
                     candidates.append(value.strip())
 
             unique_candidates = list(dict.fromkeys(candidates))
-            direct_destinations: list[str] = []
+            safe_destinations: list[str] = []
+            direct_url_count = 0
+            saw_goto = False
+            row_status = None
+
             for candidate in unique_candidates:
                 try:
                     parsed = urlparse(candidate)
@@ -116,39 +217,73 @@ class BrightDataGoogleLensClient:
                     continue
                 if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                     continue
-                if self._is_google_goto_url(candidate):
-                    goto_skipped += 1
-                    continue
-                direct_destinations.append(candidate)
 
-            direct_destinations = list(dict.fromkeys(direct_destinations))
-            direct_urls_kept += len(direct_destinations)
-            item["url_candidates"] = unique_candidates
-            item["resolved_urls"] = direct_destinations
-            item["resolved_url"] = direct_destinations[0] if direct_destinations else ""
-            if any(self._is_google_goto_url(value) for value in unique_candidates):
-                item["url_resolution_status"] = (
-                    "direct_urls_kept_goto_skipped"
-                    if direct_destinations
-                    else "google_goto_skipped_no_documented_destination"
-                )
+                if self._is_google_goto_url(candidate):
+                    saw_goto = True
+                    stats["google_goto_candidates"] += 1
+                    if attempted >= MAX_GOOGLE_GOTO_RESOLUTIONS or stop_for_block:
+                        stats["google_goto_skipped"] += 1
+                        row_status = "google_goto_resolution_limit_or_block"
+                        continue
+                    attempted += 1
+                    stats["google_goto_methods"]["GET"] = (
+                        stats["google_goto_methods"].get("GET", 0) + 1
+                    )
+                    destination, status, outcome = self._resolve_one_google_goto(candidate)
+                    if status is not None:
+                        key = str(status)
+                        stats["google_goto_http_statuses"][key] = (
+                            stats["google_goto_http_statuses"].get(key, 0) + 1
+                        )
+                    if destination:
+                        if destination not in safe_destinations:
+                            safe_destinations.append(destination)
+                        stats["google_goto_resolved"] += 1
+                        row_status = "google_goto_resolved"
+                    else:
+                        stats["google_goto_failed"] += 1
+                        row_status = outcome
+                        stats["google_goto_error_kinds"][outcome] = (
+                            stats["google_goto_error_kinds"].get(outcome, 0) + 1
+                        )
+                        # A 200 response without a Location is commonly a
+                        # verification/interstitial page; do not hammer this SERP.
+                        if (
+                            outcome in {
+                                "google_rate_limited_or_blocked",
+                                "no_redirect_interstitial_or_page",
+                                "resolver_unavailable",
+                            }
+                            or outcome.startswith("request_error_")
+                            or (status is not None and status >= 500)
+                        ):
+                            stop_for_block = True
+                    continue
+
+                if candidate not in safe_destinations:
+                    safe_destinations.append(candidate)
+                    direct_url_count += 1
+
+            safe_destinations = list(dict.fromkeys(safe_destinations))
+            stats["google_goto_direct_urls_kept"] += direct_url_count
+            item["url_candidates"] = [
+                value for value in safe_destinations
+                if isinstance(value, str) and value.strip()
+            ]
+            item["resolved_urls"] = safe_destinations
+            item["resolved_url"] = safe_destinations[0] if safe_destinations else ""
+            # Remove the opaque token from persisted Lens evidence. Only the
+            # verified destination (or an empty URL) is retained.
+            item["url"] = safe_destinations[0] if safe_destinations else ""
+            if saw_goto:
+                item["url_resolution_status"] = row_status or "google_goto_unresolved"
             else:
                 item.pop("url_resolution_status", None)
-            # Legacy error fields from earlier resolver versions must not survive.
             item.pop("url_resolution_error", None)
             item.pop("url_resolution_errors", None)
 
-        self.last_lens_diagnostics.update({
-            "google_goto_candidates": goto_skipped,
-            "google_goto_resolved": 0,
-            "google_goto_failed": 0,
-            "google_goto_skipped": goto_skipped,
-            "google_goto_direct_urls_kept": direct_urls_kept,
-            "google_goto_http_statuses": {},
-            "google_goto_methods": {},
-            "google_goto_error_kinds": {},
-            "google_goto_error_samples": [],
-        })
+        self.last_result_url_diagnostics = stats
+        self.last_lens_diagnostics.update(stats)
         return prepared
 
     @staticmethod
@@ -1172,11 +1307,11 @@ class BrightDataGoogleLensClient:
         return normalized, rows, tab_diagnostics
 
     def search_by_image_url(self, image_url: str) -> list[dict[str, Any]]:
-        """Search Google Lens exact matches, then visual matches when no official ID is found.
+        """Search Lens exact matches, then visual matches if no verified ID is exposed.
 
-        Captions are not used to create or infer identifiers. The engine accepts
-        only official TMDB/IMDb IDs surfaced by Lens and verifies them through TMDB.
-        Opaque /goto wrappers remain quarantined and are never parsed as IDs.
+        Captions never create identifiers. Opaque /goto tokens are resolved only
+        through a bounded, unauthenticated GET redirect check; final destinations
+        must be HTTPS IMDb/TMDB movie pages before TMDB verification.
         """
         self.last_official_search_diagnostics = {
             "status": "not_run",
@@ -1208,9 +1343,12 @@ class BrightDataGoogleLensClient:
             "error": None,
         }
 
+        self.last_result_url_diagnostics = {}
         try:
             exact_results, exact_rows, exact_diag = self._request_lens_tab(image_url, LENS_TAB)
             exact_results = [{**row, "lens_tab": LENS_TAB} for row in exact_results]
+            exact_results = self.resolve_result_urls(exact_results)
+            exact_url_diag = dict(self.last_result_url_diagnostics)
         except BrightDataAPIError as exc:
             request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
             self.last_lens_diagnostics.update({
@@ -1234,6 +1372,7 @@ class BrightDataGoogleLensClient:
         combined = list(exact_results)
         exact_ids = extract_tmdb_movie_ids(exact_results) or extract_imdb_ids(exact_results)
         visual_results: list[dict[str, Any]] = []
+        visual_url_diag: dict[str, Any] = {}
         visual_fallback_skipped_reason = (
             "exact_matches_has_official_id" if exact_ids else None
         )
@@ -1246,6 +1385,8 @@ class BrightDataGoogleLensClient:
                     image_url, LENS_FALLBACK_TAB
                 )
                 visual_results = [{**row, "lens_tab": LENS_FALLBACK_TAB} for row in visual_results]
+                visual_results = self.resolve_result_urls(visual_results)
+                visual_url_diag = dict(self.last_result_url_diagnostics)
                 tabs[LENS_FALLBACK_TAB] = visual_diag
                 attempts += int(visual_diag.get("attempts") or 0)
                 seen = {
@@ -1267,6 +1408,7 @@ class BrightDataGoogleLensClient:
                         seen.add(key)
             except BrightDataQuotaError as exc:
                 request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
+                visual_url_diag = {}
                 tabs[LENS_FALLBACK_TAB] = {
                     "status": "quota_error",
                     **request_diag,
@@ -1289,6 +1431,7 @@ class BrightDataGoogleLensClient:
             except BrightDataAPIError as exc:
                 request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
                 attempts += int(request_diag.get("attempts") or 0)
+                visual_url_diag = {}
                 tabs[LENS_FALLBACK_TAB] = {
                     "status": "error",
                     **request_diag,
@@ -1302,7 +1445,24 @@ class BrightDataGoogleLensClient:
             for key, value in (diag.get("raw_link_paths") or {}).items():
                 raw_paths[key] = raw_paths.get(key, 0) + int(value or 0)
 
+        goto_diagnostics = {}
+        for name in (
+            "google_goto_candidates", "google_goto_resolved", "google_goto_failed",
+            "google_goto_skipped", "google_goto_direct_urls_kept",
+            "google_goto_resolution_limit",
+        ):
+            values = [exact_url_diag.get(name, 0), visual_url_diag.get(name, 0)]
+            goto_diagnostics[name] = max(values) if name == "google_goto_resolution_limit" else sum(values)
+        for name in ("google_goto_http_statuses", "google_goto_methods", "google_goto_error_kinds"):
+            merged = {}
+            for source in (exact_url_diag, visual_url_diag):
+                for key, value in (source.get(name) or {}).items():
+                    merged[key] = merged.get(key, 0) + int(value or 0)
+            goto_diagnostics[name] = merged
+        goto_diagnostics["google_goto_error_samples"] = []
+
         self.last_lens_diagnostics.update({
+            **goto_diagnostics,
             "status": "ok" if combined else "no_matches",
             "lens_tab": "+".join(tabs),
             "lens_tabs_attempted": list(tabs),
