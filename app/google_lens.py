@@ -352,6 +352,7 @@ class BrightDataGoogleLensClient:
         field_names: set[str] = set()
         field_types: dict[str, set[str]] = {}
         path_counts: dict[str, int] = {}
+        path_counts_by_field: dict[str, dict[str, int]] = {}
         url_fields = {
             "link", "url", "page_url", "website", "source_url", "landing_page",
             "result_url", "destination_url", "target_url", "href", "imgrefurl",
@@ -359,16 +360,18 @@ class BrightDataGoogleLensClient:
             "thumbnail_url",
         }
 
-        def collect_strings(value: Any):
+        def collect_strings(value: Any, depth: int = 0):
+            if depth > 6:
+                return
             if isinstance(value, str):
                 yield value
             elif isinstance(value, list):
-                for child in value[:20]:
-                    yield from collect_strings(child)
+                for child in value[:40]:
+                    yield from collect_strings(child, depth + 1)
             elif isinstance(value, dict):
-                for name in ("url", "link", "href", "src", "target", "original_url"):
-                    if name in value:
-                        yield from collect_strings(value[name])
+                for child in list(value.values())[:40]:
+                    if isinstance(child, (str, list, dict)):
+                        yield from collect_strings(child, depth + 1)
 
         for row in rows[:MAX_NORMALIZED_RESULTS]:
             if not isinstance(row, dict):
@@ -396,10 +399,18 @@ class BrightDataGoogleLensClient:
                     path = parsed.path.rstrip("/") or "/"
                     label = f"{host}{path}"
                     path_counts[label] = path_counts.get(label, 0) + 1
+                    field_counts = path_counts_by_field.setdefault(name.casefold(), {})
+                    field_counts[label] = field_counts.get(label, 0) + 1
 
         top_paths = dict(
             sorted(path_counts.items(), key=lambda item: (-item[1], item[0]))[:12]
         )
+        top_paths_by_field = {
+            field: dict(
+                sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+            )
+            for field, counts in sorted(path_counts_by_field.items())
+        }
         compact_types = {
             key: "/".join(sorted(types))
             for key, types in sorted(field_types.items())[:30]
@@ -408,6 +419,7 @@ class BrightDataGoogleLensClient:
             "raw_result_fields": sorted(field_names)[:40],
             "raw_result_field_types": compact_types,
             "raw_link_paths": top_paths,
+            "raw_link_paths_by_field": top_paths_by_field,
         }
 
     @staticmethod
@@ -533,28 +545,64 @@ class BrightDataGoogleLensClient:
 
     @classmethod
     def _all_urls(cls, item: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
-        """Collect all distinct page URLs exposed by a search result."""
+        """Collect page URLs, including nested Bright Data link objects.
+
+        Bright Data's Lens fields are primarily scalar, but integrations may
+        wrap a link in one or more objects/lists. Walk only the designated page
+        URL fields, bound traversal, and explicitly ignore image/thumbnail
+        branches so image CDN links are never mistaken for movie-page links.
+        """
         values: list[str] = []
         seen: set[str] = set()
-        for key in keys:
-            value = item.get(key)
-            candidates = value if isinstance(value, list) else [value]
-            for candidate_value in candidates:
-                if isinstance(candidate_value, dict):
-                    candidate_value = (
-                        candidate_value.get("url")
-                        or candidate_value.get("link")
-                        or candidate_value.get("href")
-                        or candidate_value.get("src")
-                        or candidate_value.get("target")
-                    )
-                if not isinstance(candidate_value, str):
-                    continue
-                candidate = candidate_value.strip()
-                parsed = urlparse(candidate)
-                if parsed.scheme in {"http", "https"} and parsed.netloc and candidate not in seen:
+        image_keys = {
+            "image", "imageurl", "originalimage", "originalimageurl",
+            "thumbnail", "thumbnailurl", "sourceicon", "logo",
+            "imagebase64", "base64",
+        }
+        max_depth = 6
+        max_nodes = 256
+        nodes_seen = 0
+
+        def collect(value: Any, depth: int = 0) -> None:
+            nonlocal nodes_seen
+            if depth > max_depth or nodes_seen >= max_nodes:
+                return
+            nodes_seen += 1
+            if isinstance(value, str):
+                candidate = value.strip()
+                if not candidate or len(candidate) > 4096:
+                    return
+                try:
+                    parsed = urlparse(candidate)
+                except ValueError:
+                    return
+                if (
+                    parsed.scheme in {"http", "https"}
+                    and parsed.netloc
+                    and candidate not in seen
+                ):
                     seen.add(candidate)
                     values.append(candidate[:1000])
+                return
+            if isinstance(value, list):
+                for child in value[:40]:
+                    collect(child, depth + 1)
+                return
+            if isinstance(value, dict):
+                for name, child in value.items():
+                    normalized_name = re.sub(r"[^a-z0-9]", "", str(name).casefold())
+                    if normalized_name in image_keys:
+                        continue
+                    if isinstance(child, (dict, list)) or normalized_name in {
+                        "url", "link", "href", "src", "target", "destination",
+                        "destinationurl", "pageurl", "resulturl", "targeturl",
+                        "landingpage", "website", "canonicalurl", "value",
+                    }:
+                        collect(child, depth + 1)
+
+        for key in keys:
+            if key in item:
+                collect(item.get(key))
         return values
 
     @classmethod
@@ -1592,11 +1640,22 @@ class BrightDataGoogleLensClient:
                 }
 
         raw_paths: dict[str, int] = {}
+        raw_paths_by_field: dict[str, dict[str, int]] = {}
         raw_fields: set[str] = set()
+        raw_field_types: dict[str, set[str]] = {}
         for diag in tabs.values():
             raw_fields.update(diag.get("raw_result_fields") or [])
+            for name, types in (diag.get("raw_result_field_types") or {}).items():
+                raw_field_types.setdefault(name, set()).update(
+                    str(value) for value in str(types).split("/")
+                    if value
+                )
             for key, value in (diag.get("raw_link_paths") or {}).items():
                 raw_paths[key] = raw_paths.get(key, 0) + int(value or 0)
+            for field, paths in (diag.get("raw_link_paths_by_field") or {}).items():
+                field_paths = raw_paths_by_field.setdefault(field, {})
+                for key, value in paths.items():
+                    field_paths[key] = field_paths.get(key, 0) + int(value or 0)
 
         goto_diagnostics = {}
         for name in (
@@ -1642,9 +1701,19 @@ class BrightDataGoogleLensClient:
                 int(item.get("rate_limit_wait_seconds") or 0) for item in tabs.values()
             ),
             "raw_result_fields": sorted(raw_fields)[:40],
+            "raw_result_field_types": {
+                name: "/".join(sorted(types))
+                for name, types in sorted(raw_field_types.items())[:30]
+            },
             "raw_link_paths": dict(
                 sorted(raw_paths.items(), key=lambda item: (-item[1], item[0]))[:12]
             ),
+            "raw_link_paths_by_field": {
+                field: dict(
+                    sorted(paths.items(), key=lambda item: (-item[1], item[0]))[:8]
+                )
+                for field, paths in sorted(raw_paths_by_field.items())
+            },
             "exact_matches_result_count": len(exact_results),
             "visual_matches_result_count": len(visual_results),
             "visual_fallback_skipped_reason": visual_fallback_skipped_reason,
