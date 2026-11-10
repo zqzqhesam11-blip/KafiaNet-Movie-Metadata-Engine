@@ -589,9 +589,10 @@ class MetadataEngine:
         # through TMDB /find. Captions, years, filenames and folder labels never
         # create or select a movie ID.
         direct_tmdb_ids = observed_lens_tmdb_ids[:1]
-        direct_imdb_ids = (
-            observed_lens_imdb_ids[:1] if not direct_tmdb_ids else []
-        )
+        # Keep Lens' first official IMDb ID as a fallback even when a TMDB ID
+        # is also present. The direct TMDB ID remains first priority; IMDb is
+        # resolved only to provide a fallback if TMDB cannot verify it.
+        direct_imdb_ids = observed_lens_imdb_ids[:1]
         lens_tmdb_ids = list(direct_tmdb_ids)
         lens_imdb_ids = list(direct_imdb_ids)
         title_search_tmdb_ids: list[int] = []
@@ -694,9 +695,7 @@ class MetadataEngine:
         evidence["id_resolution"]["observed_lens_tmdb_ids"] = observed_lens_tmdb_ids
         evidence["id_resolution"]["observed_lens_imdb_ids"] = observed_lens_imdb_ids
         evidence["id_resolution"]["ignored_secondary_lens_tmdb_ids"] = observed_lens_tmdb_ids[1:]
-        evidence["id_resolution"]["ignored_secondary_lens_imdb_ids"] = (
-            observed_lens_imdb_ids[1:] if not direct_tmdb_ids else observed_lens_imdb_ids
-        )
+        evidence["id_resolution"]["ignored_secondary_lens_imdb_ids"] = observed_lens_imdb_ids[1:]
         tmdb_id_lookup["lens_title_tmdb_ids"] = []
         tmdb_id_lookup["observed_lens_tmdb_ids"] = observed_lens_tmdb_ids
         tmdb_id_lookup["observed_lens_imdb_ids"] = observed_lens_imdb_ids
@@ -784,9 +783,6 @@ class MetadataEngine:
         tmdb_id_lookup["imdb_find_errors"] = imdb_find_errors
 
         direct_imdb_set = set(direct_imdb_ids)
-        direct_candidate_tmdb_ids = set(direct_tmdb_ids)
-        for imdb_id in direct_imdb_ids:
-            direct_candidate_tmdb_ids.update(imdb_to_tmdb_ids.get(imdb_id, []))
 
         blocking_imdb_find_errors = [
             row for row in imdb_find_errors
@@ -797,7 +793,7 @@ class MetadataEngine:
             if str(row.get("imdb_id") or "") not in direct_imdb_set
         ]
         evidence["id_resolution"]["ignored_secondary_imdb_errors"] = ignored_secondary_imdb_errors
-        if blocking_imdb_find_errors:
+        if blocking_imdb_find_errors and not direct_tmdb_ids:
             tmdb_id_lookup["status"] = "direct_imdb_id_unresolved"
             return None, {
                 "status": "review",
@@ -809,10 +805,13 @@ class MetadataEngine:
                 "imdb_find_errors": blocking_imdb_find_errors,
             }, evidence
 
+        # Preserve priority: Lens' direct TMDB ID first, then the TMDB ID(s)
+        # resolved from Lens' first official IMDb ID. Keep fallback candidates
+        # available so a failed direct TMDB details lookup does not end review.
         candidate_tmdb_ids = list(dict.fromkeys([
             *lens_tmdb_ids,
             *(value for ids in imdb_to_tmdb_ids.values() for value in ids),
-        ]))[:1]
+        ]))
         tmdb_id_lookup["tmdb_ids"] = candidate_tmdb_ids
         evidence["tmdb_ids"] = candidate_tmdb_ids
         if not candidate_tmdb_ids:
@@ -829,7 +828,7 @@ class MetadataEngine:
                 "status": "review",
                 "confidence": 0.0,
                 "reason": (
-                    f"Google Lens and its title-derived search resolved to {len(candidate_tmdb_ids)} "
+                    f"Google Lens official IDs and IMDb /find resolved to {len(candidate_tmdb_ids)} "
                     f"different TMDB movie IDs; the safe lookup limit is {MAX_LENS_TMDB_ID_CANDIDATES}"
                 ),
                 "candidate_ids": candidate_tmdb_ids,
@@ -859,6 +858,9 @@ class MetadataEngine:
                         "TMDB movie details did not confirm the IMDb ID returned by /find"
                     )
                 resolved[int(tmdb_id)] = details
+                # A verified direct TMDB result wins immediately. Only continue
+                # to the IMDb-derived candidate when the higher-priority ID fails.
+                break
             except Exception as exc:
                 details_errors.append({
                     "tmdb_id": str(tmdb_id),
@@ -872,24 +874,11 @@ class MetadataEngine:
         ]
         tmdb_id_lookup["details_resolved"] = len(resolved)
         tmdb_id_lookup["errors"] = details_errors
-        blocking_details_errors = [
-            row for row in details_errors
-            if int(row.get("tmdb_id") or 0) in direct_candidate_tmdb_ids
-        ]
-        ignored_secondary_detail_errors = [
-            row for row in details_errors
-            if int(row.get("tmdb_id") or 0) not in direct_candidate_tmdb_ids
-        ]
+        # Failed higher-priority candidates are diagnostic when a later IMDb
+        # fallback resolves successfully; otherwise the empty-resolved path below
+        # returns REVIEW with the recorded errors.
+        ignored_secondary_detail_errors = list(details_errors)
         evidence["id_resolution"]["ignored_secondary_detail_errors"] = ignored_secondary_detail_errors
-        if blocking_details_errors:
-            tmdb_id_lookup["status"] = "direct_tmdb_details_unverified"
-            return None, {
-                "status": "review",
-                "confidence": 0.0,
-                "reason": "A TMDB movie ID returned directly by Google Lens could not be verified through official movie details",
-                "candidate_ids": sorted(candidate_tmdb_ids),
-                "details_errors": blocking_details_errors,
-            }, evidence
 
         identities: list[dict[str, Any]] = []
         for tmdb_id, details in sorted(resolved.items()):
@@ -974,9 +963,12 @@ class MetadataEngine:
             }, evidence
 
         selected_id = int(selected["tmdb_id"])
+        selected_uses_imdb = bool(expected_imdb_ids_by_tmdb.get(selected_id))
         tmdb_id_lookup["status"] = (
             "resolved_after_lens_title_disambiguation"
             if identity_disambiguation
+            else "resolved_via_imdb_fallback"
+            if direct_tmdb_ids and selected_id not in direct_tmdb_ids and selected_uses_imdb
             else "resolved"
         )
         if identity_disambiguation:
