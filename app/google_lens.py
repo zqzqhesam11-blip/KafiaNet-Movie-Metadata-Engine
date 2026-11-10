@@ -139,6 +139,8 @@ class BrightDataGoogleLensClient:
         No protobuf/base64 decoding, HTML scraping, JavaScript execution, or
         automatic redirect following is used. An untrusted final host is rejected.
         """
+        self.last_google_goto_location_path = ""
+        self.last_google_goto_destination_path = ""
         if not self._is_google_goto_url(value):
             return None, None, "not_google_goto"
         client = getattr(self, "redirect_client", None)
@@ -156,12 +158,24 @@ class BrightDataGoogleLensClient:
             location = headers.get("location") if hasattr(headers, "get") else None
             if status in {301, 302, 303, 307, 308} and location:
                 destination = urljoin(request_url, str(location).strip())
+                try:
+                    location_parsed = urlparse(destination)
+                    location_host = (location_parsed.hostname or "").casefold().rstrip(".")
+                    location_path = location_parsed.path.rstrip("/") or "/"
+                    if location_host:
+                        self.last_google_goto_location_path = f"{location_host}{location_path}"[:240]
+                except ValueError:
+                    return None, status, "invalid_location"
                 # Google sometimes places a plain /url wrapper in Location.
                 destination = _resolved_destination_url(destination)
                 try:
                     parsed = urlparse(destination)
                 except ValueError:
                     return None, status, "invalid_location"
+                destination_host = (parsed.hostname or "").casefold().rstrip(".")
+                destination_path = parsed.path.rstrip("/") or "/"
+                if destination_host:
+                    self.last_google_goto_destination_path = f"{destination_host}{destination_path}"[:240]
                 if parsed.scheme != "https" or not parsed.netloc:
                     return None, status, "non_https_location"
                 if not self._is_official_movie_destination(destination):
@@ -203,6 +217,8 @@ class BrightDataGoogleLensClient:
             "google_goto_methods": {},
             "google_goto_error_kinds": {},
             "google_goto_error_samples": [],
+            "google_goto_location_paths": {},
+            "google_goto_destination_paths": {},
             "google_goto_resolution_limit": MAX_GOOGLE_GOTO_RESOLUTIONS,
         }
         attempted = 0
@@ -249,6 +265,16 @@ class BrightDataGoogleLensClient:
                         stats["google_goto_methods"].get("GET", 0) + 1
                     )
                     destination, status, outcome = self._resolve_one_google_goto(candidate)
+                    location_path = str(getattr(self, "last_google_goto_location_path", "") or "")
+                    destination_path = str(getattr(self, "last_google_goto_destination_path", "") or "")
+                    if location_path:
+                        stats["google_goto_location_paths"][location_path] = (
+                            stats["google_goto_location_paths"].get(location_path, 0) + 1
+                        )
+                    if destination_path:
+                        stats["google_goto_destination_paths"][destination_path] = (
+                            stats["google_goto_destination_paths"].get(destination_path, 0) + 1
+                        )
                     if status is not None:
                         key = str(status)
                         stats["google_goto_http_statuses"][key] = (
@@ -1684,7 +1710,10 @@ class BrightDataGoogleLensClient:
         ):
             values = [exact_url_diag.get(name, 0), visual_url_diag.get(name, 0)]
             goto_diagnostics[name] = max(values) if name == "google_goto_resolution_limit" else sum(values)
-        for name in ("google_goto_http_statuses", "google_goto_methods", "google_goto_error_kinds"):
+        for name in (
+            "google_goto_http_statuses", "google_goto_methods", "google_goto_error_kinds",
+            "google_goto_location_paths", "google_goto_destination_paths",
+        ):
             merged = {}
             for source in (exact_url_diag, visual_url_diag):
                 for key, value in (source.get(name) or {}).items():
