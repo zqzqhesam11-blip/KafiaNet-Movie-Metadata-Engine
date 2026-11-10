@@ -126,6 +126,33 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(diagnostics["google_goto_http_statuses"], {"302": 1})
         self.assertEqual(diagnostics["google_goto_methods"], {"GET": 1})
 
+    def test_lens_goto_host_uses_google_search_domain_and_preserves_token(self):
+        api = self.make_client()
+        original_url = (
+            "https://lens.google.com/goto?"
+            "url=CAES_PRIVATE_TOKEN&gsessionid=PRIVATE_SESSION"
+        )
+        response = Mock()
+        response.status_code = 302
+        response.headers = {
+            "location": "https://www.imdb.com/title/tt0053472/"
+        }
+        api.redirect_client.get.return_value = response
+
+        destination, status, outcome = api._resolve_one_google_goto(original_url)
+
+        self.assertEqual(
+            api.redirect_client.get.call_args.args[0],
+            "https://www.google.com/goto?"
+            "url=CAES_PRIVATE_TOKEN&gsessionid=PRIVATE_SESSION",
+        )
+        self.assertFalse(
+            api.redirect_client.get.call_args.kwargs["follow_redirects"]
+        )
+        self.assertEqual(destination, "https://www.imdb.com/title/tt0053472/")
+        self.assertEqual(status, 302)
+        self.assertEqual(outcome, "resolved")
+
     def test_lens_image_search_uses_documented_parameters_only(self):
         api = self.make_client({"exact_matches": []})
 
