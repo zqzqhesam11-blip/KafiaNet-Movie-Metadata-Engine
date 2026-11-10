@@ -1654,9 +1654,10 @@ class BrightDataGoogleLensClient:
             "result_count": len(combined),
             "error": tabs.get(LENS_FALLBACK_TAB, {}).get("error"),
         })
-        # A failed fallback with no exact rows is a provider failure, not a
-        # legitimate no-match result. Let the engine retain previous evidence.
-        if visual_search_error is not None and not combined:
+        # A failed visual fallback means the combined Lens lookup is incomplete,
+        # even when exact_matches returned title-only rows. Surface the provider
+        # failure so the engine can preserve previously saved exact ID evidence.
+        if visual_search_error is not None:
             raise visual_search_error
         return combined
 
