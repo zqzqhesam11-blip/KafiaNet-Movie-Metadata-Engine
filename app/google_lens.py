@@ -1524,6 +1524,7 @@ class BrightDataGoogleLensClient:
         exact_ids = extract_tmdb_movie_ids(exact_results) or extract_imdb_ids(exact_results)
         visual_results: list[dict[str, Any]] = []
         visual_url_diag: dict[str, Any] = {}
+        visual_search_error: BrightDataAPIError | None = None
         visual_fallback_skipped_reason = (
             "exact_matches_has_official_id" if exact_ids else None
         )
@@ -1583,6 +1584,7 @@ class BrightDataGoogleLensClient:
                 request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
                 attempts += int(request_diag.get("attempts") or 0)
                 visual_url_diag = {}
+                visual_search_error = exc
                 tabs[LENS_FALLBACK_TAB] = {
                     "status": "error",
                     **request_diag,
@@ -1614,7 +1616,12 @@ class BrightDataGoogleLensClient:
 
         self.last_lens_diagnostics.update({
             **goto_diagnostics,
-            "status": "ok" if combined else "no_matches",
+            "status": (
+                "partial_error" if visual_search_error and combined
+                else "error" if visual_search_error
+                else "ok" if combined
+                else "no_matches"
+            ),
             "lens_tab": "+".join(tabs),
             "lens_tabs_attempted": list(tabs),
             "lens_tab_diagnostics": tabs,
@@ -1647,6 +1654,10 @@ class BrightDataGoogleLensClient:
             "result_count": len(combined),
             "error": tabs.get(LENS_FALLBACK_TAB, {}).get("error"),
         })
+        # A failed fallback with no exact rows is a provider failure, not a
+        # legitimate no-match result. Let the engine retain previous evidence.
+        if visual_search_error is not None and not combined:
+            raise visual_search_error
         return combined
 
     @staticmethod
