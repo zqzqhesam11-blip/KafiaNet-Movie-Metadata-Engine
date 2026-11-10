@@ -629,7 +629,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_lens_diagnostics["google_goto_failed"], 0)
         self.assertEqual(api.last_lens_diagnostics["google_goto_http_statuses"], {"302": 1})
         api.redirect_client.get.assert_called_once_with(
-            goto_url,
+            "https://www.google.com/goto?url=CAES_PRIVATE_TOKEN",
             follow_redirects=False,
             timeout=8.0,
         )
