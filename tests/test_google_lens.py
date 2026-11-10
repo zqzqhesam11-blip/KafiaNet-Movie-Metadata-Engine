@@ -253,6 +253,40 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertIsNone(api.client.post.call_args_list[1].kwargs["headers"])
         self.assertEqual(api.last_lens_diagnostics["data_format"], "json")
 
+    def test_visual_fallback_failure_is_error_even_when_exact_has_only_caption(self):
+        exact_caption = Mock()
+        exact_caption.status_code = 200
+        exact_caption.text = '{"exact_matches":[{"title":"Breathless (1960)","link":"https://lens.google.com/goto?url=opaque"}]}'
+        exact_caption.headers = {"content-type": "application/json"}
+        exact_caption.json.return_value = {
+            "exact_matches": [{
+                "title": "Breathless (1960)",
+                "link": "https://lens.google.com/goto?url=opaque",
+            }]
+        }
+
+        invalid = Mock()
+        invalid.status_code = 200
+        invalid.text = "<html>provider returned no parsed content</html>"
+        invalid.headers = {"content-type": "text/html"}
+        invalid.json.side_effect = ValueError("not JSON")
+
+        api = self.make_client()
+        api.client.post.side_effect = [exact_caption, invalid, invalid]
+
+        with self.assertRaisesRegex(BrightDataAPIError, "non-JSON response"):
+            api.search_by_image_url("https://example.com/poster.jpg")
+
+        self.assertEqual(api.last_lens_diagnostics["status"], "partial_error")
+        self.assertEqual(
+            api.last_lens_diagnostics["exact_matches_result_count"],
+            1,
+        )
+        self.assertEqual(
+            api.last_lens_diagnostics["visual_matches_result_count"],
+            0,
+        )
+
     def test_visual_fallback_failure_without_exact_rows_is_not_no_matches(self):
         exact_empty = Mock()
         exact_empty.status_code = 200
