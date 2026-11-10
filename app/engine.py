@@ -626,6 +626,8 @@ class MetadataEngine:
                 "payload_shape": title_search_diagnostics.get("payload_shape"),
                 "http_status": title_search_diagnostics.get("http_status"),
                 "attempts": title_search_diagnostics.get("attempts", 0),
+                "rate_limit_retries": title_search_diagnostics.get("rate_limit_retries", 0),
+                "rate_limit_wait_seconds": title_search_diagnostics.get("rate_limit_wait_seconds", 0),
                 "organic_result_count": title_search_diagnostics.get("organic_result_count", 0),
                 "candidate_url_count": title_search_diagnostics.get("candidate_url_count", 0),
                 "google_redirect_count": title_search_diagnostics.get("google_redirect_count", 0),
@@ -736,6 +738,13 @@ class MetadataEngine:
                 except BrightDataQuotaError as exc:
                     self._stop_batch = True
                     self._provider_stop_status = exc.status_code
+                    provider_diagnostics = getattr(
+                        getattr(self, "reverse_image", None),
+                        "last_official_search_diagnostics",
+                        {},
+                    )
+                    if isinstance(provider_diagnostics, dict):
+                        title_search_diagnostics.update(provider_diagnostics)
                     title_search_diagnostics.update({
                         "status": "quota_error",
                         "error": str(exc)[:300],
@@ -1777,6 +1786,8 @@ class MetadataEngine:
             "title_search_http_status": title_search_diag.get("http_status"),
             "title_search_payload_shape": title_search_diag.get("payload_shape"),
             "title_search_attempts": title_search_diag.get("attempts", 0),
+            "title_search_rate_limit_retries": title_search_diag.get("rate_limit_retries", 0),
+            "title_search_rate_limit_wait_seconds": title_search_diag.get("rate_limit_wait_seconds", 0),
             "title_search_results": title_search_diag.get("organic_result_count", 0),
             "title_search_official_urls": title_search_diag.get("official_url_count", 0),
             "title_search_query_count": title_search_diag.get("query_count", 0),
@@ -2222,6 +2233,8 @@ class MetadataEngine:
                 f"title_search_http={lens_diag.get('title_search_http_status', 'none')} "
                 f"title_search_shape='{safe_log_detail(str(lens_diag.get('title_search_payload_shape') or 'none'), 180)}' "
                 f"title_search_attempts={lens_diag.get('title_search_attempts', 0)} "
+                f"title_search_rate_limit_retries={lens_diag.get('title_search_rate_limit_retries', 0)} "
+                f"title_search_rate_limit_wait_seconds={lens_diag.get('title_search_rate_limit_wait_seconds', 0)} "
                 f"title_search_results={lens_diag.get('title_search_results', 0)} "
                 f"title_search_official_urls={lens_diag.get('title_search_official_urls', 0)} "
                 f"title_search_query_count={lens_diag.get('title_search_query_count', 0)} "
