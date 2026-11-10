@@ -775,7 +775,7 @@ class BrightDataGoogleLensClient:
         target_url: str,
         stage: str,
         *,
-        parsed_light_header: bool = True,
+        data_format: str | None = "parsed_light",
         response_format: str = "raw",
         retry_empty_success: bool = True,
     ) -> tuple[httpx.Response, Any, int, int]:
@@ -791,6 +791,10 @@ class BrightDataGoogleLensClient:
             raise BrightDataAPIError(
                 f"Unsupported Bright Data response format for {stage}: {response_format}"
             )
+        if data_format not in {None, "parsed_light", "json", "html", "markdown", "screenshot"}:
+            raise BrightDataAPIError(
+                f"Unsupported Bright Data data_format for {stage}: {data_format}"
+            )
 
         attempt = 0
         transient_retries = 0
@@ -805,18 +809,20 @@ class BrightDataGoogleLensClient:
         while True:
             attempt += 1
             try:
-                request_headers = (
-                    {"x-unblock-data-format": "parsed_light"}
-                    if parsed_light_header else None
-                )
+                request_payload = {
+                    "zone": self.zone,
+                    "url": target_url,
+                    "format": response_format,
+                }
+                # For the REST /request API, Bright Data documents data_format
+                # in the JSON body. x-unblock-data-format is the proxy-header
+                # form and should not be sent as an HTTP header to api.brightdata.com.
+                if data_format is not None:
+                    request_payload["data_format"] = data_format
                 response = self.client.post(
                     BRIGHTDATA_REQUEST_URL,
-                    headers=request_headers,
-                    json={
-                        "zone": self.zone,
-                        "url": target_url,
-                        "format": response_format,
-                    },
+                    headers=None,
+                    json=request_payload,
                 )
             except httpx.TransportError as exc:
                 if transient_retries >= MAX_TRANSIENT_RETRIES:
@@ -1204,7 +1210,7 @@ class BrightDataGoogleLensClient:
                 response, payload, effective_status, attempts = self._post_serp_with_retries(
                     target_url,
                     "Google official movie title search",
-                    parsed_light_header=False,
+                    data_format=None,
                     response_format="json",
                 )
             except BrightDataAPIError as exc:
@@ -1384,8 +1390,7 @@ class BrightDataGoogleLensClient:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         """Fetch one Lens tab, with a single format fallback for empty/unparsed 200s.
 
-        Primary: Bright Data's documented Lens header
-            x-unblock-data-format: parsed_light
+        Primary: Bright Data REST API's documented JSON-body data_format=parsed_light.
         Fallback: Bright Data's documented brd_json=1 URL parameter.
         Each request uses exactly one selector. We do not spend two extra
         requests repeating the same empty request format.
@@ -1402,7 +1407,7 @@ class BrightDataGoogleLensClient:
             response, payload, effective_status, attempts = self._post_serp_with_retries(
                 target_url,
                 f"Google Lens {tab} image search ({mode})",
-                parsed_light_header=(mode == "parsed_light"),
+                data_format=("parsed_light" if mode == "parsed_light" else None),
                 retry_empty_success=False,
             )
             total_attempts += int(attempts or 0)
