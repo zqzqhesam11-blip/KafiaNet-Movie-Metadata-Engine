@@ -248,7 +248,15 @@ class BrightDataGoogleLensClient:
                         )
                         # A 200 response without a Location is commonly a
                         # verification/interstitial page; do not hammer this SERP.
-                        if outcome == "google_rate_limited_or_blocked" or outcome == "no_redirect_interstitial_or_page":
+                        if (
+                            outcome in {
+                                "google_rate_limited_or_blocked",
+                                "no_redirect_interstitial_or_page",
+                                "resolver_unavailable",
+                            }
+                            or outcome.startswith("request_error_")
+                            or (status is not None and status >= 500)
+                        ):
                             stop_for_block = True
                     continue
 
