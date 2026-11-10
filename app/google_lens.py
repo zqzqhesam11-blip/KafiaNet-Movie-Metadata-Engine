@@ -1361,9 +1361,37 @@ class BrightDataGoogleLensClient:
                 return None
             return self._rows_from_payload(payload)
 
+        def aggregate_request_diagnostics(
+            selected_mode: str,
+            effective_status: int,
+        ) -> dict[str, Any]:
+            last_request = request_diagnostics[-1] if request_diagnostics else {}
+            aggregated = {
+                "attempts": total_attempts,
+                "rate_limit_retries": sum(
+                    int(item.get("rate_limit_retries") or 0)
+                    for item in request_diagnostics
+                ),
+                "rate_limit_wait_seconds": sum(
+                    int(item.get("rate_limit_wait_seconds") or 0)
+                    for item in request_diagnostics
+                ),
+                "http_status": last_request.get("http_status", effective_status),
+                "response_headers": dict(last_request.get("response_headers") or {}),
+                "response_body_empty": last_request.get("response_body_empty"),
+                "response_body_bytes": last_request.get("response_body_bytes"),
+                "response_modes_attempted": list(response_modes),
+                "data_format": "parsed_light" if selected_mode == "parsed_light" else "json",
+            }
+            self.last_request_diagnostics = aggregated
+            return aggregated
+
         # Attempt 1: the Lens-specific parsed_light response documented by
         # Bright Data. Do not also append brd_json=1 to this URL.
         response, payload, effective_status = request_mode("parsed_light")
+        aggregate_diagnostics = aggregate_request_diagnostics(
+            "parsed_light", effective_status
+        )
         raise_for_http_status(effective_status, payload, response)
         reject_provider_error(payload)
         rows = parse_rows(payload)
@@ -1373,32 +1401,13 @@ class BrightDataGoogleLensClient:
         # search. Try one alternate, documented full-JSON selector exactly once.
         if rows is None:
             response, payload, effective_status = request_mode("brd_json")
+            selected_mode = "brd_json"
+            aggregate_diagnostics = aggregate_request_diagnostics(
+                selected_mode, effective_status
+            )
             raise_for_http_status(effective_status, payload, response)
             reject_provider_error(payload)
             rows = parse_rows(payload)
-            selected_mode = "brd_json"
-
-        # Preserve aggregate request diagnostics even when the provider failed
-        # both response modes, so the CLI can show the real HTTP status/headers.
-        last_request = request_diagnostics[-1] if request_diagnostics else {}
-        aggregate_diagnostics = {
-            "attempts": total_attempts,
-            "rate_limit_retries": sum(
-                int(item.get("rate_limit_retries") or 0)
-                for item in request_diagnostics
-            ),
-            "rate_limit_wait_seconds": sum(
-                int(item.get("rate_limit_wait_seconds") or 0)
-                for item in request_diagnostics
-            ),
-            "http_status": last_request.get("http_status", effective_status),
-            "response_headers": dict(last_request.get("response_headers") or {}),
-            "response_body_empty": last_request.get("response_body_empty"),
-            "response_body_bytes": last_request.get("response_body_bytes"),
-            "response_modes_attempted": list(response_modes),
-            "data_format": "parsed_light" if selected_mode == "parsed_light" else "json",
-        }
-        self.last_request_diagnostics = aggregate_diagnostics
 
         if rows is None:
             if payload is None or (
