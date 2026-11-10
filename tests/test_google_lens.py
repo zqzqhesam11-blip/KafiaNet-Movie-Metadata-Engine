@@ -70,14 +70,15 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(call.args[0], BRIGHTDATA_REQUEST_URL)
         self.assertEqual(call.kwargs["json"]["zone"], "serp_api1")
         self.assertEqual(call.kwargs["json"]["format"], "raw")
-        self.assertNotIn("data_format", call.kwargs["json"])
-        self.assertEqual(call.kwargs["headers"]["x-unblock-data-format"], "parsed_light")
+        self.assertEqual(call.kwargs["json"]["data_format"], "parsed_light")
+        self.assertIsNone(call.kwargs["headers"])
         self.assertEqual(api.last_lens_diagnostics["data_format"], "parsed_light")
         target = call.kwargs["json"]["url"]
         self.assertIn("lens.google.com/uploadbyurl?", target)
         self.assertNotIn("brd_json", target)
         self.assertIn("brd_lens=exact_matches", target)
-        self.assertEqual(call.kwargs["headers"], {"x-unblock-data-format": "parsed_light"})
+        self.assertEqual(call.kwargs["json"]["data_format"], "parsed_light")
+        self.assertIsNone(call.kwargs["headers"])
         self.assertEqual(api.last_lens_diagnostics["response_modes_attempted"], {
             "exact_matches": ["parsed_light"],
         })
@@ -300,17 +301,14 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
 
         self.assertEqual(api.client.post.call_count, 3)
         first, fallback, visual = api.client.post.call_args_list
-        self.assertEqual(
-            first.kwargs["headers"],
-            {"x-unblock-data-format": "parsed_light"},
-        )
+        self.assertIsNone(first.kwargs["headers"])
+        self.assertEqual(first.kwargs["json"]["data_format"], "parsed_light")
         self.assertNotIn("brd_json", first.kwargs["json"]["url"])
         self.assertIsNone(fallback.kwargs["headers"])
+        self.assertNotIn("data_format", fallback.kwargs["json"])
         self.assertIn("brd_json=1", fallback.kwargs["json"]["url"])
-        self.assertEqual(
-            visual.kwargs["headers"],
-            {"x-unblock-data-format": "parsed_light"},
-        )
+        self.assertIsNone(visual.kwargs["headers"])
+        self.assertEqual(visual.kwargs["json"]["data_format"], "parsed_light")
         self.assertEqual(api.last_lens_diagnostics["attempts"], 3)
         self.assertEqual(api.last_lens_diagnostics["status"], "no_matches")
         self.assertEqual(
