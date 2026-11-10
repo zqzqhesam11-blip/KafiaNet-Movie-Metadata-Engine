@@ -101,6 +101,31 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertIn("lens.google.com/goto", diagnostics["raw_link_paths"])
         self.assertNotIn("CAES_PRIVATE_TOKEN", repr(diagnostics))
 
+    def test_image_search_preserves_google_goto_resolution_diagnostics(self):
+        api = self.make_client({
+            "exact_matches": [{
+                "title": "Breathless (1960)",
+                "link": "https://lens.google.com/goto?url=CAES_PRIVATE_TOKEN",
+                "source": "https://cdn.example.com/breathless-poster.jpg",
+            }]
+        })
+        redirect_response = Mock()
+        redirect_response.status_code = 302
+        redirect_response.headers = {
+            "location": "https://www.imdb.com/title/tt0053472/"
+        }
+        api.redirect_client.get.return_value = redirect_response
+
+        rows = api.search_by_image_url("https://example.com/breathless-poster.jpg")
+
+        self.assertEqual(rows[0]["url"], "https://www.imdb.com/title/tt0053472/")
+        diagnostics = api.last_lens_diagnostics
+        self.assertEqual(diagnostics["google_goto_candidates"], 1)
+        self.assertEqual(diagnostics["google_goto_resolved"], 1)
+        self.assertEqual(diagnostics["google_goto_failed"], 0)
+        self.assertEqual(diagnostics["google_goto_http_statuses"], {"302": 1})
+        self.assertEqual(diagnostics["google_goto_methods"], {"GET": 1})
+
     def test_lens_image_search_uses_documented_parameters_only(self):
         api = self.make_client({"exact_matches": []})
 
