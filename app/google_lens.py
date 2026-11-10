@@ -1584,22 +1584,18 @@ class BrightDataGoogleLensClient:
         }
 
         self.last_result_url_diagnostics = {}
+        exact_search_error: BrightDataAPIError | None = None
         try:
             exact_results, exact_rows, exact_diag = self._request_lens_tab(image_url, LENS_TAB)
             exact_results = [{**row, "lens_tab": LENS_TAB} for row in exact_results]
             exact_results = self.resolve_result_urls(exact_results)
             exact_url_diag = dict(self.last_result_url_diagnostics)
-        except BrightDataAPIError as exc:
+        except BrightDataQuotaError as exc:
             request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
             self.last_lens_diagnostics.update({
-                "status": "quota_error" if isinstance(exc, BrightDataQuotaError) else "error",
+                "status": "quota_error",
                 "lens_tabs_attempted": [LENS_TAB],
-                "lens_tab_diagnostics": {
-                    LENS_TAB: {
-                        "status": "quota_error" if isinstance(exc, BrightDataQuotaError) else "error",
-                        **request_diag,
-                    }
-                },
+                "lens_tab_diagnostics": {LENS_TAB: {"status": "quota_error", **request_diag}},
                 "http_status": request_diag.get("http_status"),
                 "data_format": request_diag.get("data_format", "parsed_light"),
                 "response_modes_attempted": request_diag.get("response_modes_attempted", []),
@@ -1609,7 +1605,29 @@ class BrightDataGoogleLensClient:
                 "rate_limit_wait_seconds": request_diag.get("rate_limit_wait_seconds", 0),
                 "error": f"{type(exc).__name__}: {str(exc)[:300]}",
             })
+            # Quota/rate-limit failures stop the batch; do not issue another tab request.
             raise
+        except BrightDataAPIError as exc:
+            # A provider/parser failure for exact_matches is not proof that
+            # visual_matches is unavailable. Preserve the failure, then let the
+            # normal fallback tab run once. Quota failures are handled above.
+            request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
+            exact_search_error = exc
+            exact_results = []
+            exact_url_diag = {}
+            exact_diag = {
+                "status": "error",
+                "http_status": request_diag.get("http_status"),
+                "attempts": request_diag.get("attempts", 1),
+                "result_count": 0,
+                "raw_result_count": 0,
+                "rate_limit_retries": request_diag.get("rate_limit_retries", 0),
+                "rate_limit_wait_seconds": request_diag.get("rate_limit_wait_seconds", 0),
+                "data_format": request_diag.get("data_format", "parsed_light"),
+                "response_modes_attempted": request_diag.get("response_modes_attempted", []),
+                "response_headers": request_diag.get("response_headers", {}),
+                "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            }
 
         tabs = {LENS_TAB: exact_diag}
         attempts = int(exact_diag.get("attempts") or 0)
@@ -1724,8 +1742,8 @@ class BrightDataGoogleLensClient:
         self.last_lens_diagnostics.update({
             **goto_diagnostics,
             "status": (
-                "partial_error" if visual_search_error and combined
-                else "error" if visual_search_error
+                "partial_error" if (visual_search_error or exact_search_error) and combined
+                else "error" if (visual_search_error or exact_search_error)
                 else "ok" if combined
                 else "no_matches"
             ),
@@ -1769,13 +1787,18 @@ class BrightDataGoogleLensClient:
                 int(item.get("raw_result_count") or 0) for item in tabs.values()
             ),
             "result_count": len(combined),
-            "error": tabs.get(LENS_FALLBACK_TAB, {}).get("error"),
+            "error": (
+                tabs.get(LENS_FALLBACK_TAB, {}).get("error")
+                or tabs.get(LENS_TAB, {}).get("error")
+            ),
         })
         # A failed visual fallback means the combined Lens lookup is incomplete,
         # even when exact_matches returned title-only rows. Surface the provider
         # failure so the engine can preserve previously saved exact ID evidence.
         if visual_search_error is not None:
             raise visual_search_error
+        if exact_search_error is not None and not visual_results:
+            raise exact_search_error
         return combined
 
     @staticmethod
