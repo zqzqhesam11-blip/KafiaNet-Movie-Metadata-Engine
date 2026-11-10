@@ -20,6 +20,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         response = Mock()
         response.status_code = status
         response.text = body if body is not None else ""
+        response.headers = {}
         response.json.return_value = payload
         api.client = Mock()
         if error is not None:
@@ -271,11 +272,29 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             api.search_by_image_url("https://example.com/poster.jpg")
         self.assertEqual(api.client.post.call_count, 1)
 
-    def test_429_without_retry_after_or_cooldown_is_not_retried(self):
+    def test_generic_429_uses_bounded_backoff_then_stops(self):
         api = self.make_client({"error": "rate limit"}, status=429, body="rate limit")
-        with self.assertRaisesRegex(BrightDataAPIError, "HTTP 429"):
-            api.search_by_image_url("https://example.com/poster.jpg")
+        with patch("app.google_lens.time.sleep") as sleep:
+            with self.assertRaisesRegex(BrightDataAPIError, "HTTP 429"):
+                api.search_by_image_url("https://example.com/poster.jpg")
+
+        self.assertEqual(api.client.post.call_count, 4)
+        self.assertEqual(
+            [row.args[0] for row in sleep.call_args_list],
+            [5, 15, 30],
+        )
+        self.assertEqual(api.last_request_diagnostics["rate_limit_retries"], 3)
+        self.assertEqual(api.last_request_diagnostics["rate_limit_wait_seconds"], 50)
+
+    def test_429_does_not_override_long_retry_after(self):
+        api = self.make_client({"error": "rate limit"}, status=429, body="rate limit")
+        api.client.post.return_value.headers = {"retry-after": "120"}
+        with patch("app.google_lens.time.sleep") as sleep:
+            with self.assertRaisesRegex(BrightDataAPIError, "HTTP 429"):
+                api.search_by_image_url("https://example.com/poster.jpg")
+
         self.assertEqual(api.client.post.call_count, 1)
+        sleep.assert_not_called()
 
     def test_retries_explicit_brightdata_same_query_cooldown(self):
         cooldown = Mock()
