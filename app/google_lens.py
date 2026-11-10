@@ -206,6 +206,7 @@ class BrightDataGoogleLensClient:
 
             unique_candidates = list(dict.fromkeys(candidates))
             safe_destinations: list[str] = []
+            direct_url_count = 0
             saw_goto = False
             row_status = None
 
@@ -253,13 +254,10 @@ class BrightDataGoogleLensClient:
 
                 if candidate not in safe_destinations:
                     safe_destinations.append(candidate)
+                    direct_url_count += 1
 
             safe_destinations = list(dict.fromkeys(safe_destinations))
-            stats["google_goto_direct_urls_kept"] += sum(
-                1 for value in safe_destinations
-                if not any(self._is_google_goto_url(candidate) for candidate in unique_candidates)
-                or value not in safe_destinations
-            )
+            stats["google_goto_direct_urls_kept"] += direct_url_count
             item["url_candidates"] = [
                 value for value in safe_destinations
                 if isinstance(value, str) and value.strip()
@@ -1365,6 +1363,7 @@ class BrightDataGoogleLensClient:
         combined = list(exact_results)
         exact_ids = extract_tmdb_movie_ids(exact_results) or extract_imdb_ids(exact_results)
         visual_results: list[dict[str, Any]] = []
+        visual_url_diag: dict[str, Any] = {}
         visual_fallback_skipped_reason = (
             "exact_matches_has_official_id" if exact_ids else None
         )
@@ -1400,6 +1399,7 @@ class BrightDataGoogleLensClient:
                         seen.add(key)
             except BrightDataQuotaError as exc:
                 request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
+                visual_url_diag = {}
                 tabs[LENS_FALLBACK_TAB] = {
                     "status": "quota_error",
                     **request_diag,
