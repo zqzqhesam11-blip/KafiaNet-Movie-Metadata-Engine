@@ -1474,10 +1474,14 @@ class MetadataEngine:
                 reverse_image_results = reusable_results
                 reverse_image_results_source = "previous_saved"
 
-        # Google /goto links hide the real page behind an opaque token. Resolve
-        # all Lens result URLs before extracting official IMDb/TMDB identifiers.
+        # BrightDataGoogleLensClient.search_by_image_url resolves each live
+        # Lens tab before returning it and merges those per-tab diagnostics.
+        # Running the resolver again here would erase the real attempt counters
+        # because unresolved tokens have already been removed from live rows.
+        # Older saved evidence may predate that normalization, so resolve only
+        # when falling back to a previously stored result set.
         resolver = getattr(self.reverse_image, "resolve_result_urls", None)
-        if callable(resolver):
+        if callable(resolver) and reverse_image_results_source == "previous_saved":
             reverse_image_results = resolver(reverse_image_results)
             resolver_diagnostics = (
                 getattr(self.reverse_image, "last_lens_diagnostics", {}) or {}
