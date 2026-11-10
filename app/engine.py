@@ -2087,7 +2087,10 @@ class MetadataEngine:
                 "content-type",
                 "content-length",
                 "x-brd-error-code",
+                "x-brd-error",
                 "x-brd-err-code",
+                "x-brd-err-msg",
+                "x-response-id",
                 "x-brd-rate-limit",
                 "x-brd-rate-limit-period-ms",
             )
@@ -2117,7 +2120,7 @@ class MetadataEngine:
                 f"lens_tab={lens_diag.get('lens_tab', 'unknown')} "
                 f"lens_data_format={lens_diag.get('data_format', 'unknown')} "
                 f"lens_modes='{safe_log_detail(response_modes_text, 150)}' "
-                f"lens_headers='{safe_log_detail(response_headers_text, 180)}' "
+                f"lens_headers='{safe_log_detail(response_headers_text, 420)}' "
                 f"lens_http={lens_diag.get('http_status', 'none')} "
                 f"lens_attempts={lens_diag.get('attempts', 'none')} "
                 f"lens_results={lens_diag.get('result_count', 'none')} "
