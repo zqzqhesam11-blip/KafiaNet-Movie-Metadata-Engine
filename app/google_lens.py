@@ -823,7 +823,7 @@ class BrightDataGoogleLensClient:
                 "rate_limit_wait_seconds": wait_seconds,
                 "http_status": effective_status,
                 "response_headers": safe_response_headers,
-                "response_body_empty": not bool(response_text.strip()),
+                "response_body_empty": bool(empty_success_body or not response_text.strip()),
                 "response_body_bytes": len(response_text.encode("utf-8", errors="replace")),
             })
             return response, payload, effective_status, attempt
