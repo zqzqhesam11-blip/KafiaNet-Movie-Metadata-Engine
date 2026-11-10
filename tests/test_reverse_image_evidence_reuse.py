@@ -78,6 +78,39 @@ class PreviousGoogleLensEvidenceTests(unittest.TestCase):
         self.assertEqual(record["reverse_image"]["latest_query"]["errors"], latest_error)
 
 
+    def test_reuses_explicit_exact_rows_from_saved_combined_lens_query(self):
+        previous = [
+            {
+                "lens_tab": "exact_matches",
+                "title": "Breathless - IMDb",
+                "url": "https://www.imdb.com/title/tt0053472/",
+                "source": "https://cdn.example.com/poster.jpg",
+            },
+            {
+                "lens_tab": "visual_matches",
+                "title": "Unrelated poster result",
+                "url": "https://www.themoviedb.org/movie/999999",
+            },
+        ]
+        latest_error = [{
+            "error": "BrightDataAPIError",
+            "message": "visual_matches response was empty after JSON fallback",
+        }]
+        engine = self.make_engine(
+            latest_error,
+            previous,
+            saved_lens_tab="exact_matches+visual_matches",
+        )
+
+        record = engine._record_for_folder(
+            {"folder": "Breathless (1960)", "image_path": "مراجعة/Breathless/poster.jpg"},
+            previous_output_path="مراجعة/Breathless/Breathless.json",
+        )
+
+        self.assertEqual(record["reverse_image"]["results"], [previous[0]])
+        self.assertEqual(record["reverse_image"]["results_source"], "previous_saved")
+        self.assertEqual(engine._find_movie.call_args.args[0], [previous[0]])
+
     def test_does_not_reuse_saved_visual_matches_as_exact_match_evidence(self):
         previous = [{
             "title": "Saved Poster Title",
