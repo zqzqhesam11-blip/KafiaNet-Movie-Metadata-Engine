@@ -153,6 +153,29 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(status, 302)
         self.assertEqual(outcome, "resolved")
 
+    def test_google_goto_logs_only_location_host_and_path_for_rejected_destination(self):
+        api = self.make_client()
+        goto_url = "https://lens.google.com/goto?url=PRIVATE_TOKEN"
+        redirect_response = Mock()
+        redirect_response.status_code = 302
+        redirect_response.headers = {
+            "location": "https://play.google.com/store/movies/details/Breathless?token=PRIVATE"
+        }
+        api.redirect_client.get.return_value = redirect_response
+
+        rows = api.resolve_result_urls([{"url": goto_url}])
+
+        self.assertEqual(rows[0]["url"], "")
+        self.assertEqual(
+            api.last_result_url_diagnostics["google_goto_location_paths"],
+            {"play.google.com/store/movies/details/Breathless": 1},
+        )
+        self.assertEqual(
+            api.last_result_url_diagnostics["google_goto_destination_paths"],
+            {"play.google.com/store/movies/details/Breathless": 1},
+        )
+        self.assertNotIn("PRIVATE", repr(api.last_result_url_diagnostics))
+
     def test_lens_image_search_uses_documented_parameters_only(self):
         api = self.make_client({"exact_matches": []})
 
