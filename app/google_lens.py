@@ -1407,13 +1407,17 @@ class BrightDataGoogleLensClient:
                 and "body" in payload
                 and not str(payload.get("body") or "").strip()
             ):
+                response_headers = aggregate_diagnostics.get("response_headers") or {}
+                header_summary = ", ".join(
+                    f"{key}={value}" for key, value in sorted(response_headers.items())
+                ) or "no response metadata headers"
                 details = (
                     f"HTTP {aggregate_diagnostics.get('http_status')}, "
-                    f"headers={aggregate_diagnostics.get('response_headers') or 'none'}, "
+                    f"{header_summary}, "
                     f"body_bytes={aggregate_diagnostics.get('response_body_bytes')}"
                 )
                 message = (
-                    "Bright Data returned an empty/non-JSON Google Lens response "
+                    "Bright Data returned an empty or non-JSON response for Google Lens "
                     f"after trying parsed_light and brd_json once each ({details})"
                 )
             else:
