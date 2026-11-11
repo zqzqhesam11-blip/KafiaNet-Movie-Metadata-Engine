@@ -139,10 +139,10 @@ def _resolved_destination_urls(result: dict) -> list[str]:
 
 
 def extract_tmdb_movie_ids(results: list[dict]) -> list[int]:
-    """Extract unique numeric IDs only from official TMDB movie destinations.
+    """Extract unique IDs from official TMDB URLs or explicitly typed Lens metadata.
 
-    Lens titles, text snippets, IMDb links, country names, image URLs, filenames,
-    and source-folder names are never read as movie identity inputs.
+    Titles, snippets, arbitrary ID keys, commerce IDs, image URLs, filenames and
+    source-folder names are never read as movie identity inputs.
     """
     movie_ids: list[int] = []
     seen: set[int] = set()
@@ -168,7 +168,7 @@ def extract_tmdb_movie_ids(results: list[dict]) -> list[int]:
     return movie_ids
 
 def extract_imdb_ids(results: list[dict]) -> list[str]:
-    """Extract unique IMDb title IDs only from resolved official IMDb title URLs."""
+    """Extract unique IDs from official IMDb title URLs or typed Lens metadata."""
     imdb_ids: list[str] = []
     seen: set[str] = set()
     for result in results or []:
@@ -295,11 +295,13 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
     top_hosts = dict(
         sorted(result_hosts.items(), key=lambda item: (-item[1], item[0]))[:12]
     )
+    observed_tmdb_ids = extract_tmdb_movie_ids(results)
+    observed_imdb_ids = extract_imdb_ids(results)
     return {
         "official_tmdb_url_count": len(official_urls),
-        "official_tmdb_ids": movie_ids,
+        "official_tmdb_ids": observed_tmdb_ids or movie_ids,
         "official_imdb_url_count": len(official_imdb_urls),
-        "official_imdb_ids": imdb_ids,
+        "official_imdb_ids": observed_imdb_ids or imdb_ids,
         "lens_wikidata_ids": extract_wikidata_ids(results),
         "lens_structured_tmdb_ids": [
             value for result in (results or []) if isinstance(result, dict)
