@@ -932,6 +932,18 @@ class MetadataEngine:
                     raise ValueError(
                         "TMDB movie details did not confirm the IMDb ID returned by /find"
                     )
+                expected_wikidata_id = (
+                    str(wikidata_resolution.get("selected_wikidata_id") or "").upper()
+                    if int(tmdb_id) in wikidata_tmdb_ids
+                    else ""
+                )
+                returned_wikidata_id = str(
+                    (details.get("external_ids") or {}).get("wikidata_id") or ""
+                ).strip().upper()
+                if expected_wikidata_id and returned_wikidata_id != expected_wikidata_id:
+                    raise ValueError(
+                        "TMDB movie details did not confirm the Wikidata ID returned by /find"
+                    )
                 resolved[int(tmdb_id)] = details
                 # A verified direct TMDB result wins immediately. Only continue
                 # to the IMDb-derived candidate when the higher-priority ID fails.
