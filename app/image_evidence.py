@@ -149,22 +149,27 @@ def extract_tmdb_movie_ids(results: list[dict]) -> list[int]:
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
             continue
-        row_ids = []
+        url_ids = []
         for destination in _resolved_destination_urls(result):
             movie_id = tmdb_movie_id_from_url(destination)
-            if movie_id is not None and movie_id not in row_ids:
-                row_ids.append(movie_id)
-        for raw_id in _typed_lens_ids(result, "tmdb_ids", re.compile(r"^[1-9]\d{0,11}$")):
-            movie_id = int(raw_id)
-            if movie_id not in row_ids:
-                row_ids.append(movie_id)
-        # Conflicting IDs inside one Lens result row are not ranked reliably.
-        if len(row_ids) != 1:
+            if movie_id is not None and movie_id not in url_ids:
+                url_ids.append(movie_id)
+        typed_ids = list(dict.fromkeys(
+            int(raw_id) for raw_id in _typed_lens_ids(
+                result, "tmdb_ids", re.compile(r"^[1-9]\d{0,11}$")
+            )
+        ))
+        # Preserve the existing Lens URL-candidate order. Typed metadata is
+        # accepted only when it is singular and does not conflict with URL IDs.
+        if len(typed_ids) > 1 or (
+            typed_ids and url_ids and typed_ids[0] not in url_ids
+        ):
             continue
-        movie_id = row_ids[0]
-        if movie_id not in seen:
-            seen.add(movie_id)
-            movie_ids.append(movie_id)
+        row_ids = url_ids or typed_ids
+        for movie_id in row_ids:
+            if movie_id not in seen:
+                seen.add(movie_id)
+                movie_ids.append(movie_id)
     return movie_ids
 
 def extract_imdb_ids(results: list[dict]) -> list[str]:
@@ -174,21 +179,25 @@ def extract_imdb_ids(results: list[dict]) -> list[str]:
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
             continue
-        row_ids = []
+        url_ids = []
         for destination in _resolved_destination_urls(result):
             imdb_id = imdb_id_from_url(destination)
-            if imdb_id and imdb_id not in row_ids:
-                row_ids.append(imdb_id)
-        for imdb_id in _typed_lens_ids(result, "imdb_ids", re.compile(r"^tt\d{5,12}$", re.I)):
-            imdb_id = imdb_id.lower()
-            if imdb_id not in row_ids:
-                row_ids.append(imdb_id)
-        if len(row_ids) != 1:
+            if imdb_id and imdb_id not in url_ids:
+                url_ids.append(imdb_id)
+        typed_ids = list(dict.fromkeys(
+            value.lower() for value in _typed_lens_ids(
+                result, "imdb_ids", re.compile(r"^tt\d{5,12}$", re.I)
+            )
+        ))
+        if len(typed_ids) > 1 or (
+            typed_ids and url_ids and typed_ids[0] not in url_ids
+        ):
             continue
-        imdb_id = row_ids[0]
-        if imdb_id not in seen:
-            seen.add(imdb_id)
-            imdb_ids.append(imdb_id)
+        row_ids = url_ids or typed_ids
+        for imdb_id in row_ids:
+            if imdb_id not in seen:
+                seen.add(imdb_id)
+                imdb_ids.append(imdb_id)
     return imdb_ids
 
 
