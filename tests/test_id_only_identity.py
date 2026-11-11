@@ -166,6 +166,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
 
     def test_lens_wikidata_qid_resolves_only_one_tmdb_movie_result(self):
         engine = self.make_engine()
+        engine.tmdb.records[10754]["external_ids"]["wikidata_id"] = "Q12345"
         rows = [{
             "title": "A deliberately misleading Lens caption",
             "lens_identifiers": {
@@ -187,6 +188,24 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(evidence["wikidata_resolution"]["status"], "resolved")
         self.assertEqual(evidence["resolved_identity"]["wikidata_ids"], ["Q12345"])
         self.assertEqual(evidence["resolved_identity"]["wikidata_tmdb_ids"], [10754])
+
+    def test_wikidata_details_must_confirm_the_same_qid_returned_by_find(self):
+        engine = self.make_engine()
+        engine.tmdb.records[10754]["external_ids"]["wikidata_id"] = "Q99999"
+
+        candidate, match, evidence = engine._find_movie([{
+            "lens_identifiers": {"wikidata_ids": ["Q12345"]},
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(engine.tmdb.wikidata_find_calls, ["Q12345"])
+        self.assertEqual(engine.tmdb.details_calls, [10754])
+        self.assertEqual(evidence["wikidata_resolution"]["status"], "resolved")
+        self.assertEqual(
+            evidence["tmdb_id_lookup"]["errors"][0]["message"],
+            "TMDB movie details did not confirm the Wikidata ID returned by /find",
+        )
 
     def test_wikidata_qid_with_multiple_tmdb_movie_results_stays_review(self):
         engine = self.make_engine()
