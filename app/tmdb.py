@@ -43,6 +43,21 @@ class TMDBClient:
             },
         )
 
+    def find_by_wikidata_id(self, wikidata_id: str) -> dict[str, Any]:
+        """Resolve an explicit Wikidata entity ID through TMDB's /find endpoint."""
+        import re
+
+        external_id = str(wikidata_id or "").strip().upper()
+        if not re.fullmatch(r"Q[1-9]\d{0,15}", external_id):
+            raise ValueError("A valid Wikidata entity ID (Q followed by digits) is required")
+        return self._get(
+            f"/find/{external_id}",
+            {
+                "external_source": "wikidata_id",
+                "language": self.language,
+            },
+        )
+
     def search_movies(self, query: str, year: int | None = None) -> dict[str, Any]:
         """Return TMDB text-search candidates; these are suggestions, not identity proof."""
         title_query = " ".join(str(query or "").split())

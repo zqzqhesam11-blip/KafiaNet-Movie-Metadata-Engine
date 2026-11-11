@@ -84,6 +84,89 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         })
         self.assertIn("raw.githubusercontent.com", target)
 
+    def test_extracts_typed_identity_ids_and_keeps_store_ids_as_supporting_only(self):
+        api = self.make_client({
+            "exact_matches": [{
+                "position": 1,
+                "title": "Breathless (1960)",
+                "link": "https://www.amazon.co.uk/Breathless-DVD/dp/B003PHJLQY",
+                "metadata": {
+                    "external_ids": {
+                        "imdb_id": "tt0053472",
+                        "tmdb_id": "10754",
+                    },
+                    "entity": {"wikidata": {"id": "Q12345"}},
+                    "knowledge_graph": {"mid": "kg:/m/0dl567"},
+                    "product": {"asin": "B003PHJLQY"},
+                    "play_store_url": (
+                        "https://play.google.com/store/movies/details/"
+                        "Breathless?hl=en"
+                    ),
+                    "arbitrary": {"id": "tt9999999"},
+                },
+            }]
+        })
+
+        rows = api.search_by_image_url("https://example.com/breathless-poster.jpg")
+
+        identifiers = rows[0]["lens_identifiers"]
+        self.assertEqual(identifiers["tmdb_ids"], ["10754"])
+        self.assertEqual(identifiers["imdb_ids"], ["tt0053472"])
+        self.assertEqual(identifiers["wikidata_ids"], ["Q12345"])
+        self.assertEqual(identifiers["google_knowledge_graph_ids"], ["kg:/m/0dl567"])
+        self.assertEqual(identifiers["asin_ids"], ["B003PHJLQY"])
+        self.assertEqual(identifiers["google_play_ids"], ["Breathless"])
+        # An untyped generic id is never treated as an IMDb identifier.
+        self.assertNotIn("tt9999999", identifiers["imdb_ids"])
+        self.assertEqual(
+            api.last_lens_diagnostics["structured_identifier_counts"]["wikidata_ids"],
+            1,
+        )
+
+    def test_extracts_numeric_and_array_values_from_typed_identifier_fields(self):
+        api = self.make_client({
+            "exact_matches": [{
+                "title": "Typed identifiers",
+                "metadata": {
+                    "tmdb_id": 10754,
+                    "external_ids": {
+                        "imdb_ids": ["tt0095468", "tt0095468"],
+                    },
+                    "wikidata_entity": [{"id": "Q12345"}],
+                },
+            }]
+        })
+
+        rows = api.search_by_image_url("https://example.com/typed-identifiers.jpg")
+
+        identifiers = rows[0]["lens_identifiers"]
+        self.assertEqual(identifiers["tmdb_ids"], ["10754"])
+        self.assertEqual(identifiers["imdb_ids"], ["tt0095468"])
+        self.assertEqual(identifiers["wikidata_ids"], ["Q12345"])
+
+    def test_commerce_identifiers_alone_do_not_count_as_movie_identity(self):
+        api = self.make_client({
+            "exact_matches": [{
+                "title": "Breathless (1960)",
+                "link": "https://www.amazon.co.uk/dp/B003PHJLQY",
+                "play_store_url": (
+                    "https://play.google.com/store/movies/details/"
+                    "com.example.breathless"
+                ),
+            }]
+        })
+
+        rows = api.search_by_image_url("https://example.com/breathless-poster.jpg")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["lens_identifiers"]["asin_ids"], ["B003PHJLQY"])
+        self.assertEqual(rows[0]["lens_identifiers"]["google_play_ids"], [
+            "com.example.breathless"
+        ])
+        self.assertEqual(rows[0]["lens_identifiers"]["tmdb_ids"], [])
+        self.assertEqual(rows[0]["lens_identifiers"]["imdb_ids"], [])
+        self.assertEqual(rows[0]["lens_identifiers"]["wikidata_ids"], [])
+
     def test_captures_raw_result_fields_and_redacted_link_paths(self):
         api = self.make_client({
             "exact_matches": [{

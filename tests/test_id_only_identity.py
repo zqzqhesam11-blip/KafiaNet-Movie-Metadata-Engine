@@ -6,7 +6,12 @@ from unittest.mock import Mock
 
 from app.engine import MetadataEngine
 from app.tmdb import TMDBClient
-from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, tmdb_movie_url_diagnostics
+from app.image_evidence import (
+    extract_imdb_ids,
+    extract_tmdb_movie_ids,
+    extract_wikidata_ids,
+    tmdb_movie_url_diagnostics,
+)
 
 
 def movie_details(tmdb_id: int, imdb_id: str | None, title: str) -> dict:
@@ -60,10 +65,18 @@ class FakeTMDB:
             "tt0095468": {"movie_results": [{"id": 10754}]},
             "tt0095467": {"movie_results": [{"id": 31056}]},
         }
+        self.wikidata_find_calls: list[str] = []
+        self.wikidata_find_results = {
+            "Q12345": {"movie_results": [{"id": 10754}], "tv_results": [{"id": 999}]},
+        }
 
     def find_by_imdb_id(self, imdb_id: str):
         self.find_calls.append(imdb_id)
         return self.find_results.get(imdb_id, {"movie_results": []})
+
+    def find_by_wikidata_id(self, wikidata_id: str):
+        self.wikidata_find_calls.append(wikidata_id)
+        return self.wikidata_find_results.get(wikidata_id, {"movie_results": []})
 
     def movie_details(self, tmdb_id: int):
         self.details_calls.append(int(tmdb_id))
@@ -140,6 +153,117 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(match["status"], "ready")
         self.assertEqual(match["tmdb_id"], 10754)
         self.assertIsNone(match["imdb_id"])
+
+    def test_extracts_wikidata_qid_only_from_typed_metadata_or_entity_url(self):
+        rows = [
+            {"lens_identifiers": {"wikidata_ids": ["Q12345"]}},
+            {"url": "https://www.wikidata.org/wiki/Q67890"},
+            {"url": "https://www.wikidata.org/wiki/Special:EntityPage/Q00000"},
+            {"title": "Q55555 is just caption text"},
+        ]
+
+        self.assertEqual(extract_wikidata_ids(rows), ["Q12345", "Q67890"])
+
+    def test_lens_wikidata_qid_resolves_only_one_tmdb_movie_result(self):
+        engine = self.make_engine()
+        engine.tmdb.records[10754]["external_ids"]["wikidata_id"] = "Q12345"
+        rows = [{
+            "title": "A deliberately misleading Lens caption",
+            "lens_identifiers": {
+                "wikidata_ids": ["Q12345"],
+                "asin_ids": ["B003PHJLQY"],
+                "google_play_ids": ["com.example.breathless"],
+            },
+        }]
+
+        candidate, match, evidence = engine._find_movie(rows)
+
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 10754)
+        self.assertEqual(match["identity_source"], "google_lens_wikidata_id_via_tmdb_find")
+        self.assertEqual(match["identity_method"], "lens_wikidata_id_tmdb_find")
+        self.assertEqual(engine.tmdb.wikidata_find_calls, ["Q12345"])
+        self.assertEqual(engine.tmdb.details_calls, [10754])
+        self.assertEqual(evidence["wikidata_resolution"]["status"], "resolved")
+        self.assertEqual(evidence["resolved_identity"]["wikidata_ids"], ["Q12345"])
+        self.assertEqual(evidence["resolved_identity"]["wikidata_tmdb_ids"], [10754])
+
+    def test_wikidata_details_must_confirm_the_same_qid_returned_by_find(self):
+        engine = self.make_engine()
+        engine.tmdb.records[10754]["external_ids"]["wikidata_id"] = "Q99999"
+
+        candidate, match, evidence = engine._find_movie([{
+            "lens_identifiers": {"wikidata_ids": ["Q12345"]},
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(engine.tmdb.wikidata_find_calls, ["Q12345"])
+        self.assertEqual(engine.tmdb.details_calls, [10754])
+        self.assertEqual(
+            evidence["wikidata_resolution"]["status"],
+            "details_verification_failed",
+        )
+        self.assertEqual(
+            evidence["tmdb_id_lookup"]["errors"][0]["message"],
+            "TMDB movie details did not confirm the Wikidata ID returned by /find",
+        )
+
+    def test_wikidata_qid_with_multiple_tmdb_movie_results_stays_review(self):
+        engine = self.make_engine()
+        engine.tmdb.wikidata_find_results["Q12345"] = {
+            "movie_results": [{"id": 10754}, {"id": 31056}],
+            "tv_results": [],
+        }
+
+        candidate, match, evidence = engine._find_movie([{
+            "lens_identifiers": {"wikidata_ids": ["Q12345"]},
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(
+            evidence["wikidata_resolution"]["status"],
+            "ambiguous_tmdb_movie_results",
+        )
+        self.assertEqual(match["candidate_ids"], [10754, 31056])
+        self.assertEqual(engine.tmdb.details_calls, [])
+
+    def test_asin_google_play_and_google_knowledge_graph_mid_never_create_identity(self):
+        engine = self.make_engine()
+
+        candidate, match, evidence = engine._find_movie([{
+            "title": "Breathless (1960)",
+            "lens_identifiers": {
+                "asin_ids": ["B003PHJLQY"],
+                "google_play_ids": ["com.example.breathless"],
+                "google_knowledge_graph_ids": ["kg:/m/0dl567"],
+            },
+            "url": "https://www.amazon.co.uk/dp/B003PHJLQY",
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(engine.tmdb.wikidata_find_calls, [])
+        self.assertEqual(engine.tmdb.find_calls, [])
+        self.assertEqual(engine.tmdb.details_calls, [])
+        self.assertEqual(evidence["wikidata_resolution"]["status"], "no_wikidata_id")
+
+    def test_tmdb_client_wikidata_find_uses_external_source_and_validates_qid(self):
+        client = TMDBClient.__new__(TMDBClient)
+        client.language = "en-US"
+        client._get = Mock(return_value={"movie_results": [{"id": 10754}]})
+
+        result = client.find_by_wikidata_id("q12345")
+
+        self.assertEqual(result["movie_results"][0]["id"], 10754)
+        client._get.assert_called_once_with(
+            "/find/Q12345",
+            {"external_source": "wikidata_id", "language": "en-US"},
+        )
+        with self.assertRaises(ValueError):
+            client.find_by_wikidata_id("B003PHJLQY")
 
     def test_official_imdb_title_id_resolves_via_tmdb_find_without_title_search(self):
         engine = self.make_engine()

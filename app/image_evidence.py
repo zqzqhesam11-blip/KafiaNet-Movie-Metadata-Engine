@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 TMDB_MOVIE_RE = re.compile(r"^/movie/(\d+)(?:[-/]|$)", re.IGNORECASE)
 IMDB_TITLE_RE = re.compile(r"^/title/(tt\d+)(?:/mediaviewer(?:/rm\d+)?)?/?$", re.IGNORECASE)
+WIKIDATA_ENTITY_RE = re.compile(r"^/(?:wiki|entity)/(Q[1-9]\d{0,15})(?:/|$)", re.IGNORECASE)
 
 
 def _allowed_host(url: str, root: str) -> bool:
@@ -43,6 +44,35 @@ def imdb_id_from_url(url: str) -> str | None:
         return None
     match = IMDB_TITLE_RE.match(parsed.path)
     return match.group(1).lower() if match else None
+
+
+def wikidata_id_from_url(url: str) -> str | None:
+    """Accept QIDs only from canonical Wikidata entity URLs."""
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except ValueError:
+        return None
+    if parsed.scheme not in {"https", "http"} or not _allowed_host(url, "wikidata.org"):
+        return None
+    match = WIKIDATA_ENTITY_RE.match(parsed.path)
+    return match.group(1).upper() if match else None
+
+
+def _typed_lens_ids(result: dict, field: str, pattern: re.Pattern) -> list[str]:
+    identifiers = result.get("lens_identifiers") or {}
+    if not isinstance(identifiers, dict):
+        return []
+    values = identifiers.get(field) or []
+    if not isinstance(values, list):
+        return []
+    output = []
+    seen = set()
+    for value in values:
+        candidate = str(value or "").strip()
+        if pattern.fullmatch(candidate) and candidate not in seen:
+            seen.add(candidate)
+            output.append(candidate)
+    return output
 
 
 def _resolved_destination_url(value: str) -> str:
@@ -109,36 +139,94 @@ def _resolved_destination_urls(result: dict) -> list[str]:
 
 
 def extract_tmdb_movie_ids(results: list[dict]) -> list[int]:
-    """Extract unique numeric IDs only from official TMDB movie destinations.
+    """Extract unique IDs from official TMDB URLs or explicitly typed Lens metadata.
 
-    Lens titles, text snippets, IMDb links, country names, image URLs, filenames,
-    and source-folder names are never read as movie identity inputs.
+    Titles, snippets, arbitrary ID keys, commerce IDs, image URLs, filenames and
+    source-folder names are never read as movie identity inputs.
     """
     movie_ids: list[int] = []
     seen: set[int] = set()
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
             continue
+        url_ids = []
         for destination in _resolved_destination_urls(result):
             movie_id = tmdb_movie_id_from_url(destination)
-            if movie_id is not None and movie_id not in seen:
+            if movie_id is not None and movie_id not in url_ids:
+                url_ids.append(movie_id)
+        typed_ids = list(dict.fromkeys(
+            int(raw_id) for raw_id in _typed_lens_ids(
+                result, "tmdb_ids", re.compile(r"^[1-9]\d{0,11}$")
+            )
+        ))
+        # Preserve the existing Lens URL-candidate order. Typed metadata is
+        # accepted only when it is singular and does not conflict with URL IDs.
+        if len(typed_ids) > 1 or (
+            typed_ids and url_ids and typed_ids[0] not in url_ids
+        ):
+            continue
+        row_ids = url_ids or typed_ids
+        for movie_id in row_ids:
+            if movie_id not in seen:
                 seen.add(movie_id)
                 movie_ids.append(movie_id)
     return movie_ids
 
 def extract_imdb_ids(results: list[dict]) -> list[str]:
-    """Extract unique IMDb title IDs only from resolved official IMDb title URLs."""
+    """Extract unique IDs from official IMDb title URLs or typed Lens metadata."""
     imdb_ids: list[str] = []
     seen: set[str] = set()
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
             continue
+        url_ids = []
         for destination in _resolved_destination_urls(result):
             imdb_id = imdb_id_from_url(destination)
-            if imdb_id and imdb_id not in seen:
+            if imdb_id and imdb_id not in url_ids:
+                url_ids.append(imdb_id)
+        typed_ids = list(dict.fromkeys(
+            value.lower() for value in _typed_lens_ids(
+                result, "imdb_ids", re.compile(r"^tt\d{5,12}$", re.I)
+            )
+        ))
+        if len(typed_ids) > 1 or (
+            typed_ids and url_ids and typed_ids[0] not in url_ids
+        ):
+            continue
+        row_ids = url_ids or typed_ids
+        for imdb_id in row_ids:
+            if imdb_id not in seen:
                 seen.add(imdb_id)
                 imdb_ids.append(imdb_id)
     return imdb_ids
+
+
+def extract_wikidata_ids(results: list[dict]) -> list[str]:
+    """Extract QIDs only from typed Lens metadata or canonical Wikidata URLs."""
+    output: list[str] = []
+    seen: set[str] = set()
+    for result in results or []:
+        if not isinstance(result, dict) or result.get("error"):
+            continue
+        row_ids = []
+        for destination in _resolved_destination_urls(result):
+            qid = wikidata_id_from_url(destination)
+            if qid and qid not in row_ids:
+                row_ids.append(qid)
+        for qid in _typed_lens_ids(
+            result, "wikidata_ids", re.compile(r"^Q[1-9]\d{0,15}$", re.I)
+        ):
+            qid = qid.upper()
+            if qid not in row_ids:
+                row_ids.append(qid)
+        # A single Lens row must resolve to one unambiguous Wikidata entity.
+        if len(row_ids) != 1:
+            continue
+        qid = row_ids[0]
+        if qid not in seen:
+            seen.add(qid)
+            output.append(qid)
+    return output
 
 
 def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
@@ -216,11 +304,22 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
     top_hosts = dict(
         sorted(result_hosts.items(), key=lambda item: (-item[1], item[0]))[:12]
     )
+    observed_tmdb_ids = extract_tmdb_movie_ids(results)
+    observed_imdb_ids = extract_imdb_ids(results)
     return {
         "official_tmdb_url_count": len(official_urls),
-        "official_tmdb_ids": movie_ids,
+        "official_tmdb_ids": observed_tmdb_ids or movie_ids,
         "official_imdb_url_count": len(official_imdb_urls),
-        "official_imdb_ids": imdb_ids,
+        "official_imdb_ids": observed_imdb_ids or imdb_ids,
+        "lens_wikidata_ids": extract_wikidata_ids(results),
+        "lens_structured_tmdb_ids": [
+            value for result in (results or []) if isinstance(result, dict)
+            for value in _typed_lens_ids(result, "tmdb_ids", re.compile(r"^[1-9]\d{0,11}$"))
+        ],
+        "lens_structured_imdb_ids": [
+            value.lower() for result in (results or []) if isinstance(result, dict)
+            for value in _typed_lens_ids(result, "imdb_ids", re.compile(r"^tt\d{5,12}$", re.I))
+        ],
         "result_url_count": result_url_count,
         "google_wrapper_count": google_wrapper_count,
         "google_goto_url_count": google_goto_url_count,
