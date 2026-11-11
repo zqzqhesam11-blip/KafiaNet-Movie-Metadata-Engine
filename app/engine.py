@@ -578,10 +578,11 @@ class MetadataEngine:
         reverse_image_results: list[dict[str, Any]],
         expected_folder: str = "",
     ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
-        """Resolve official TMDB/IMDb IDs found by Lens or its title-derived search.
+        """Resolve typed movie identifiers and entity IDs returned by Google Lens.
 
-        Wikipedia, Wikidata, AFI, and BFI are retained as corroborating research
-        sources only. They cannot independently create a READY identity.
+        A Lens Wikidata QID may resolve through TMDB /find only when exactly one
+        movie_result is returned. All accepted IDs still require TMDB movie-details
+        verification before a READY identity can be emitted.
         """
         reverse_image_failed = any(
             isinstance(item, dict) and item.get("error")
@@ -717,7 +718,7 @@ class MetadataEngine:
             "imdb_ids": list(lens_imdb_ids),
             "tmdb_id_lookup": tmdb_id_lookup,
             "id_resolution": {
-                "strategy": "official_lens_or_lens_derived_title_search_then_tmdb_find",
+                "strategy": "google_lens_typed_identifier_or_entity_url_then_tmdb_find",
                 "tmdb_ids_seen": list(lens_tmdb_ids),
                 "imdb_ids_seen": list(lens_imdb_ids),
                 "imdb_to_tmdb_ids": {},
@@ -2197,6 +2198,17 @@ class MetadataEngine:
                 for field, value in (lens_diag.get("raw_result_field_types") or {}).items()
             ) or "none"
             tmdb_lookup = identity_evidence.get("tmdb_id_lookup") or {}
+            structured_identifier_counts = lens_diag.get("structured_identifier_counts") or {}
+            structured_identifier_text = ",".join(
+                f"{name.removesuffix('_ids')}:{count}"
+                for name, count in structured_identifier_counts.items()
+            ) or "none"
+            wikidata_resolution = identity_evidence.get("wikidata_resolution") or {}
+            wikidata_resolution_text = (
+                f"{wikidata_resolution.get('status', 'not_run')}:"
+                f"{wikidata_resolution.get('selected_wikidata_id') or 'none'}:"
+                f"{','.join(str(value) for value in (wikidata_resolution.get('tmdb_movie_ids') or [])[:5]) or 'none'}"
+            )
             print(
                 f"[KafiaNet] [{position}/{total}] DONE status={record['status']} "
                 f"tmdb_id={tmdb_id if tmdb_id is not None else 'none'} "
@@ -2242,6 +2254,9 @@ class MetadataEngine:
                 f"official_tmdb_urls={lens_diag.get('official_tmdb_url_count', 0)} "
                 f"official_tmdb_ids={','.join(str(value) for value in (lens_diag.get('official_tmdb_ids') or [])[:10]) or 'none'} "
                 f"official_imdb_ids={','.join(str(value) for value in (lens_diag.get('official_imdb_ids') or [])[:10]) or 'none'} "
+                f"lens_wikidata_ids={','.join(lens_diag.get('lens_wikidata_ids') or []) or 'none'} "
+                f"lens_structured_ids='{safe_log_detail(structured_identifier_text, 180)}' "
+                f"wikidata_id_lookup='{safe_log_detail(wikidata_resolution_text, 180)}' "
                 f"result_urls={lens_diag.get('result_url_count', 0)} "
                 f"google_wrappers={lens_diag.get('google_wrapper_count', 0)} "
                 f"google_goto={lens_diag.get('google_goto_candidates', 0)}/{lens_diag.get('google_goto_resolved', 0)}/{lens_diag.get('google_goto_failed', 0)}/{lens_diag.get('google_goto_skipped', 0)} "
