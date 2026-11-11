@@ -949,11 +949,15 @@ class MetadataEngine:
                 # to the IMDb-derived candidate when the higher-priority ID fails.
                 break
             except Exception as exc:
-                details_errors.append({
+                error_row = {
                     "tmdb_id": str(tmdb_id),
                     "error": type(exc).__name__,
                     "message": str(exc)[:250],
-                })
+                }
+                details_errors.append(error_row)
+                if int(tmdb_id) in wikidata_tmdb_ids:
+                    wikidata_resolution["status"] = "details_verification_failed"
+                    wikidata_resolution["errors"].append(error_row)
 
         evidence["id_resolution"]["errors"].extend(details_errors)
         evidence["id_resolution"]["unresolved_tmdb_ids"] = [
