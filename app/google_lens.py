@@ -650,6 +650,164 @@ class BrightDataGoogleLensClient:
                 collect(item.get(key))
         return values
 
+    @staticmethod
+    def _structured_identifiers(item: dict[str, Any]) -> dict[str, list[str]]:
+        """Extract only explicitly typed IDs and official entity URLs from Lens metadata.
+
+        Generic text, captions, filenames, arbitrary id keys, ASINs and store
+        identifiers are never promoted to movie identity IDs.
+        """
+        output: dict[str, list[str]] = {
+            "tmdb_ids": [],
+            "imdb_ids": [],
+            "wikidata_ids": [],
+            "google_knowledge_graph_ids": [],
+            "asin_ids": [],
+            "google_play_ids": [],
+        }
+        seen: dict[str, set[str]] = {key: set() for key in output}
+        field_kinds = {
+            "tmdb": "tmdb",
+            "tmdbid": "tmdb",
+            "tmdbmovieid": "tmdb",
+            "themoviedbid": "tmdb",
+            "imdb": "imdb",
+            "imdbid": "imdb",
+            "imdbtitleid": "imdb",
+            "imdbidentifier": "imdb",
+            "wikidata": "wikidata",
+            "wikidataid": "wikidata",
+            "wikidataqid": "wikidata",
+            "wikidataentityid": "wikidata",
+            "wikidataentity": "wikidata",
+            "googleknowledgegraphid": "google_knowledge_graph",
+            "knowledgegraphmid": "google_knowledge_graph",
+            "freebasemid": "google_knowledge_graph",
+            "mid": "google_knowledge_graph",
+            "asin": "asin",
+            "amazonasin": "asin",
+            "googleplayid": "google_play",
+            "playstoreid": "google_play",
+        }
+        ignored_branches = {
+            "image", "imageurl", "originalimage", "originalimageurl",
+            "thumbnail", "thumbnailurl", "sourceicon", "logo",
+            "imagebase64", "base64", "favicon", "icon",
+        }
+        identifier_children = {"id", "value", "identifier"}
+
+        def add(kind: str, raw: Any) -> None:
+            value = str(raw or "").strip()
+            if not value or len(value) > 240:
+                return
+            target = {
+                "tmdb": ("tmdb_ids", re.compile(r"^[1-9]\d{0,11}$")),
+                "imdb": ("imdb_ids", re.compile(r"^tt\d{5,12}$", re.I)),
+                "wikidata": ("wikidata_ids", re.compile(r"^Q[1-9]\d{0,15}$", re.I)),
+                "google_knowledge_graph": (
+                    "google_knowledge_graph_ids",
+                    re.compile(r"^(?:kg:)?/m/[A-Za-z0-9_]+$", re.I),
+                ),
+                "asin": ("asin_ids", re.compile(r"^[A-Z0-9]{10}$", re.I)),
+                "google_play": (
+                    "google_play_ids",
+                    re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,199}$"),
+                ),
+            }.get(kind)
+            if target is None:
+                return
+            bucket, pattern = target
+            if not pattern.fullmatch(value):
+                return
+            normalized = value.lower() if bucket == "imdb_ids" else (
+                value.upper() if bucket in {"wikidata_ids", "asin_ids"} else value
+            )
+            if normalized not in seen[bucket]:
+                seen[bucket].add(normalized)
+                output[bucket].append(normalized)
+
+        def add_url(raw: str) -> None:
+            try:
+                parsed = urlparse(raw.strip())
+            except ValueError:
+                return
+            host = (parsed.hostname or "").casefold().rstrip(".")
+            path = parsed.path or ""
+            if host == "imdb.com" or host.endswith(".imdb.com"):
+                match = re.match(r"^/title/(tt\d{5,12})(?:/|$)", path, re.I)
+                if match:
+                    add("imdb", match.group(1))
+            elif host == "themoviedb.org" or host.endswith(".themoviedb.org"):
+                match = re.match(r"^/movie/([1-9]\d{0,11})(?:[-/]|$)", path, re.I)
+                if match:
+                    add("tmdb", match.group(1))
+            elif host == "wikidata.org" or host.endswith(".wikidata.org"):
+                match = re.match(r"^/(?:wiki|entity)/(Q[1-9]\d{0,15})(?:/|$)", path, re.I)
+                if match:
+                    add("wikidata", match.group(1))
+            elif re.search(r"(?:^|\.)amazon\.(?:com|co\.uk|in|de|fr|it|es|ca|co\.jp|com\.au)$", host):
+                match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:/|$)", path, re.I)
+                if match:
+                    add("asin", match.group(1))
+            elif host == "play.google.com":
+                match = re.search(r"/store/movies/details/([^/?#]+)", path, re.I)
+                if match:
+                    add("google_play", match.group(1))
+                else:
+                    play_id = (parse_qs(parsed.query).get("id") or [""])[0]
+                    if play_id:
+                        add("google_play", play_id)
+
+        nodes_seen = 0
+
+        def walk(value: Any, kind: str | None = None, depth: int = 0) -> None:
+            nonlocal nodes_seen
+            if depth > 8 or nodes_seen >= 600:
+                return
+            nodes_seen += 1
+            if isinstance(value, str):
+                if kind:
+                    add(kind, value)
+                if value.startswith(("https://", "http://")):
+                    add_url(value)
+                return
+            if isinstance(value, list):
+                for child in value[:50]:
+                    walk(child, None, depth + 1)
+                return
+            if isinstance(value, dict):
+                for name, child in list(value.items())[:80]:
+                    normalized_name = re.sub(r"[^a-z0-9]", "", str(name).casefold())
+                    if normalized_name in ignored_branches:
+                        continue
+                    child_kind = field_kinds.get(normalized_name)
+                    if child_kind is None and kind and normalized_name in identifier_children:
+                        child_kind = kind
+                    if isinstance(child, str) and child.startswith(("https://", "http://")):
+                        add_url(child)
+                    walk(child, child_kind, depth + 1)
+
+        walk(item)
+        return output
+
+    @staticmethod
+    def _structured_identifier_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+        counts = {
+            "tmdb_ids": 0,
+            "imdb_ids": 0,
+            "wikidata_ids": 0,
+            "google_knowledge_graph_ids": 0,
+            "asin_ids": 0,
+            "google_play_ids": 0,
+        }
+        for row in rows:
+            identifiers = row.get("lens_identifiers") if isinstance(row, dict) else None
+            if not isinstance(identifiers, dict):
+                continue
+            for key in counts:
+                counts[key] += len(identifiers.get(key) or [])
+        return counts
+
     @classmethod
     def _normalize_matches(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
@@ -694,6 +852,7 @@ class BrightDataGoogleLensClient:
                 "content": description,
                 "provider": "google_lens_brightdata",
                 "position": item.get("position") or item.get("global_rank") or item.get("rank"),
+                "lens_identifiers": cls._structured_identifiers(item),
             })
         return normalized
 
@@ -1547,6 +1706,7 @@ class BrightDataGoogleLensClient:
             "data_format": aggregate_diagnostics["data_format"],
             "response_modes_attempted": list(response_modes),
             "response_headers": aggregate_diagnostics["response_headers"],
+            "structured_identifier_counts": self._structured_identifier_counts(normalized),
             **self._raw_result_diagnostics(rows),
         }
         return normalized, rows, tab_diagnostics
@@ -1711,7 +1871,18 @@ class BrightDataGoogleLensClient:
         raw_paths_by_field: dict[str, dict[str, int]] = {}
         raw_fields: set[str] = set()
         raw_field_types: dict[str, set[str]] = {}
+        structured_identifier_counts = {
+            "tmdb_ids": 0,
+            "imdb_ids": 0,
+            "wikidata_ids": 0,
+            "google_knowledge_graph_ids": 0,
+            "asin_ids": 0,
+            "google_play_ids": 0,
+        }
         for diag in tabs.values():
+            for name, count in (diag.get("structured_identifier_counts") or {}).items():
+                if name in structured_identifier_counts:
+                    structured_identifier_counts[name] += int(count or 0)
             raw_fields.update(diag.get("raw_result_fields") or [])
             for name, types in (diag.get("raw_result_field_types") or {}).items():
                 raw_field_types.setdefault(name, set()).update(
@@ -1771,6 +1942,7 @@ class BrightDataGoogleLensClient:
             "rate_limit_wait_seconds": sum(
                 int(item.get("rate_limit_wait_seconds") or 0) for item in tabs.values()
             ),
+            "structured_identifier_counts": structured_identifier_counts,
             "raw_result_fields": sorted(raw_fields)[:40],
             "raw_result_field_types": {
                 name: "/".join(sorted(types))
