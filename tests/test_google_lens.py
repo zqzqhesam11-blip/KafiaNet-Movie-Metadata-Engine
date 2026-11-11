@@ -123,6 +123,27 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
             1,
         )
 
+    def test_extracts_numeric_and_array_values_from_typed_identifier_fields(self):
+        api = self.make_client({
+            "exact_matches": [{
+                "title": "Typed identifiers",
+                "metadata": {
+                    "tmdb_id": 10754,
+                    "external_ids": {
+                        "imdb_ids": ["tt0095468", "tt0095468"],
+                    },
+                    "wikidata_entity": [{"id": "Q12345"}],
+                },
+            }]
+        })
+
+        rows = api.search_by_image_url("https://example.com/typed-identifiers.jpg")
+
+        identifiers = rows[0]["lens_identifiers"]
+        self.assertEqual(identifiers["tmdb_ids"], ["10754"])
+        self.assertEqual(identifiers["imdb_ids"], ["tt0095468"])
+        self.assertEqual(identifiers["wikidata_ids"], ["Q12345"])
+
     def test_commerce_identifiers_alone_do_not_count_as_movie_identity(self):
         api = self.make_client({
             "exact_matches": [{
