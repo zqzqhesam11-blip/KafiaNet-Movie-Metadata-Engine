@@ -773,7 +773,7 @@ class BrightDataGoogleLensClient:
                 return
             if isinstance(value, list):
                 for child in value[:50]:
-                    walk(child, None, depth + 1)
+                    walk(child, kind, depth + 1)
                 return
             if isinstance(value, dict):
                 for name, child in list(value.items())[:80]:
