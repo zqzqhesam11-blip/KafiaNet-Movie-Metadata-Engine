@@ -771,6 +771,10 @@ class BrightDataGoogleLensClient:
                 if value.startswith(("https://", "http://")):
                     add_url(value)
                 return
+            if isinstance(value, int) and not isinstance(value, bool):
+                if kind:
+                    add(kind, value)
+                return
             if isinstance(value, list):
                 for child in value[:50]:
                     walk(child, kind, depth + 1)
