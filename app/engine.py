@@ -11,7 +11,12 @@ from typing import Any
 
 from app.config import Settings
 from app.github_api import GitHubAPI
-from app.image_evidence import extract_imdb_ids, extract_tmdb_movie_ids, tmdb_movie_url_diagnostics
+from app.image_evidence import (
+    extract_imdb_ids,
+    extract_tmdb_movie_ids,
+    extract_wikidata_ids,
+    tmdb_movie_url_diagnostics,
+)
 from app.local_ocr import LocalPosterOCR
 from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
 from app.tmdb import TMDBClient
@@ -584,16 +589,61 @@ class MetadataEngine:
         )
         observed_lens_tmdb_ids = extract_tmdb_movie_ids(reverse_image_results)
         observed_lens_imdb_ids = extract_imdb_ids(reverse_image_results)
-        # Prefer the first official TMDB movie ID from Lens' ranked results.
-        # When Lens supplies no TMDB ID, resolve only its first official IMDb ID
-        # through TMDB /find. Captions, years, filenames and folder labels never
-        # create or select a movie ID.
+        observed_lens_wikidata_ids = extract_wikidata_ids(reverse_image_results)
+        # Prefer identifiers carried by official movie URLs or explicitly typed
+        # Lens metadata. Captions, product IDs, store IDs, filenames and folder
+        # labels never create or select a movie ID.
         direct_tmdb_ids = observed_lens_tmdb_ids[:1]
-        # Keep Lens' first official IMDb ID as a fallback even when a TMDB ID
-        # is also present. The direct TMDB ID remains first priority; IMDb is
-        # resolved only to provide a fallback if TMDB cannot verify it.
         direct_imdb_ids = observed_lens_imdb_ids[:1]
-        lens_tmdb_ids = list(direct_tmdb_ids)
+        wikidata_resolution: dict[str, Any] = {
+            "status": (
+                "skipped_official_lens_id_present"
+                if (direct_tmdb_ids or direct_imdb_ids)
+                else "no_wikidata_id"
+                if not observed_lens_wikidata_ids
+                else "pending"
+            ),
+            "wikidata_ids_seen": list(observed_lens_wikidata_ids),
+            "selected_wikidata_id": None,
+            "tmdb_movie_ids": [],
+            "movie_result_count": 0,
+            "errors": [],
+        }
+        wikidata_tmdb_ids: list[int] = []
+        # A QID is only a typed entity identifier from Lens metadata or a
+        # canonical Wikidata entity URL. Resolve it through TMDB /find; only a
+        # single movie_result can continue to the normal TMDB details check.
+        if not (direct_tmdb_ids or direct_imdb_ids) and observed_lens_wikidata_ids:
+            wikidata_id = observed_lens_wikidata_ids[0]
+            wikidata_resolution["selected_wikidata_id"] = wikidata_id
+            try:
+                wikidata_find = self.tmdb.find_by_wikidata_id(wikidata_id)
+                movie_rows = wikidata_find.get("movie_results") or []
+                mapped_ids = sorted({
+                    int(row["id"])
+                    for row in movie_rows
+                    if isinstance(row, dict)
+                    and str(row.get("id") or "").isdigit()
+                    and int(row.get("id") or 0) > 0
+                })
+                wikidata_resolution.update({
+                    "status": (
+                        "resolved" if len(mapped_ids) == 1
+                        else "ambiguous_tmdb_movie_results" if len(mapped_ids) > 1
+                        else "no_tmdb_movie_match"
+                    ),
+                    "tmdb_movie_ids": mapped_ids,
+                    "movie_result_count": len(mapped_ids),
+                })
+                if len(mapped_ids) == 1:
+                    wikidata_tmdb_ids = mapped_ids
+            except Exception as exc:
+                wikidata_resolution["status"] = "lookup_error"
+                wikidata_resolution["errors"] = [{
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:220],
+                }]
+        lens_tmdb_ids = list(direct_tmdb_ids or wikidata_tmdb_ids)
         lens_imdb_ids = list(direct_imdb_ids)
         title_search_tmdb_ids: list[int] = []
         title_search_imdb_ids: list[str] = []
@@ -650,7 +700,9 @@ class MetadataEngine:
         tmdb_id_lookup: dict[str, Any] = {
             "status": "resolving" if (lens_tmdb_ids or lens_imdb_ids) else "no_tmdb_id",
             "tmdb_ids": list(lens_tmdb_ids),
-            "direct_tmdb_ids": list(lens_tmdb_ids),
+            "direct_tmdb_ids": list(direct_tmdb_ids),
+            "wikidata_tmdb_ids": list(wikidata_tmdb_ids),
+            "wikidata_resolution": wikidata_resolution,
             "imdb_ids": list(lens_imdb_ids),
             "imdb_find_results": {},
             "imdb_find_errors": [],
@@ -669,12 +721,18 @@ class MetadataEngine:
                 "tmdb_ids_seen": list(lens_tmdb_ids),
                 "imdb_ids_seen": list(lens_imdb_ids),
                 "imdb_to_tmdb_ids": {},
+                "wikidata_ids_seen": list(observed_lens_wikidata_ids),
+                "wikidata_to_tmdb_ids": (
+                    {wikidata_resolution.get("selected_wikidata_id"): list(wikidata_tmdb_ids)}
+                    if wikidata_resolution.get("selected_wikidata_id") else {}
+                ),
                 "unresolved_tmdb_ids": [],
                 "folder_name_used": False,
                 "image_filename_used": False,
                 "errors": [],
             },
             "candidate_identities": [],
+            "wikidata_resolution": wikidata_resolution,
             "official_title_search": title_search_evidence(),
         }
 
@@ -694,11 +752,21 @@ class MetadataEngine:
         evidence["id_resolution"]["lens_title_tmdb_ids"] = []
         evidence["id_resolution"]["observed_lens_tmdb_ids"] = observed_lens_tmdb_ids
         evidence["id_resolution"]["observed_lens_imdb_ids"] = observed_lens_imdb_ids
+        evidence["id_resolution"]["observed_lens_wikidata_ids"] = observed_lens_wikidata_ids
         evidence["id_resolution"]["ignored_secondary_lens_tmdb_ids"] = observed_lens_tmdb_ids[1:]
         evidence["id_resolution"]["ignored_secondary_lens_imdb_ids"] = observed_lens_imdb_ids[1:]
         tmdb_id_lookup["lens_title_tmdb_ids"] = []
         tmdb_id_lookup["observed_lens_tmdb_ids"] = observed_lens_tmdb_ids
         tmdb_id_lookup["observed_lens_imdb_ids"] = observed_lens_imdb_ids
+        tmdb_id_lookup["observed_lens_wikidata_ids"] = observed_lens_wikidata_ids
+
+        if wikidata_resolution.get("status") == "ambiguous_tmdb_movie_results":
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": "One Lens Wikidata entity ID resolved to multiple TMDB movie records; refusing to choose between them",
+                "candidate_ids": list(wikidata_resolution.get("tmdb_movie_ids") or []),
+            }, evidence
 
         if reverse_image_failed and not (lens_tmdb_ids or lens_imdb_ids):
             return None, {
@@ -714,6 +782,8 @@ class MetadataEngine:
         evidence["strategy"] = (
             "google_lens_official_id"
             if (direct_tmdb_ids or direct_imdb_ids)
+            else "google_lens_wikidata_id_via_tmdb_find"
+            if wikidata_tmdb_ids
             else "google_lens_id_only_no_identifier"
         )
         evidence["id_resolution"]["tmdb_ids_seen"] = list(lens_tmdb_ids)
@@ -742,7 +812,11 @@ class MetadataEngine:
             }, evidence
 
         if not lens_tmdb_ids and not lens_imdb_ids:
-            reason = "Google Lens did not return an official TMDB movie ID or IMDb title ID for this image"
+            reason = "Google Lens did not return a verified TMDB movie ID, IMDb title ID, or resolvable Wikidata film ID for this image"
+            if wikidata_resolution.get("status") == "no_tmdb_movie_match":
+                reason += "; the Lens Wikidata entity had no TMDB movie_result"
+            elif wikidata_resolution.get("status") == "lookup_error":
+                reason += "; Wikidata ID lookup failed"
             if title_search_diagnostics.get("error"):
                 reason += ": " + str(title_search_diagnostics.get("error"))[:180]
             return None, {
@@ -994,6 +1068,10 @@ class MetadataEngine:
             identity_source = "google_lens_official_imdb_id_via_tmdb_find"
             identity_method = "lens_imdb_id_tmdb_find"
             verification = "First official IMDb title ID returned by Google Lens resolved through TMDB /find and verified by TMDB movie details"
+        elif selected_id in wikidata_tmdb_ids:
+            identity_source = "google_lens_wikidata_id_via_tmdb_find"
+            identity_method = "lens_wikidata_id_tmdb_find"
+            verification = "The explicit Wikidata entity ID returned by Google Lens resolved to one TMDB movie_result, and TMDB movie details verified that movie ID"
         else:
             identity_source = "google_lens_id_via_tmdb"
             identity_method = "lens_identifier_tmdb_lookup"
@@ -1006,6 +1084,9 @@ class MetadataEngine:
             "verification": verification,
             "official_tmdb_ids": list(direct_tmdb_ids),
             "official_imdb_ids": list(direct_imdb_ids),
+            "wikidata_ids": list(observed_lens_wikidata_ids),
+            "wikidata_tmdb_ids": list(wikidata_tmdb_ids),
+            "wikidata_resolution": wikidata_resolution,
             "lens_title_tmdb_ids": list(lens_title_tmdb_ids),
             "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
             "google_title_search_imdb_ids": list(title_search_imdb_ids),
@@ -1026,6 +1107,10 @@ class MetadataEngine:
                 "TMDB movie details verified the official movie ID returned by Google Lens"
                 if has_direct_tmdb_id
                 else "TMDB /find resolved the IMDb title ID returned by Google Lens and movie details verified the same IMDb ID"
+                if has_imdb_id
+                else "TMDB /find resolved the Wikidata entity ID returned by Google Lens and TMDB movie details verified the returned movie record"
+                if selected_id in wikidata_tmdb_ids
+                else "TMDB movie details verified the Lens-derived movie identifier"
             ),
         }, evidence
 
