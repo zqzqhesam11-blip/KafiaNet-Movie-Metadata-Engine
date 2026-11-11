@@ -201,7 +201,10 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(match["status"], "review")
         self.assertEqual(engine.tmdb.wikidata_find_calls, ["Q12345"])
         self.assertEqual(engine.tmdb.details_calls, [10754])
-        self.assertEqual(evidence["wikidata_resolution"]["status"], "resolved")
+        self.assertEqual(
+            evidence["wikidata_resolution"]["status"],
+            "details_verification_failed",
+        )
         self.assertEqual(
             evidence["tmdb_id_lookup"]["errors"][0]["message"],
             "TMDB movie details did not confirm the Wikidata ID returned by /find",
