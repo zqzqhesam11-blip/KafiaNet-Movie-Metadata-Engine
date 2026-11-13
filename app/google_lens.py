@@ -727,7 +727,7 @@ class BrightDataGoogleLensClient:
                 "asin": ("asin_ids", re.compile(r"^[A-Z0-9]{10}$", re.I)),
                 "google_play": (
                     "google_play_ids",
-                    re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,199}$"),
+                    re.compile(r"^[A-Za-z0-9_-]{8,64}$"),
                 ),
             }.get(kind)
             if target is None:
@@ -766,13 +766,12 @@ class BrightDataGoogleLensClient:
                 if match:
                     add("asin", match.group(1))
             elif host == "play.google.com":
-                match = re.search(r"/store/movies/details/([^/?#]+)", path, re.I)
-                if match:
-                    add("google_play", match.group(1))
-                else:
-                    play_id = (parse_qs(parsed.query).get("id") or [""])[0]
-                    if play_id:
-                        add("google_play", play_id)
+                # The segment after /details/ is a display slug (for example,
+                # "Breathless"), not the external Google Play Movies identifier.
+                # Only the explicit query parameter id=... is a P6562 value.
+                play_id = (parse_qs(parsed.query).get("id") or [""])[0]
+                if play_id:
+                    add("google_play", play_id)
 
         nodes_seen = 0
 
