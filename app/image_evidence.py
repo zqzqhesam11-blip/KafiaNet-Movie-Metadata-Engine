@@ -209,7 +209,7 @@ def extract_google_play_ids(results: list[dict]) -> list[str]:
     """
     output: list[str] = []
     seen: set[str] = set()
-    pattern = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+    pattern = re.compile(r"^(?=.*\d)[A-Za-z0-9_-]{8,64}$")
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
             continue
