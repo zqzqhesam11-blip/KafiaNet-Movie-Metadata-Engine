@@ -175,6 +175,13 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
                 ),
             }]
         })
+        exact_response = api.client.post.return_value
+        visual_response = Mock()
+        visual_response.status_code = 200
+        visual_response.headers = {}
+        visual_response.text = ""
+        visual_response.json.return_value = {"visual_matches": []}
+        api.client.post.side_effect = [exact_response, visual_response]
 
         rows = api.search_by_image_url("https://example.com/breathless-poster.jpg")
 
