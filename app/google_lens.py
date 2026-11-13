@@ -727,7 +727,7 @@ class BrightDataGoogleLensClient:
                 "asin": ("asin_ids", re.compile(r"^[A-Z0-9]{10}$", re.I)),
                 "google_play": (
                     "google_play_ids",
-                    re.compile(r"^[A-Za-z0-9_-]{8,64}$"),
+                    re.compile(r"^(?=.*\d)[A-Za-z0-9_-]{8,64}$"),
                 ),
             }.get(kind)
             if target is None:
