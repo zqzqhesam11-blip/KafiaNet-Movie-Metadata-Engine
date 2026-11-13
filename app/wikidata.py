@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -7,6 +8,7 @@ import httpx
 
 
 WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
+WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
 FILM_INSTANCE_IDS = {"Q11424", "Q24862", "Q506240"}
 
 
@@ -72,6 +74,63 @@ class WikidataClient:
         if payload.get("error"):
             raise ValueError("Wikidata API returned an error")
         return payload
+
+    def find_films_by_google_play_id(self, google_play_id: str) -> dict[str, Any]:
+        """Resolve an exact Google Play Movies ID through Wikidata P6562.
+
+        This is an identifier lookup, not a title search. The returned QIDs are
+        still only candidates: the caller must resolve one QID through TMDB
+        /find and confirm the same Wikidata ID in TMDB movie details.
+        """
+        external_id = str(google_play_id or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", external_id):
+            raise ValueError("A valid Google Play Movies external ID is required")
+
+        literal = json.dumps(external_id, ensure_ascii=True)
+        query = (
+            "SELECT DISTINCT ?item WHERE { "
+            f"?item wdt:P6562 {literal} . "
+            "?item wdt:P31/wdt:P279* ?filmClass . "
+            "VALUES ?filmClass { wd:Q11424 wd:Q24862 wd:Q506240 } "
+            "} LIMIT 4"
+        )
+        response = self.client.post(
+            WIKIDATA_SPARQL_URL,
+            data={"query": query, "format": "json"},
+            headers={"Accept": "application/sparql-results+json"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Wikidata Query Service returned an invalid response")
+        bindings = ((payload.get("results") or {}).get("bindings") or [])
+        if not isinstance(bindings, list):
+            raise ValueError("Wikidata Query Service returned an invalid bindings list")
+
+        qids: list[str] = []
+        for row in bindings:
+            if not isinstance(row, dict):
+                continue
+            item = row.get("item") or {}
+            uri = str(item.get("value") or "") if isinstance(item, dict) else ""
+            match = re.fullmatch(r"https?://www\.wikidata\.org/entity/(Q[1-9]\d{0,15})", uri)
+            if match and match.group(1) not in qids:
+                qids.append(match.group(1))
+
+        return {
+            "provider": "wikidata_sparql_exact_external_id",
+            "property": "P6562",
+            "google_play_id": external_id,
+            "status": (
+                "resolved" if len(qids) == 1
+                else "ambiguous" if len(qids) > 1
+                else "no_match"
+            ),
+            "wikidata_ids": qids,
+            "result_count": len(qids),
+            "identity_evidence": bool(len(qids) == 1),
+            "automatic_match_allowed": False,
+        }
 
     @staticmethod
     def _normalize_hints(title_hints: list[str], limit: int) -> list[str]:
