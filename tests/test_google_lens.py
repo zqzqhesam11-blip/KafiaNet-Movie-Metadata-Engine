@@ -115,7 +115,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(identifiers["wikidata_ids"], ["Q12345"])
         self.assertEqual(identifiers["google_knowledge_graph_ids"], ["kg:/m/0dl567"])
         self.assertEqual(identifiers["asin_ids"], ["B003PHJLQY"])
-        self.assertEqual(identifiers["google_play_ids"], ["Breathless"])
+        self.assertEqual(identifiers["google_play_ids"], [])
         # An untyped generic id is never treated as an IMDb identifier.
         self.assertNotIn("tt9999999", identifiers["imdb_ids"])
         self.assertEqual(
@@ -160,12 +160,32 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["lens_identifiers"]["asin_ids"], ["B003PHJLQY"])
-        self.assertEqual(rows[0]["lens_identifiers"]["google_play_ids"], [
-            "com.example.breathless"
-        ])
+        self.assertEqual(rows[0]["lens_identifiers"]["google_play_ids"], [])
         self.assertEqual(rows[0]["lens_identifiers"]["tmdb_ids"], [])
         self.assertEqual(rows[0]["lens_identifiers"]["imdb_ids"], [])
         self.assertEqual(rows[0]["lens_identifiers"]["wikidata_ids"], [])
+
+    def test_extracts_google_play_movie_id_only_from_explicit_id_query_parameter(self):
+        api = self.make_client({
+            "exact_matches": [{
+                "title": "Breathless",
+                "play_store_url": (
+                    "https://play.google.com/store/movies/details/"
+                    "Breathless?id=KuBCXRtFvO8&hl=en"
+                ),
+            }]
+        })
+
+        rows = api.search_by_image_url("https://example.com/breathless-poster.jpg")
+
+        self.assertEqual(
+            rows[0]["lens_identifiers"]["google_play_ids"],
+            ["KuBCXRtFvO8"],
+        )
+        self.assertEqual(
+            api.last_lens_diagnostics["structured_identifier_counts"]["google_play_ids"],
+            1,
+        )
 
     def test_captures_raw_result_fields_and_redacted_link_paths(self):
         api = self.make_client({
