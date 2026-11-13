@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from urllib.parse import parse_qs
 
 import httpx
 
@@ -81,6 +82,66 @@ class WikidataClientTests(unittest.TestCase):
         self.assertEqual(candidate["directors"][0]["name"], "Krzysztof Kieślowski")
         self.assertFalse(output["identity_evidence"])
         self.assertFalse(output["automatic_match_allowed"])
+
+    def test_resolves_exact_google_play_movie_id_through_property_p6562(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.method, "POST")
+            params = parse_qs(request.content.decode("utf-8"))
+            query = params.get("query", [""])[0]
+            self.assertIn('wdt:P6562 "KuBCXRtFvO8"', query)
+            self.assertIn("wdt:P31/wdt:P279*", query)
+            self.assertIn("wd:Q11424", query)
+            self.assertNotIn("Breathless", query)
+            return httpx.Response(200, json={
+                "results": {
+                    "bindings": [{
+                        "item": {
+                            "type": "uri",
+                            "value": "http://www.wikidata.org/entity/Q86427",
+                        }
+                    }]
+                }
+            })
+
+        client = self.make_client(handler)
+        try:
+            result = client.find_films_by_google_play_id("KuBCXRtFvO8")
+        finally:
+            client.client.close()
+
+        self.assertEqual(result["status"], "resolved")
+        self.assertEqual(result["property"], "P6562")
+        self.assertEqual(result["wikidata_ids"], ["Q86427"])
+        self.assertTrue(result["identity_evidence"])
+        self.assertFalse(result["automatic_match_allowed"])
+
+    def test_google_play_external_id_with_multiple_wikidata_films_is_ambiguous(self):
+        client = self.make_client(lambda request: httpx.Response(200, json={
+            "results": {
+                "bindings": [
+                    {"item": {"value": "https://www.wikidata.org/entity/Q86427"}},
+                    {"item": {"value": "https://www.wikidata.org/entity/Q99999"}},
+                ]
+            }
+        }))
+        try:
+            result = client.find_films_by_google_play_id("KuBCXRtFvO8")
+        finally:
+            client.client.close()
+
+        self.assertEqual(result["status"], "ambiguous")
+        self.assertEqual(result["wikidata_ids"], ["Q86427", "Q99999"])
+        self.assertFalse(result["automatic_match_allowed"])
+
+    def test_google_play_external_id_rejects_short_title_slug_before_network(self):
+        client = self.make_client(
+            lambda request: httpx.Response(500, json={})
+        )
+        try:
+            with self.assertRaises(ValueError):
+                client.find_films_by_google_play_id("Breathless")
+        finally:
+            client.client.close()
 
     def test_ignores_non_film_entities_and_handles_empty_hints(self):
         client = self.make_client(

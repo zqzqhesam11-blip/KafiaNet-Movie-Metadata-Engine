@@ -12,6 +12,7 @@ from typing import Any
 from app.config import Settings
 from app.github_api import GitHubAPI
 from app.image_evidence import (
+    extract_google_play_ids,
     extract_imdb_ids,
     extract_tmdb_movie_ids,
     extract_wikidata_ids,
@@ -591,11 +592,50 @@ class MetadataEngine:
         observed_lens_tmdb_ids = extract_tmdb_movie_ids(reverse_image_results)
         observed_lens_imdb_ids = extract_imdb_ids(reverse_image_results)
         observed_lens_wikidata_ids = extract_wikidata_ids(reverse_image_results)
+        observed_lens_google_play_ids = extract_google_play_ids(reverse_image_results)
         # Prefer identifiers carried by official movie URLs or explicitly typed
-        # Lens metadata. Captions, product IDs, store IDs, filenames and folder
+        # Lens metadata. Captions, product IDs, title slugs, filenames and folder
         # labels never create or select a movie ID.
         direct_tmdb_ids = observed_lens_tmdb_ids[:1]
         direct_imdb_ids = observed_lens_imdb_ids[:1]
+        google_play_resolution: dict[str, Any] = {
+            "status": (
+                "skipped_official_movie_id_present"
+                if (direct_tmdb_ids or direct_imdb_ids or observed_lens_wikidata_ids)
+                else "pending"
+                if observed_lens_google_play_ids
+                else "no_google_play_id"
+            ),
+            "google_play_ids_seen": list(observed_lens_google_play_ids),
+            "selected_google_play_id": None,
+            "wikidata_ids": [],
+            "result_count": 0,
+            "errors": [],
+        }
+        # A Google Play Movies identifier is matched verbatim against Wikidata
+        # P6562. No title or URL slug is used to search for an entity.
+        if (
+            not (direct_tmdb_ids or direct_imdb_ids or observed_lens_wikidata_ids)
+            and observed_lens_google_play_ids
+        ):
+            google_play_id = observed_lens_google_play_ids[0]
+            google_play_resolution["selected_google_play_id"] = google_play_id
+            try:
+                wikidata_lookup = self.wikidata.find_films_by_google_play_id(google_play_id)
+                qids = list(wikidata_lookup.get("wikidata_ids") or [])
+                google_play_resolution.update({
+                    "status": wikidata_lookup.get("status") or "lookup_error",
+                    "wikidata_ids": qids,
+                    "result_count": len(qids),
+                })
+                if len(qids) == 1 and google_play_resolution["status"] == "resolved":
+                    observed_lens_wikidata_ids = qids
+            except Exception as exc:
+                google_play_resolution["status"] = "lookup_error"
+                google_play_resolution["errors"] = [{
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:220],
+                }]
         wikidata_resolution: dict[str, Any] = {
             "status": (
                 "skipped_official_lens_id_present"
@@ -704,6 +744,7 @@ class MetadataEngine:
             "direct_tmdb_ids": list(direct_tmdb_ids),
             "wikidata_tmdb_ids": list(wikidata_tmdb_ids),
             "wikidata_resolution": wikidata_resolution,
+            "google_play_resolution": google_play_resolution,
             "imdb_ids": list(lens_imdb_ids),
             "imdb_find_results": {},
             "imdb_find_errors": [],
@@ -723,6 +764,7 @@ class MetadataEngine:
                 "imdb_ids_seen": list(lens_imdb_ids),
                 "imdb_to_tmdb_ids": {},
                 "wikidata_ids_seen": list(observed_lens_wikidata_ids),
+                "google_play_ids_seen": list(observed_lens_google_play_ids),
                 "wikidata_to_tmdb_ids": (
                     {wikidata_resolution.get("selected_wikidata_id"): list(wikidata_tmdb_ids)}
                     if wikidata_resolution.get("selected_wikidata_id") else {}
@@ -734,6 +776,7 @@ class MetadataEngine:
             },
             "candidate_identities": [],
             "wikidata_resolution": wikidata_resolution,
+            "google_play_resolution": google_play_resolution,
             "official_title_search": title_search_evidence(),
         }
 
@@ -760,6 +803,14 @@ class MetadataEngine:
         tmdb_id_lookup["observed_lens_tmdb_ids"] = observed_lens_tmdb_ids
         tmdb_id_lookup["observed_lens_imdb_ids"] = observed_lens_imdb_ids
         tmdb_id_lookup["observed_lens_wikidata_ids"] = observed_lens_wikidata_ids
+
+        if google_play_resolution.get("status") == "ambiguous":
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": "One exact Google Play Movies ID maps to multiple Wikidata film entities; refusing to choose between them",
+                "candidate_ids": list(google_play_resolution.get("wikidata_ids") or []),
+            }, evidence
 
         if wikidata_resolution.get("status") == "ambiguous_tmdb_movie_results":
             return None, {
@@ -1085,6 +1136,10 @@ class MetadataEngine:
             identity_source = "google_lens_official_imdb_id_via_tmdb_find"
             identity_method = "lens_imdb_id_tmdb_find"
             verification = "First official IMDb title ID returned by Google Lens resolved through TMDB /find and verified by TMDB movie details"
+        elif selected_id in wikidata_tmdb_ids and google_play_resolution.get("status") == "resolved":
+            identity_source = "google_lens_google_play_id_via_wikidata_tmdb_find"
+            identity_method = "lens_google_play_id_wikidata_tmdb_find"
+            verification = "The exact Google Play Movies ID matched one Wikidata P6562 film entity, TMDB /find returned one movie_result, and TMDB movie details confirmed the same Wikidata entity ID"
         elif selected_id in wikidata_tmdb_ids:
             identity_source = "google_lens_wikidata_id_via_tmdb_find"
             identity_method = "lens_wikidata_id_tmdb_find"
@@ -1104,6 +1159,8 @@ class MetadataEngine:
             "wikidata_ids": list(observed_lens_wikidata_ids),
             "wikidata_tmdb_ids": list(wikidata_tmdb_ids),
             "wikidata_resolution": wikidata_resolution,
+            "google_play_ids": list(observed_lens_google_play_ids),
+            "google_play_resolution": google_play_resolution,
             "lens_title_tmdb_ids": list(lens_title_tmdb_ids),
             "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
             "google_title_search_imdb_ids": list(title_search_imdb_ids),
@@ -1125,6 +1182,8 @@ class MetadataEngine:
                 if has_direct_tmdb_id
                 else "TMDB /find resolved the IMDb title ID returned by Google Lens and movie details verified the same IMDb ID"
                 if has_imdb_id
+                else "The Google Play Movies ID matched a Wikidata P6562 record and TMDB movie details confirmed that entity"
+                if selected_id in wikidata_tmdb_ids and google_play_resolution.get("status") == "resolved"
                 else "TMDB /find resolved the Wikidata entity ID returned by Google Lens and TMDB movie details verified the returned movie record"
                 if selected_id in wikidata_tmdb_ids
                 else "TMDB movie details verified the Lens-derived movie identifier"
@@ -2215,6 +2274,12 @@ class MetadataEngine:
             ) or "none"
             tmdb_lookup = identity_evidence.get("tmdb_id_lookup") or {}
             structured_identifier_counts = lens_diag.get("structured_identifier_counts") or {}
+            google_play_resolution_log = identity_evidence.get("google_play_resolution") or {}
+            google_play_resolution_text = (
+                f"{google_play_resolution_log.get('status', 'not_run')}:"
+                f"{google_play_resolution_log.get('selected_google_play_id') or 'none'}:"
+                f"{','.join(google_play_resolution_log.get('wikidata_ids') or []) or 'none'}"
+            )
             structured_identifier_text = ",".join(
                 f"{name.removesuffix('_ids')}:{count}"
                 for name, count in structured_identifier_counts.items()
@@ -2271,6 +2336,8 @@ class MetadataEngine:
                 f"official_tmdb_ids={','.join(str(value) for value in (lens_diag.get('official_tmdb_ids') or [])[:10]) or 'none'} "
                 f"official_imdb_ids={','.join(str(value) for value in (lens_diag.get('official_imdb_ids') or [])[:10]) or 'none'} "
                 f"lens_wikidata_ids={','.join(lens_diag.get('lens_wikidata_ids') or []) or 'none'} "
+                f"lens_google_play_ids={','.join(lens_diag.get('lens_google_play_ids') or []) or 'none'} "
+                f"google_play_id_lookup='{safe_log_detail(google_play_resolution_text, 180)}' "
                 f"lens_structured_ids='{safe_log_detail(structured_identifier_text, 180)}' "
                 f"wikidata_id_lookup='{safe_log_detail(wikidata_resolution_text, 180)}' "
                 f"result_urls={lens_diag.get('result_url_count', 0)} "

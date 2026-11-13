@@ -201,6 +201,36 @@ def extract_imdb_ids(results: list[dict]) -> list[str]:
     return imdb_ids
 
 
+def extract_google_play_ids(results: list[dict]) -> list[str]:
+    """Extract Google Play Movies identifiers only from typed metadata or id= URLs.
+
+    Path slugs such as /store/movies/details/Breathless are display text, not
+    stable external identifiers, and are intentionally ignored.
+    """
+    output: list[str] = []
+    seen: set[str] = set()
+    pattern = re.compile(r"^(?=.*\d)[A-Za-z0-9_-]{8,64}$")
+    for result in results or []:
+        if not isinstance(result, dict) or result.get("error"):
+            continue
+        for value in _typed_lens_ids(result, "google_play_ids", pattern):
+            if value not in seen:
+                seen.add(value)
+                output.append(value)
+        for destination in _resolved_destination_urls(result):
+            try:
+                parsed = urlparse(destination)
+            except ValueError:
+                continue
+            if parsed.scheme not in {"https", "http"} or not _allowed_host(destination, "play.google.com"):
+                continue
+            value = (parse_qs(parsed.query).get("id") or [""])[0].strip()
+            if pattern.fullmatch(value) and value not in seen:
+                seen.add(value)
+                output.append(value)
+    return output
+
+
 def extract_wikidata_ids(results: list[dict]) -> list[str]:
     """Extract QIDs only from typed Lens metadata or canonical Wikidata URLs."""
     output: list[str] = []
@@ -312,6 +342,7 @@ def tmdb_movie_url_diagnostics(results: list[dict]) -> dict[str, object]:
         "official_imdb_url_count": len(official_imdb_urls),
         "official_imdb_ids": observed_imdb_ids or imdb_ids,
         "lens_wikidata_ids": extract_wikidata_ids(results),
+        "lens_google_play_ids": extract_google_play_ids(results),
         "lens_structured_tmdb_ids": [
             value for result in (results or []) if isinstance(result, dict)
             for value in _typed_lens_ids(result, "tmdb_ids", re.compile(r"^[1-9]\d{0,11}$"))

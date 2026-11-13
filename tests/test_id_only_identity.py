@@ -7,6 +7,7 @@ from unittest.mock import Mock
 from app.engine import MetadataEngine
 from app.tmdb import TMDBClient
 from app.image_evidence import (
+    extract_google_play_ids,
     extract_imdb_ids,
     extract_tmdb_movie_ids,
     extract_wikidata_ids,
@@ -86,6 +87,26 @@ class FakeTMDB:
     def normalize_details(details: dict):
         return TMDBClient.normalize_details(details)
 
+class FakeWikidata:
+    def __init__(self):
+        self.google_play_calls: list[str] = []
+        self.google_play_results = {
+            "KuBCXRtFvO8": {
+                "status": "resolved",
+                "wikidata_ids": ["Q12345"],
+                "result_count": 1,
+            },
+        }
+
+    def find_films_by_google_play_id(self, google_play_id: str):
+        self.google_play_calls.append(google_play_id)
+        return self.google_play_results.get(google_play_id, {
+            "status": "no_match",
+            "wikidata_ids": [],
+            "result_count": 0,
+        })
+
+
 class FakeGitHub:
     def raw_url(self, path: str) -> str:
         return f"https://raw.example.test/{path}"
@@ -108,6 +129,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         engine._stop_batch = False
         engine._provider_stop_status = None
         engine.tmdb = FakeTMDB()
+        engine.wikidata = FakeWikidata()
         engine.settings = SimpleNamespace(
             posters_repo="owner/posters",
             posters_branch="main",
@@ -209,6 +231,98 @@ class IdOnlyIdentityTests(unittest.TestCase):
             evidence["tmdb_id_lookup"]["errors"][0]["message"],
             "TMDB movie details did not confirm the Wikidata ID returned by /find",
         )
+
+    def test_google_play_id_maps_through_wikidata_p6562_then_tmdb(self):
+        engine = self.make_engine()
+        engine.tmdb.records[10754]["external_ids"]["wikidata_id"] = "Q12345"
+
+        candidate, match, evidence = engine._find_movie([{
+            "title": "A deliberately misleading Lens caption",
+            "lens_identifiers": {
+                "google_play_ids": ["KuBCXRtFvO8"],
+            },
+        }])
+
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(
+            match["identity_source"],
+            "google_lens_google_play_id_via_wikidata_tmdb_find",
+        )
+        self.assertEqual(
+            match["identity_method"],
+            "lens_google_play_id_wikidata_tmdb_find",
+        )
+        self.assertEqual(engine.wikidata.google_play_calls, ["KuBCXRtFvO8"])
+        self.assertEqual(engine.tmdb.wikidata_find_calls, ["Q12345"])
+        self.assertEqual(engine.tmdb.details_calls, [10754])
+        self.assertEqual(
+            evidence["google_play_resolution"]["status"],
+            "resolved",
+        )
+        self.assertEqual(
+            evidence["resolved_identity"]["google_play_ids"],
+            ["KuBCXRtFvO8"],
+        )
+        self.assertEqual(
+            evidence["resolved_identity"]["wikidata_ids"],
+            ["Q12345"],
+        )
+
+    def test_google_play_id_mapping_to_multiple_wikidata_films_stays_review(self):
+        engine = self.make_engine()
+        engine.wikidata.google_play_results["KuBCXRtFvO8"] = {
+            "status": "ambiguous",
+            "wikidata_ids": ["Q12345", "Q99999"],
+            "result_count": 2,
+        }
+
+        candidate, match, evidence = engine._find_movie([{
+            "lens_identifiers": {
+                "google_play_ids": ["KuBCXRtFvO8"],
+            },
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(
+            evidence["google_play_resolution"]["status"],
+            "ambiguous",
+        )
+        self.assertEqual(match["candidate_ids"], ["Q12345", "Q99999"])
+        self.assertEqual(engine.tmdb.wikidata_find_calls, [])
+        self.assertEqual(engine.tmdb.details_calls, [])
+
+    def test_google_play_title_slug_does_not_trigger_wikidata_lookup(self):
+        engine = self.make_engine()
+
+        candidate, match, evidence = engine._find_movie([{
+            "url": "https://play.google.com/store/movies/details/Breathless",
+            "title": "Breathless (1960)",
+        }])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(engine.wikidata.google_play_calls, [])
+        self.assertEqual(
+            evidence["google_play_resolution"]["status"],
+            "no_google_play_id",
+        )
+
+    def test_extract_google_play_ids_ignores_path_slugs_and_accepts_id_parameter(self):
+        rows = [
+            {"url": "https://play.google.com/store/movies/details/Breathless"},
+            {
+                "url": (
+                    "https://play.google.com/store/movies/details/"
+                    "Breathless?id=KuBCXRtFvO8&hl=en"
+                )
+            },
+            {"lens_identifiers": {"google_play_ids": ["KuBCXRtFvO8"]}},
+            {"title": "KuBCXRtFvO8"},
+        ]
+
+        self.assertEqual(extract_google_play_ids(rows), ["KuBCXRtFvO8"])
 
     def test_wikidata_qid_with_multiple_tmdb_movie_results_stays_review(self):
         engine = self.make_engine()
