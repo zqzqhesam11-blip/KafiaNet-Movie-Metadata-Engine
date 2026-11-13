@@ -83,7 +83,7 @@ class WikidataClient:
         /find and confirm the same Wikidata ID in TMDB movie details.
         """
         external_id = str(google_play_id or "").strip()
-        if not re.fullmatch(r"(?=.*\\d)[A-Za-z0-9_-]{8,64}", external_id):
+        if not re.fullmatch(r"(?=.*\d)[A-Za-z0-9_-]{8,64}", external_id):
             raise ValueError("A valid Google Play Movies external ID is required")
 
         literal = json.dumps(external_id, ensure_ascii=True)
