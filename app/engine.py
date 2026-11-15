@@ -612,30 +612,83 @@ class MetadataEngine:
             "result_count": 0,
             "errors": [],
         }
-        # A Google Play Movies identifier is matched verbatim against Wikidata
-        # P6562. No title or URL slug is used to search for an entity.
+        # Check every distinct explicit Google Play ID (within a small bound).
+        # Lens may return multiple regional/catalog listings for the same film.
+        # Only a unique Wikidata film QID shared by the successful exact-ID lookups
+        # can continue to TMDB; conflicting results or incomplete lookups stay REVIEW.
         if (
             not (direct_tmdb_ids or direct_imdb_ids or observed_lens_wikidata_ids)
             and observed_lens_google_play_ids
         ):
-            google_play_id = observed_lens_google_play_ids[0]
-            google_play_resolution["selected_google_play_id"] = google_play_id
-            try:
-                wikidata_lookup = self.wikidata.find_films_by_google_play_id(google_play_id)
-                qids = list(wikidata_lookup.get("wikidata_ids") or [])
-                google_play_resolution.update({
-                    "status": wikidata_lookup.get("status") or "lookup_error",
-                    "wikidata_ids": qids,
-                    "result_count": len(qids),
+            max_google_play_lookups = 6
+            google_play_ids_to_check = list(dict.fromkeys(observed_lens_google_play_ids))
+            lookup_ids = google_play_ids_to_check[:max_google_play_lookups]
+            lookup_rows: list[dict[str, Any]] = []
+            lookup_errors: list[dict[str, str]] = []
+            mapped_qids: list[str] = []
+            saw_ambiguous_lookup = False
+
+            for google_play_id in lookup_ids:
+                try:
+                    wikidata_lookup = self.wikidata.find_films_by_google_play_id(google_play_id)
+                    lookup_status = str(wikidata_lookup.get("status") or "lookup_error")
+                    qids = list(dict.fromkeys(wikidata_lookup.get("wikidata_ids") or []))
+                    lookup_rows.append({
+                        "google_play_id": google_play_id,
+                        "status": lookup_status,
+                        "wikidata_ids": qids,
+                    })
+                    mapped_qids.extend(qids)
+                    if lookup_status == "ambiguous" or len(qids) > 1:
+                        saw_ambiguous_lookup = True
+                    elif lookup_status not in {"resolved", "no_match"}:
+                        lookup_errors.append({
+                            "type": "WikidataLookupIncomplete",
+                            "message": f"{google_play_id}: {lookup_status}",
+                        })
+                except Exception as exc:
+                    lookup_errors.append({
+                        "type": type(exc).__name__,
+                        "message": f"{google_play_id}: {str(exc)[:180]}",
+                    })
+
+            if len(google_play_ids_to_check) > max_google_play_lookups:
+                lookup_errors.append({
+                    "type": "GooglePlayLookupLimitReached",
+                    "message": (
+                        f"Checked {max_google_play_lookups} of "
+                        f"{len(google_play_ids_to_check)} distinct Google Play IDs"
+                    ),
                 })
-                if len(qids) == 1 and google_play_resolution["status"] == "resolved":
-                    observed_lens_wikidata_ids = qids
-            except Exception as exc:
+
+            unique_qids = list(dict.fromkeys(mapped_qids))
+            google_play_resolution.update({
+                "wikidata_ids": unique_qids,
+                "result_count": len(unique_qids),
+                "lookup_count": len(lookup_rows),
+                "lookup_results": lookup_rows,
+                "errors": lookup_errors,
+            })
+
+            if saw_ambiguous_lookup or len(unique_qids) > 1:
+                google_play_resolution["status"] = "ambiguous"
+            elif lookup_errors:
                 google_play_resolution["status"] = "lookup_error"
-                google_play_resolution["errors"] = [{
-                    "type": type(exc).__name__,
-                    "message": str(exc)[:220],
-                }]
+            elif len(unique_qids) == 1:
+                google_play_resolution["status"] = "resolved"
+                resolved_qid = unique_qids[0]
+                google_play_resolution["selected_google_play_id"] = next(
+                    row["google_play_id"]
+                    for row in lookup_rows
+                    if resolved_qid in row["wikidata_ids"]
+                )
+                observed_lens_wikidata_ids = [resolved_qid]
+            elif lookup_rows and all(
+                row["status"] == "no_match" for row in lookup_rows
+            ):
+                google_play_resolution["status"] = "no_match"
+            else:
+                google_play_resolution["status"] = "lookup_error"
         wikidata_resolution: dict[str, Any] = {
             "status": (
                 "skipped_official_lens_id_present"

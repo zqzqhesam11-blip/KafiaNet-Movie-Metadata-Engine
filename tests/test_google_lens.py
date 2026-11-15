@@ -171,7 +171,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
                 "title": "Breathless",
                 "play_store_url": (
                     "https://play.google.com/store/movies/details/"
-                    "Breathless?id=KuBCXRtFvO8&hl=en"
+                    "Breathless?id=D1_Pzd4ayj0.P&hl=en"
                 ),
             }]
         })
@@ -187,7 +187,7 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
 
         self.assertEqual(
             rows[0]["lens_identifiers"]["google_play_ids"],
-            ["KuBCXRtFvO8"],
+            ["D1_Pzd4ayj0.P"],
         )
         self.assertEqual(
             api.last_lens_diagnostics["structured_identifier_counts"]["google_play_ids"],

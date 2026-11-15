@@ -115,6 +115,32 @@ class WikidataClientTests(unittest.TestCase):
         self.assertTrue(result["identity_evidence"])
         self.assertFalse(result["automatic_match_allowed"])
 
+    def test_google_play_external_id_accepts_and_queries_period_p_suffix_verbatim(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = parse_qs(request.content.decode("utf-8"))
+            query = params.get("query", [""])[0]
+            self.assertIn('wdt:P6562 "D1_Pzd4ayj0.P"', query)
+            return httpx.Response(200, json={
+                "results": {
+                    "bindings": [{
+                        "item": {
+                            "type": "uri",
+                            "value": "http://www.wikidata.org/entity/Q12345",
+                        }
+                    }]
+                }
+            })
+
+        client = self.make_client(handler)
+        try:
+            result = client.find_films_by_google_play_id("D1_Pzd4ayj0.P")
+        finally:
+            client.client.close()
+
+        self.assertEqual(result["status"], "resolved")
+        self.assertEqual(result["wikidata_ids"], ["Q12345"])
+        self.assertEqual(result["google_play_id"], "D1_Pzd4ayj0.P")
+
     def test_google_play_external_id_with_multiple_wikidata_films_is_ambiguous(self):
         client = self.make_client(lambda request: httpx.Response(200, json={
             "results": {

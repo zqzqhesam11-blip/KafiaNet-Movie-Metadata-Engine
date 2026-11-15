@@ -293,6 +293,70 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertEqual(engine.tmdb.wikidata_find_calls, [])
         self.assertEqual(engine.tmdb.details_calls, [])
 
+    def test_multiple_google_play_ids_are_checked_until_one_unique_qid_is_found(self):
+        engine = self.make_engine()
+        engine.tmdb.records[10754]["external_ids"]["wikidata_id"] = "Q12345"
+        engine.wikidata.google_play_results["D1_Pzd4ayj0.P"] = {
+            "status": "no_match",
+            "wikidata_ids": [],
+            "result_count": 0,
+        }
+        engine.wikidata.google_play_results["eDqHf0j8GUc.P"] = {
+            "status": "resolved",
+            "wikidata_ids": ["Q12345"],
+            "result_count": 1,
+        }
+
+        candidate, match, evidence = engine._find_movie([
+            {"url": "https://play.google.com/store/movies/details?id=D1_Pzd4ayj0.P"},
+            {"url": "https://play.google.com/store/movies/details/Breathless?id=eDqHf0j8GUc.P"},
+        ])
+
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(
+            engine.wikidata.google_play_calls,
+            ["D1_Pzd4ayj0.P", "eDqHf0j8GUc.P"],
+        )
+        self.assertEqual(
+            evidence["google_play_resolution"]["status"],
+            "resolved",
+        )
+        self.assertEqual(
+            evidence["google_play_resolution"]["selected_google_play_id"],
+            "eDqHf0j8GUc.P",
+        )
+
+    def test_different_google_play_ids_mapping_to_different_qids_stays_review(self):
+        engine = self.make_engine()
+        engine.wikidata.google_play_results["D1_Pzd4ayj0.P"] = {
+            "status": "resolved",
+            "wikidata_ids": ["Q12345"],
+            "result_count": 1,
+        }
+        engine.wikidata.google_play_results["eDqHf0j8GUc.P"] = {
+            "status": "resolved",
+            "wikidata_ids": ["Q99999"],
+            "result_count": 1,
+        }
+
+        candidate, match, evidence = engine._find_movie([
+            {"url": "https://play.google.com/store/movies/details?id=D1_Pzd4ayj0.P"},
+            {"url": "https://play.google.com/store/movies/details?id=eDqHf0j8GUc.P"},
+        ])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(
+            evidence["google_play_resolution"]["status"],
+            "ambiguous",
+        )
+        self.assertEqual(
+            evidence["google_play_resolution"]["wikidata_ids"],
+            ["Q12345", "Q99999"],
+        )
+        self.assertEqual(engine.tmdb.wikidata_find_calls, [])
+
     def test_google_play_title_slug_does_not_trigger_wikidata_lookup(self):
         engine = self.make_engine()
 
@@ -323,6 +387,19 @@ class IdOnlyIdentityTests(unittest.TestCase):
         ]
 
         self.assertEqual(extract_google_play_ids(rows), ["KuBCXRtFvO8"])
+
+    def test_extract_google_play_ids_accepts_period_p_suffix_but_not_path_slug(self):
+        rows = [
+            {"url": "https://play.google.com/store/movies/details/Breathless"},
+            {"url": "https://play.google.com/store/movies/details?id=D1_Pzd4ayj0.P"},
+            {"url": "https://play.google.com/store/movies/details?id=eDqHf0j8GUc.P"},
+            {"title": "D1_Pzd4ayj0.P"},
+        ]
+
+        self.assertEqual(
+            extract_google_play_ids(rows),
+            ["D1_Pzd4ayj0.P", "eDqHf0j8GUc.P"],
+        )
 
     def test_wikidata_qid_with_multiple_tmdb_movie_results_stays_review(self):
         engine = self.make_engine()
