@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlparse
 TMDB_MOVIE_RE = re.compile(r"^/movie/(\d+)(?:[-/]|$)", re.IGNORECASE)
 IMDB_TITLE_RE = re.compile(r"^/title/(tt\d+)(?:/mediaviewer(?:/rm\d+)?)?/?$", re.IGNORECASE)
 WIKIDATA_ENTITY_RE = re.compile(r"^/(?:wiki|entity)/(Q[1-9]\d{0,15})(?:/|$)", re.IGNORECASE)
+GOOGLE_PLAY_MOVIES_ID_RE = re.compile(r"^(?=.*\d)[A-Za-z0-9_-]{8,64}(?:\.P)?$")
 
 
 def _allowed_host(url: str, root: str) -> bool:
@@ -209,7 +210,7 @@ def extract_google_play_ids(results: list[dict]) -> list[str]:
     """
     output: list[str] = []
     seen: set[str] = set()
-    pattern = re.compile(r"^(?=.*\d)[A-Za-z0-9_-]{8,64}$")
+    pattern = GOOGLE_PLAY_MOVIES_ID_RE
     for result in results or []:
         if not isinstance(result, dict) or result.get("error"):
             continue
