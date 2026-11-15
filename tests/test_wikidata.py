@@ -125,7 +125,7 @@ class WikidataClientTests(unittest.TestCase):
                     "bindings": [{
                         "item": {
                             "type": "uri",
-                            "value": "http://www.wikidata.org/entity/Q86427",
+                            "value": "http://www.wikidata.org/entity/Q12345",
                         }
                     }]
                 }
@@ -138,7 +138,7 @@ class WikidataClientTests(unittest.TestCase):
             client.client.close()
 
         self.assertEqual(result["status"], "resolved")
-        self.assertEqual(result["wikidata_ids"], ["Q86427"])
+        self.assertEqual(result["wikidata_ids"], ["Q12345"])
         self.assertEqual(result["google_play_id"], "D1_Pzd4ayj0.P")
 
     def test_google_play_external_id_with_multiple_wikidata_films_is_ambiguous(self):
