@@ -2703,6 +2703,16 @@ class MetadataEngine:
                 f"{google_play_resolution_log.get('selected_google_play_id') or 'none'}:"
                 f"{','.join(google_play_resolution_log.get('wikidata_ids') or []) or 'none'}"
             )
+            google_play_page_resolution_log = identity_evidence.get(
+                "google_play_metadata_resolution"
+            ) or {}
+            google_play_page_resolution_text = (
+                f"{google_play_page_resolution_log.get('status', 'not_run')}:"
+                f"{google_play_page_resolution_log.get('selected_tmdb_id') or 'none'}:"
+                f"candidates={google_play_page_resolution_log.get('candidate_count', 0)}:"
+                f"pages={google_play_page_resolution_log.get('tmdb_query_count', 0)}:"
+                f"errors={len(google_play_page_resolution_log.get('errors') or [])}"
+            )
             structured_identifier_text = ",".join(
                 f"{name.removesuffix('_ids')}:{count}"
                 for name, count in structured_identifier_counts.items()
@@ -2761,7 +2771,9 @@ class MetadataEngine:
                 f"lens_wikidata_ids={','.join(lens_diag.get('lens_wikidata_ids') or []) or 'none'} "
                 f"lens_google_play_ids={','.join(lens_diag.get('lens_google_play_ids') or []) or 'none'} "
                 f"google_play_id_lookup='{safe_log_detail(google_play_resolution_text, 180)}' "
-                f"lens_structured_ids='{safe_log_detail(structured_identifier_text, 180)}' "
+                f"google_play_page_match='{safe_log_detail(google_play_page_resolution_text, 180)}' "
+                f"google_play_page_results={google_play_page_resolution_log.get('tmdb_search_result_count', 0)} "
+                f"lens_structured_ids='{safe_log_detail(structured_identifier_text, 180)}' 
                 f"wikidata_id_lookup='{safe_log_detail(wikidata_resolution_text, 180)}' "
                 f"result_urls={lens_diag.get('result_url_count', 0)} "
                 f"google_wrappers={lens_diag.get('google_wrapper_count', 0)} "
