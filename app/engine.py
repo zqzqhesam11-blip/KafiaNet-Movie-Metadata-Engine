@@ -1230,8 +1230,9 @@ class MetadataEngine:
                 "candidate_ids": [],
             }, evidence
 
-        # ID-only pipeline: Google Lens is the sole discovery provider.
-        # Do not invoke Google Search or search TMDB by title/caption.
+        # Google Lens remains the sole external discovery provider.
+        # TMDB title search is used only after reading an official Google Play
+        # listing; raw Lens captions and poster/folder labels are never searched.
         evidence["official_title_search"] = title_search_evidence()
         evidence["strategy"] = (
             "google_lens_official_id"
