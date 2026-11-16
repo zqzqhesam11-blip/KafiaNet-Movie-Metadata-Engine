@@ -2773,7 +2773,7 @@ class MetadataEngine:
                 f"google_play_id_lookup='{safe_log_detail(google_play_resolution_text, 180)}' "
                 f"google_play_page_match='{safe_log_detail(google_play_page_resolution_text, 180)}' "
                 f"google_play_page_results={google_play_page_resolution_log.get('tmdb_search_result_count', 0)} "
-                f"lens_structured_ids='{safe_log_detail(structured_identifier_text, 180)}' 
+                f"lens_structured_ids='{safe_log_detail(structured_identifier_text, 180)}' "
                 f"wikidata_id_lookup='{safe_log_detail(wikidata_resolution_text, 180)}' "
                 f"result_urls={lens_diag.get('result_url_count', 0)} "
                 f"google_wrappers={lens_diag.get('google_wrapper_count', 0)} "
