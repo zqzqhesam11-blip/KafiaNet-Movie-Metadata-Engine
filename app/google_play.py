@@ -44,6 +44,7 @@ class _GooglePlayHTMLParser(HTMLParser):
         self.itemprops: dict[str, list[str]] = {}
         self.json_ld: list[str] = []
         self.title_parts: list[str] = []
+        self.visible_text: list[str] = []
         self._in_title = False
         self._in_json_ld = False
         self._script_parts: list[str] = []
@@ -93,6 +94,7 @@ class _GooglePlayHTMLParser(HTMLParser):
         value = str(data or "").strip()
         if not value:
             return
+        self.visible_text.append(value)
         if self._in_title:
             self.title_parts.append(value)
         if self._in_json_ld:
@@ -216,7 +218,11 @@ def parse_google_play_movie_html(
         for obj in _iter_dicts(payload):
             raw_type = obj.get("@type") or obj.get("type") or ""
             types = [raw_type] if isinstance(raw_type, str) else raw_type if isinstance(raw_type, list) else []
-            if any(str(value).casefold() in {"movie", "creativework", "videoobject"} for value in types):
+            if any(
+                str(value).rstrip("/").rsplit("/", 1)[-1].casefold()
+                in {"movie", "creativework", "videoobject"}
+                for value in types
+            ):
                 structured_objects.append(obj)
     if not structured_objects:
         for script in parser.json_ld:
@@ -273,6 +279,15 @@ def parse_google_play_movie_html(
                 break
     year = _parse_year(year_raw)
 
+    visible_text = " ".join(parser.visible_text)
+    visible_card = re.search(
+        r"(?<!\d)((?:18|19|20)\d{2})\s*[•·|–—-]\s*(\d{1,3})\s*(?:minutes?|mins?)\b",
+        visible_text,
+        flags=re.I,
+    )
+    if visible_card:
+        year = year or _parse_year(visible_card.group(1))
+
     runtime_raw = _first_value(
         structured_objects,
         "duration", "runtime", "durationMinutes", "runtimeMinutes",
@@ -293,6 +308,8 @@ def parse_google_play_movie_html(
                 runtime_raw = match.group(1)
                 break
     runtime_minutes = parse_runtime_minutes(runtime_raw)
+    if runtime_minutes is None and visible_card:
+        runtime_minutes = parse_runtime_minutes(visible_card.group(2))
 
     director_values: list[str] = []
     cast_values: list[str] = []
@@ -344,6 +361,7 @@ class GooglePlayMetadataClient:
     def _is_allowed_page_url(value: str, expected_id: str) -> bool:
         try:
             parsed = urlparse(str(value or "").strip())
+            port = parsed.port
         except ValueError:
             return False
         host = (parsed.hostname or "").casefold().rstrip(".")
@@ -352,7 +370,7 @@ class GooglePlayMetadataClient:
         return (
             parsed.scheme == "https"
             and host == "play.google.com"
-            and parsed.port in {None, 443}
+            and port in {None, 443}
             and not parsed.username
             and not parsed.password
             and parsed.path.rstrip("/") == "/store/movies/details"
