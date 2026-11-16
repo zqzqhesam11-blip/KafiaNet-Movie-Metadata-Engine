@@ -999,21 +999,6 @@ class MetadataEngine:
             "selected_tmdb_id": None,
             "errors": [],
         }
-        if (
-            not (direct_tmdb_ids or direct_imdb_ids or observed_lens_wikidata_ids)
-            and google_play_resolution.get("status") == "no_match"
-            and observed_lens_google_play_ids
-        ):
-            google_play_metadata_resolution = self._resolve_google_play_page_metadata(
-                observed_lens_google_play_ids
-            )
-        google_play_metadata_tmdb_ids = (
-            [int(google_play_metadata_resolution["selected_tmdb_id"])]
-            if google_play_metadata_resolution.get("status") == "resolved"
-            and str(google_play_metadata_resolution.get("selected_tmdb_id") or "").isdigit()
-            else []
-        )
-
         wikidata_resolution: dict[str, Any] = {
             "status": (
                 "skipped_official_lens_id_present"
@@ -1062,6 +1047,25 @@ class MetadataEngine:
                     "type": type(exc).__name__,
                     "message": str(exc)[:220],
                 }]
+        # Page metadata is the independent fallback when exact Google Play
+        # external-ID mapping and any Lens Wikidata-to-TMDB path did not resolve.
+        # It never overrides a direct TMDB/IMDb ID or an ambiguous Wikidata match.
+        if (
+            not (direct_tmdb_ids or direct_imdb_ids)
+            and not wikidata_tmdb_ids
+            and google_play_resolution.get("status") == "no_match"
+            and observed_lens_google_play_ids
+            and wikidata_resolution.get("status") != "ambiguous_tmdb_movie_results"
+        ):
+            google_play_metadata_resolution = self._resolve_google_play_page_metadata(
+                observed_lens_google_play_ids
+            )
+        google_play_metadata_tmdb_ids = (
+            [int(google_play_metadata_resolution["selected_tmdb_id"])]
+            if google_play_metadata_resolution.get("status") == "resolved"
+            and str(google_play_metadata_resolution.get("selected_tmdb_id") or "").isdigit()
+            else []
+        )
         lens_tmdb_ids = list(
             direct_tmdb_ids or wikidata_tmdb_ids or google_play_metadata_tmdb_ids
         )
