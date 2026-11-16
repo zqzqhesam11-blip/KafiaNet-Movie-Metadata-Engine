@@ -788,27 +788,74 @@ class MetadataEngine:
             output["status"] = "no_exact_tmdb_title_candidate"
             return output
 
-        candidate_ids = list(dict.fromkeys(
-            int(row["id"])
-            for row in exact_search_rows
-            if str(row.get("id") or "").isdigit() and int(row.get("id") or 0) > 0
-        ))
+        # TMDB title search can return many unrelated films with the same short
+        # title. Prune only candidates whose known release year would necessarily
+        # trigger the same >2-year hard conflict used by the full detail evaluator.
+        # Unknown years are retained; the search results are never used as identity.
+        candidate_years: dict[int, set[int]] = {}
+        candidate_ids: list[int] = []
+        for row in exact_search_rows:
+            raw_id = row.get("id")
+            if not str(raw_id or "").isdigit() or int(raw_id or 0) <= 0:
+                continue
+            tmdb_id = int(raw_id)
+            if tmdb_id not in candidate_years:
+                candidate_years[tmdb_id] = set()
+                candidate_ids.append(tmdb_id)
+            raw_year = str(row.get("release_date") or row.get("year") or "").strip()[:4]
+            if raw_year.isdigit():
+                year_value = int(raw_year)
+                if 1870 <= year_value <= 2100:
+                    candidate_years[tmdb_id].add(year_value)
+
         output["candidate_count"] = len(candidate_ids)
-        if len(candidate_ids) > MAX_GOOGLE_PLAY_TMDB_CANDIDATES:
+        page_years: set[int] = set()
+        for page in page_rows:
+            try:
+                page_year = int(page.get("year")) if page.get("year") is not None else None
+            except (TypeError, ValueError):
+                page_year = None
+            if page_year is not None and 1870 <= page_year <= 2100:
+                page_years.add(page_year)
+
+        year_conflict_pruned_ids: list[int] = []
+        detail_candidate_ids: list[int] = []
+        for tmdb_id in candidate_ids:
+            observed_years = candidate_years.get(tmdb_id) or set()
+            # Keep a candidate when any observed search-year variant is
+            # compatible with every known Google Play page year, or when either
+            # side lacks a year. Only unavoidable hard conflicts are pruned.
+            unavoidable_year_conflict = bool(observed_years and page_years) and all(
+                any(abs(candidate_year - page_year) > 2 for page_year in page_years)
+                for candidate_year in observed_years
+            )
+            if unavoidable_year_conflict:
+                year_conflict_pruned_ids.append(tmdb_id)
+            else:
+                detail_candidate_ids.append(tmdb_id)
+
+        output["candidate_count_after_prefilter"] = len(detail_candidate_ids)
+        output["year_conflict_pruned_count"] = len(year_conflict_pruned_ids)
+        output["year_conflict_pruned_ids"] = year_conflict_pruned_ids
+        if len(detail_candidate_ids) > MAX_GOOGLE_PLAY_TMDB_CANDIDATES:
             output["status"] = "too_many_exact_tmdb_title_candidates"
             output["errors"].append({
                 "type": "TMDBCandidateLimitReached",
                 "message": (
                     f"Found {len(candidate_ids)} exact-title candidates; "
-                    f"safe details limit is {MAX_GOOGLE_PLAY_TMDB_CANDIDATES}"
+                    f"{len(detail_candidate_ids)} remain after pruning "
+                    f"{len(year_conflict_pruned_ids)} candidates with unavoidable "
+                    f"release-year conflicts; safe details limit is "
+                    f"{MAX_GOOGLE_PLAY_TMDB_CANDIDATES}"
                 ),
             })
             return output
 
+        output["candidate_details_count"] = len(detail_candidate_ids)
         accepted: list[tuple[int, dict[str, Any]]] = []
         candidate_matches: list[dict[str, Any]] = []
         details_errors: list[dict[str, Any]] = []
-        for tmdb_id in candidate_ids:
+        for tmdb_id in detail_candidate_ids:
             try:
                 details = movie_details(tmdb_id)
                 if not isinstance(details, dict) or int(details.get("id") or 0) != tmdb_id:
