@@ -1053,7 +1053,10 @@ class MetadataEngine:
         if (
             not (direct_tmdb_ids or direct_imdb_ids)
             and not wikidata_tmdb_ids
-            and google_play_resolution.get("status") == "no_match"
+            and (
+                google_play_resolution.get("status") == "no_match"
+                or wikidata_resolution.get("status") == "no_tmdb_movie_match"
+            )
             and observed_lens_google_play_ids
             and wikidata_resolution.get("status") != "ambiguous_tmdb_movie_results"
         ):
