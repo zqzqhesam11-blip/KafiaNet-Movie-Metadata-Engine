@@ -20,6 +20,7 @@ from app.image_evidence import (
 )
 from app.local_ocr import LocalPosterOCR
 from app.google_lens import BrightDataGoogleLensClient, BrightDataQuotaError
+from app.google_play import GooglePlayMetadataClient, evaluate_google_play_tmdb_candidate
 from app.tmdb import TMDBClient
 from app.wikipedia import WikipediaClient
 from app.wikidata import WikidataClient
@@ -33,6 +34,9 @@ MAX_OCR_TMDB_RESULTS_PER_QUERY = 5
 MAX_WIKIPEDIA_TITLE_HINTS = 5
 MAX_WIKIPEDIA_ARTICLES = 8
 MAX_WIKIPEDIA_TMDB_RESULTS_PER_ARTICLE = 5
+MAX_GOOGLE_PLAY_PAGE_IDS = 6
+MAX_GOOGLE_PLAY_TMDB_SEARCH_PAGES = 5
+MAX_GOOGLE_PLAY_TMDB_CANDIDATES = 16
 TRANSIENT_PROVIDER_HTTP_STATUSES = {500, 502, 503, 504}
 
 
@@ -252,6 +256,10 @@ class MetadataEngine:
             WikidataClient(timeout=settings.http_timeout_seconds)
             if research_enabled else None
         )
+        self.google_play = (
+            GooglePlayMetadataClient(timeout=settings.http_timeout_seconds)
+            if research_enabled else None
+        )
         self.local_ocr = (
             LocalPosterOCR(timeout=settings.http_timeout_seconds)
             if research_enabled and bool(getattr(settings, "local_ocr_enabled", False))
@@ -268,6 +276,8 @@ class MetadataEngine:
             self.reverse_image.close()
         if getattr(self, "wikidata", None):
             self.wikidata.close()
+        if getattr(self, "google_play", None):
+            self.google_play.close()
         if getattr(self, "local_ocr", None):
             self.local_ocr.close()
 
@@ -574,6 +584,291 @@ class MetadataEngine:
         })
         return [selected_id], diagnostics
 
+    def _resolve_google_play_page_metadata(
+        self,
+        google_play_ids: list[str],
+    ) -> dict[str, Any]:
+        """Use official Play-page metadata to discover and verify one TMDB movie.
+
+        Google Play IDs are page locators only. Identity requires exact title
+        agreement and independent narrative/metadata corroboration against complete
+        TMDB title-search results and the official movie details endpoint.
+        """
+        output: dict[str, Any] = {
+            "provider": "google_play_page_metadata_then_tmdb_details",
+            "status": "not_run",
+            "identity_evidence": False,
+            "automatic_match_allowed": False,
+            "google_play_ids": [],
+            "page_metadata": [],
+            "tmdb_query_count": 0,
+            "tmdb_search_result_count": 0,
+            "tmdb_total_pages": 0,
+            "candidate_count": 0,
+            "candidate_matches": [],
+            "selected_tmdb_id": None,
+            "errors": [],
+        }
+        page_client = getattr(self, "google_play", None)
+        tmdb = getattr(self, "tmdb", None)
+        if page_client is None or not callable(getattr(page_client, "fetch_movie_metadata", None)):
+            output.update({
+                "status": "skipped_client_unavailable",
+                "errors": [{"type": "ClientUnavailable", "message": "Google Play page metadata client is unavailable"}],
+            })
+            return output
+        search_movies = getattr(tmdb, "search_movies", None)
+        movie_details = getattr(tmdb, "movie_details", None)
+        if not callable(search_movies) or not callable(movie_details):
+            output.update({
+                "status": "skipped_tmdb_unavailable",
+                "errors": [{"type": "ClientUnavailable", "message": "TMDB search or movie details is unavailable"}],
+            })
+            return output
+
+        ids = list(dict.fromkeys(
+            str(value or "").strip()
+            for value in (google_play_ids or [])
+            if str(value or "").strip()
+        ))
+        output["google_play_ids"] = ids[:MAX_GOOGLE_PLAY_PAGE_IDS]
+        if not output["google_play_ids"]:
+            output["status"] = "no_google_play_ids"
+            return output
+        if len(ids) > MAX_GOOGLE_PLAY_PAGE_IDS:
+            output["status"] = "incomplete_lookup_limit"
+            output["errors"].append({
+                "type": "GooglePlayLookupLimitReached",
+                "message": f"Received {len(ids)} IDs; page lookup limit is {MAX_GOOGLE_PLAY_PAGE_IDS}",
+            })
+            return output
+
+        page_rows: list[dict[str, Any]] = []
+        for google_play_id in output["google_play_ids"]:
+            try:
+                metadata = page_client.fetch_movie_metadata(google_play_id)
+            except Exception as exc:
+                output["errors"].append({
+                    "google_play_id": google_play_id,
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:220],
+                })
+                continue
+            if not isinstance(metadata, dict):
+                output["errors"].append({
+                    "google_play_id": google_play_id,
+                    "type": "InvalidMetadata",
+                    "message": "Google Play page parser returned a non-object result",
+                })
+                continue
+            page_rows.append(metadata)
+            if metadata.get("status") != "ok" or not str(metadata.get("title") or "").strip() or not str(metadata.get("description") or "").strip():
+                output["errors"].append({
+                    "google_play_id": google_play_id,
+                    "type": "IncompletePageMetadata",
+                    "message": "Google Play page did not expose both a title and a description",
+                })
+
+        output["page_metadata"] = page_rows
+        if output["errors"] or len(page_rows) != len(output["google_play_ids"]):
+            output["status"] = "lookup_error"
+            return output
+
+        title_keys = {
+            _comparison_title_key(str(row.get("title") or ""))
+            for row in page_rows
+        }
+        title_keys.discard("")
+        if len(title_keys) != 1:
+            output["status"] = "conflicting_page_titles"
+            output["errors"].append({
+                "type": "ConflictingGooglePlayTitles",
+                "message": "Google Play IDs returned different normalized movie titles",
+            })
+            return output
+        query_title = str(page_rows[0].get("title") or "").strip()
+        if not query_title:
+            output["status"] = "incomplete_page_metadata"
+            return output
+
+        search_rows: list[dict[str, Any]] = []
+        total_pages: int | None = None
+        total_results: int | None = None
+        for page_number in range(1, MAX_GOOGLE_PLAY_TMDB_SEARCH_PAGES + 1):
+            try:
+                payload = search_movies(query_title, page=page_number)
+            except TypeError:
+                if page_number > 1:
+                    break
+                try:
+                    payload = search_movies(query_title)
+                except Exception as exc:
+                    output["errors"].append({
+                        "type": type(exc).__name__,
+                        "message": str(exc)[:220],
+                    })
+                    output["status"] = "tmdb_search_error"
+                    return output
+            except Exception as exc:
+                output["errors"].append({
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:220],
+                })
+                output["status"] = "tmdb_search_error"
+                return output
+
+            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                output["status"] = "invalid_tmdb_search_response"
+                output["errors"].append({
+                    "type": "InvalidTMDBResponse",
+                    "message": "TMDB search did not return a result list",
+                })
+                return output
+
+            rows = [row for row in payload.get("results") or [] if isinstance(row, dict)]
+            search_rows.extend(rows)
+            if page_number == 1:
+                try:
+                    total_pages = int(payload.get("total_pages"))
+                    total_results = int(payload.get("total_results"))
+                except (TypeError, ValueError):
+                    output["status"] = "incomplete_tmdb_search_response"
+                    output["errors"].append({
+                        "type": "IncompleteTMDBResponse",
+                        "message": "TMDB did not report total_pages and total_results",
+                    })
+                    return output
+                if total_pages < 0 or total_results < 0:
+                    output["status"] = "incomplete_tmdb_search_response"
+                    return output
+                output["tmdb_total_pages"] = total_pages
+                if total_pages > MAX_GOOGLE_PLAY_TMDB_SEARCH_PAGES:
+                    output["status"] = "incomplete_tmdb_search"
+                    output["errors"].append({
+                        "type": "TMDBSearchPageLimitReached",
+                        "message": (
+                            f"TMDB reported {total_pages} pages; safe completeness limit is "
+                            f"{MAX_GOOGLE_PLAY_TMDB_SEARCH_PAGES}"
+                        ),
+                    })
+                    return output
+                if total_pages <= 1:
+                    break
+            if total_pages is not None and page_number >= total_pages:
+                break
+
+        output["tmdb_query_count"] = min(
+            max(1, (total_pages or 1)),
+            MAX_GOOGLE_PLAY_TMDB_SEARCH_PAGES,
+        )
+        output["tmdb_search_result_count"] = len(search_rows)
+        if total_results is not None and len(search_rows) < total_results:
+            output["status"] = "incomplete_tmdb_search"
+            output["errors"].append({
+                "type": "IncompleteTMDBSearch",
+                "message": (
+                    f"Fetched {len(search_rows)} of {total_results} TMDB title-search results; "
+                    "uniqueness cannot be established"
+                ),
+            })
+            return output
+        if not search_rows:
+            output["status"] = "no_tmdb_candidates"
+            return output
+
+        title_key = next(iter(title_keys))
+        exact_search_rows = [
+            row for row in search_rows
+            if title_key in {
+                _comparison_title_key(str(row.get("title") or "")),
+                _comparison_title_key(str(row.get("original_title") or "")),
+            }
+        ]
+        if not exact_search_rows:
+            output["status"] = "no_exact_tmdb_title_candidate"
+            return output
+
+        candidate_ids = list(dict.fromkeys(
+            int(row["id"])
+            for row in exact_search_rows
+            if str(row.get("id") or "").isdigit() and int(row.get("id") or 0) > 0
+        ))
+        output["candidate_count"] = len(candidate_ids)
+        if len(candidate_ids) > MAX_GOOGLE_PLAY_TMDB_CANDIDATES:
+            output["status"] = "too_many_exact_tmdb_title_candidates"
+            output["errors"].append({
+                "type": "TMDBCandidateLimitReached",
+                "message": (
+                    f"Found {len(candidate_ids)} exact-title candidates; "
+                    f"safe details limit is {MAX_GOOGLE_PLAY_TMDB_CANDIDATES}"
+                ),
+            })
+            return output
+
+        accepted: list[tuple[int, dict[str, Any]]] = []
+        candidate_matches: list[dict[str, Any]] = []
+        details_errors: list[dict[str, Any]] = []
+        for tmdb_id in candidate_ids:
+            try:
+                details = movie_details(tmdb_id)
+                if not isinstance(details, dict) or int(details.get("id") or 0) != tmdb_id:
+                    raise ValueError("TMDB details returned a different movie ID")
+                normalized = TMDBClient.normalize_details(details)
+                comparisons = [
+                    evaluate_google_play_tmdb_candidate(page, normalized)
+                    for page in page_rows
+                ]
+                candidate_report = {
+                    "tmdb_id": tmdb_id,
+                    "title": normalized.get("title"),
+                    "original_title": normalized.get("original_title"),
+                    "year": normalized.get("year"),
+                    "runtime": normalized.get("runtime"),
+                    "page_comparisons": comparisons,
+                    "accepted": bool(comparisons) and all(
+                        row.get("accepted") is True for row in comparisons
+                    ),
+                }
+                candidate_matches.append(candidate_report)
+                if candidate_report["accepted"]:
+                    accepted.append((tmdb_id, details))
+            except Exception as exc:
+                details_errors.append({
+                    "tmdb_id": tmdb_id,
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:220],
+                })
+
+        output["candidate_matches"] = candidate_matches
+        if details_errors:
+            output["errors"].extend(details_errors)
+            output["status"] = "tmdb_details_incomplete"
+            return output
+        if len(accepted) > 1:
+            output["status"] = "ambiguous_tmdb_metadata_match"
+            return output
+        if not accepted:
+            output["status"] = "no_verified_tmdb_metadata_match"
+            return output
+
+        selected_id, selected_details = accepted[0]
+        if not isinstance(getattr(self, "_details_cache", None), dict):
+            self._details_cache = {}
+        self._details_cache[selected_id] = selected_details
+        output.update({
+            "status": "resolved",
+            "identity_evidence": True,
+            "automatic_match_allowed": True,
+            "selected_tmdb_id": selected_id,
+            "candidate_count": len(candidate_ids),
+            "verification": (
+                "One exact TMDB title candidate passed page-description/character matching "
+                "and at least one independent year/runtime/cast/director or second narrative signal; "
+                "all other exact-title candidates were checked and rejected"
+            ),
+        })
+        return output
+
     def _find_movie(
         self,
         reverse_image_results: list[dict[str, Any]],
@@ -689,6 +984,21 @@ class MetadataEngine:
                 google_play_resolution["status"] = "no_match"
             else:
                 google_play_resolution["status"] = "lookup_error"
+        google_play_metadata_resolution: dict[str, Any] = {
+            "provider": "google_play_page_metadata_then_tmdb_details",
+            "status": "not_run",
+            "identity_evidence": False,
+            "automatic_match_allowed": False,
+            "google_play_ids": list(observed_lens_google_play_ids),
+            "page_metadata": [],
+            "tmdb_query_count": 0,
+            "tmdb_search_result_count": 0,
+            "tmdb_total_pages": 0,
+            "candidate_count": 0,
+            "candidate_matches": [],
+            "selected_tmdb_id": None,
+            "errors": [],
+        }
         wikidata_resolution: dict[str, Any] = {
             "status": (
                 "skipped_official_lens_id_present"
@@ -737,7 +1047,31 @@ class MetadataEngine:
                     "type": type(exc).__name__,
                     "message": str(exc)[:220],
                 }]
-        lens_tmdb_ids = list(direct_tmdb_ids or wikidata_tmdb_ids)
+        # Page metadata is the independent fallback when exact Google Play
+        # external-ID mapping and any Lens Wikidata-to-TMDB path did not resolve.
+        # It never overrides a direct TMDB/IMDb ID or an ambiguous Wikidata match.
+        if (
+            not (direct_tmdb_ids or direct_imdb_ids)
+            and not wikidata_tmdb_ids
+            and (
+                google_play_resolution.get("status") == "no_match"
+                or wikidata_resolution.get("status") == "no_tmdb_movie_match"
+            )
+            and observed_lens_google_play_ids
+            and wikidata_resolution.get("status") != "ambiguous_tmdb_movie_results"
+        ):
+            google_play_metadata_resolution = self._resolve_google_play_page_metadata(
+                observed_lens_google_play_ids
+            )
+        google_play_metadata_tmdb_ids = (
+            [int(google_play_metadata_resolution["selected_tmdb_id"])]
+            if google_play_metadata_resolution.get("status") == "resolved"
+            and str(google_play_metadata_resolution.get("selected_tmdb_id") or "").isdigit()
+            else []
+        )
+        lens_tmdb_ids = list(
+            direct_tmdb_ids or wikidata_tmdb_ids or google_play_metadata_tmdb_ids
+        )
         lens_imdb_ids = list(direct_imdb_ids)
         title_search_tmdb_ids: list[int] = []
         title_search_imdb_ids: list[str] = []
@@ -798,6 +1132,8 @@ class MetadataEngine:
             "wikidata_tmdb_ids": list(wikidata_tmdb_ids),
             "wikidata_resolution": wikidata_resolution,
             "google_play_resolution": google_play_resolution,
+            "google_play_metadata_resolution": google_play_metadata_resolution,
+            "google_play_metadata_tmdb_ids": list(google_play_metadata_tmdb_ids),
             "imdb_ids": list(lens_imdb_ids),
             "imdb_find_results": {},
             "imdb_find_errors": [],
@@ -830,6 +1166,7 @@ class MetadataEngine:
             "candidate_identities": [],
             "wikidata_resolution": wikidata_resolution,
             "google_play_resolution": google_play_resolution,
+            "google_play_metadata_resolution": google_play_metadata_resolution,
             "official_title_search": title_search_evidence(),
         }
 
@@ -850,12 +1187,15 @@ class MetadataEngine:
         evidence["id_resolution"]["observed_lens_tmdb_ids"] = observed_lens_tmdb_ids
         evidence["id_resolution"]["observed_lens_imdb_ids"] = observed_lens_imdb_ids
         evidence["id_resolution"]["observed_lens_wikidata_ids"] = observed_lens_wikidata_ids
+        evidence["id_resolution"]["google_play_metadata_tmdb_ids"] = list(google_play_metadata_tmdb_ids)
         evidence["id_resolution"]["ignored_secondary_lens_tmdb_ids"] = observed_lens_tmdb_ids[1:]
         evidence["id_resolution"]["ignored_secondary_lens_imdb_ids"] = observed_lens_imdb_ids[1:]
         tmdb_id_lookup["lens_title_tmdb_ids"] = []
         tmdb_id_lookup["observed_lens_tmdb_ids"] = observed_lens_tmdb_ids
         tmdb_id_lookup["observed_lens_imdb_ids"] = observed_lens_imdb_ids
         tmdb_id_lookup["observed_lens_wikidata_ids"] = observed_lens_wikidata_ids
+        tmdb_id_lookup["google_play_metadata_tmdb_ids"] = list(google_play_metadata_tmdb_ids)
+        tmdb_id_lookup["google_play_metadata_resolution"] = google_play_metadata_resolution
 
         if google_play_resolution.get("status") == "ambiguous":
             return None, {
@@ -873,6 +1213,18 @@ class MetadataEngine:
                 "candidate_ids": list(wikidata_resolution.get("tmdb_movie_ids") or []),
             }, evidence
 
+        if google_play_metadata_resolution.get("status") == "ambiguous_tmdb_metadata_match":
+            return None, {
+                "status": "review",
+                "confidence": 0.0,
+                "reason": "Google Play page metadata matched more than one TMDB movie; refusing to choose",
+                "candidate_ids": [
+                    row.get("tmdb_id")
+                    for row in (google_play_metadata_resolution.get("candidate_matches") or [])
+                    if row.get("accepted") is True
+                ],
+            }, evidence
+
         if reverse_image_failed and not (lens_tmdb_ids or lens_imdb_ids):
             return None, {
                 "status": "review",
@@ -881,14 +1233,17 @@ class MetadataEngine:
                 "candidate_ids": [],
             }, evidence
 
-        # ID-only pipeline: Google Lens is the sole discovery provider.
-        # Do not invoke Google Search or search TMDB by title/caption.
+        # Google Lens remains the sole external discovery provider.
+        # TMDB title search is used only after reading an official Google Play
+        # listing; raw Lens captions and poster/folder labels are never searched.
         evidence["official_title_search"] = title_search_evidence()
         evidence["strategy"] = (
             "google_lens_official_id"
             if (direct_tmdb_ids or direct_imdb_ids)
             else "google_lens_wikidata_id_via_tmdb_find"
             if wikidata_tmdb_ids
+            else "google_lens_google_play_page_metadata_tmdb_match"
+            if google_play_metadata_tmdb_ids
             else "google_lens_id_only_no_identifier"
         )
         evidence["id_resolution"]["tmdb_ids_seen"] = list(lens_tmdb_ids)
@@ -918,6 +1273,13 @@ class MetadataEngine:
 
         if not lens_tmdb_ids and not lens_imdb_ids:
             reason = "Google Lens did not return a verified TMDB movie ID, IMDb title ID, or resolvable Wikidata film ID for this image"
+            if google_play_metadata_resolution.get("status") == "no_verified_tmdb_metadata_match":
+                reason += "; Google Play title/description data did not uniquely verify a TMDB movie"
+            elif google_play_metadata_resolution.get("status") in {
+                "lookup_error", "tmdb_search_error", "tmdb_details_incomplete",
+                "incomplete_tmdb_search", "incomplete_tmdb_search_response",
+            }:
+                reason += "; Google Play page metadata verification was incomplete"
             if wikidata_resolution.get("status") == "no_tmdb_movie_match":
                 reason += "; the Lens Wikidata entity had no TMDB movie_result"
             elif wikidata_resolution.get("status") == "lookup_error":
@@ -1189,6 +1551,13 @@ class MetadataEngine:
             identity_source = "google_lens_official_imdb_id_via_tmdb_find"
             identity_method = "lens_imdb_id_tmdb_find"
             verification = "First official IMDb title ID returned by Google Lens resolved through TMDB /find and verified by TMDB movie details"
+        elif selected_id in google_play_metadata_tmdb_ids:
+            identity_source = "google_lens_google_play_page_metadata_via_tmdb_details"
+            identity_method = "lens_google_play_page_metadata_tmdb_match"
+            verification = (
+                "Official Google Play page title and description were matched against TMDB details; "
+                "the unique candidate passed narrative/character corroboration and independent metadata checks"
+            )
         elif selected_id in wikidata_tmdb_ids and google_play_resolution.get("status") == "resolved":
             identity_source = "google_lens_google_play_id_via_wikidata_tmdb_find"
             identity_method = "lens_google_play_id_wikidata_tmdb_find"
@@ -1214,6 +1583,8 @@ class MetadataEngine:
             "wikidata_resolution": wikidata_resolution,
             "google_play_ids": list(observed_lens_google_play_ids),
             "google_play_resolution": google_play_resolution,
+            "google_play_metadata_tmdb_ids": list(google_play_metadata_tmdb_ids),
+            "google_play_metadata_resolution": google_play_metadata_resolution,
             "lens_title_tmdb_ids": list(lens_title_tmdb_ids),
             "google_title_search_tmdb_ids": list(title_search_tmdb_ids),
             "google_title_search_imdb_ids": list(title_search_imdb_ids),
@@ -1235,6 +1606,8 @@ class MetadataEngine:
                 if has_direct_tmdb_id
                 else "TMDB /find resolved the IMDb title ID returned by Google Lens and movie details verified the same IMDb ID"
                 if has_imdb_id
+                else "Google Play page metadata uniquely matched and was verified against TMDB movie details"
+                if selected_id in google_play_metadata_tmdb_ids
                 else "The Google Play Movies ID matched a Wikidata P6562 record and TMDB movie details confirmed that entity"
                 if selected_id in wikidata_tmdb_ids and google_play_resolution.get("status") == "resolved"
                 else "TMDB /find resolved the Wikidata entity ID returned by Google Lens and TMDB movie details verified the returned movie record"
@@ -2333,6 +2706,16 @@ class MetadataEngine:
                 f"{google_play_resolution_log.get('selected_google_play_id') or 'none'}:"
                 f"{','.join(google_play_resolution_log.get('wikidata_ids') or []) or 'none'}"
             )
+            google_play_page_resolution_log = identity_evidence.get(
+                "google_play_metadata_resolution"
+            ) or {}
+            google_play_page_resolution_text = (
+                f"{google_play_page_resolution_log.get('status', 'not_run')}:"
+                f"{google_play_page_resolution_log.get('selected_tmdb_id') or 'none'}:"
+                f"candidates={google_play_page_resolution_log.get('candidate_count', 0)}:"
+                f"pages={google_play_page_resolution_log.get('tmdb_query_count', 0)}:"
+                f"errors={len(google_play_page_resolution_log.get('errors') or [])}"
+            )
             structured_identifier_text = ",".join(
                 f"{name.removesuffix('_ids')}:{count}"
                 for name, count in structured_identifier_counts.items()
@@ -2391,6 +2774,8 @@ class MetadataEngine:
                 f"lens_wikidata_ids={','.join(lens_diag.get('lens_wikidata_ids') or []) or 'none'} "
                 f"lens_google_play_ids={','.join(lens_diag.get('lens_google_play_ids') or []) or 'none'} "
                 f"google_play_id_lookup='{safe_log_detail(google_play_resolution_text, 180)}' "
+                f"google_play_page_match='{safe_log_detail(google_play_page_resolution_text, 180)}' "
+                f"google_play_page_results={google_play_page_resolution_log.get('tmdb_search_result_count', 0)} "
                 f"lens_structured_ids='{safe_log_detail(structured_identifier_text, 180)}' "
                 f"wikidata_id_lookup='{safe_log_detail(wikidata_resolution_text, 180)}' "
                 f"result_urls={lens_diag.get('result_url_count', 0)} "

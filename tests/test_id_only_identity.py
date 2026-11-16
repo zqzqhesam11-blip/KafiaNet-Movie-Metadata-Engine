@@ -67,6 +67,8 @@ class FakeTMDB:
             "tt0095467": {"movie_results": [{"id": 31056}]},
         }
         self.wikidata_find_calls: list[str] = []
+        self.search_calls: list[tuple[str, int]] = []
+        self.search_pages: dict[tuple[str, int], dict] = {}
         self.wikidata_find_results = {
             "Q12345": {"movie_results": [{"id": 10754}], "tv_results": [{"id": 999}]},
         }
@@ -78,6 +80,13 @@ class FakeTMDB:
     def find_by_wikidata_id(self, wikidata_id: str):
         self.wikidata_find_calls.append(wikidata_id)
         return self.wikidata_find_results.get(wikidata_id, {"movie_results": []})
+
+    def search_movies(self, query: str, year: int | None = None, page: int = 1):
+        self.search_calls.append((query, page))
+        return self.search_pages.get(
+            (query, page),
+            {"results": [], "total_pages": 1, "total_results": 0},
+        )
 
     def movie_details(self, tmdb_id: int):
         self.details_calls.append(int(tmdb_id))
@@ -107,8 +116,23 @@ class FakeWikidata:
         })
 
 
+class FakeGooglePlay:
+    def __init__(self):
+        self.pages: dict[str, dict] = {}
+        self.calls: list[str] = []
+
+    def fetch_movie_metadata(self, movie_id: str):
+        self.calls.append(movie_id)
+        if movie_id not in self.pages:
+            raise RuntimeError("No fake Google Play page configured")
+        return self.pages[movie_id]
+
+    def close(self):
+        return None
+
+
 class FakeGitHub:
-    def raw_url(self, path: str) -> str:
+    def raw_url(self, path: str):
         return f"https://raw.example.test/{path}"
 
     def get_json_file(self, _path: str):
@@ -130,6 +154,7 @@ class IdOnlyIdentityTests(unittest.TestCase):
         engine._provider_stop_status = None
         engine.tmdb = FakeTMDB()
         engine.wikidata = FakeWikidata()
+        engine.google_play = FakeGooglePlay()
         engine.settings = SimpleNamespace(
             posters_repo="owner/posters",
             posters_branch="main",
@@ -356,6 +381,145 @@ class IdOnlyIdentityTests(unittest.TestCase):
             ["Q12345", "Q99999"],
         )
         self.assertEqual(engine.tmdb.wikidata_find_calls, [])
+
+    def test_google_play_page_metadata_resolves_only_after_tmdb_detail_corroboration(self):
+        engine = self.make_engine()
+        google_play_ids = ["eDqHf0j8GUc.P", "D1_Pzd4ayj0.P"]
+        page_description = (
+            "A small time crook, Michel Poiccard, chased by the police after "
+            "stealing a car, shoots one of them and flees. Back in Paris he "
+            "finds an American girlfriend and convinces her to go to Italy."
+        )
+        for movie_id in google_play_ids:
+            engine.wikidata.google_play_results[movie_id] = {
+                "status": "no_match",
+                "wikidata_ids": [],
+                "result_count": 0,
+            }
+            engine.google_play.pages[movie_id] = {
+                "provider": "google_play_movie_page",
+                "status": "ok",
+                "google_play_id": movie_id,
+                "title": "Breathless",
+                "description": page_description,
+                "year": 1961,
+                "runtime_minutes": 90,
+                "directors": [],
+                "cast": [],
+            }
+
+        details = movie_details(269, "tt0053472", "Breathless")
+        details["original_title"] = "À bout de souffle"
+        details["release_date"] = "1960-03-16"
+        details["runtime"] = 90
+        details["overview"] = (
+            "A small-time thief steals a car and impulsively murders a motorcycle "
+            "policeman. Wanted by the authorities, he attempts to persuade a girl "
+            "to run away to Italy with him."
+        )
+        details["credits"]["cast"] = [
+            {"id": 1, "name": "Jean-Paul Belmondo", "character": "Michel Poiccard", "order": 0},
+            {"id": 2, "name": "Jean Seberg", "character": "Patricia Franchini", "order": 1},
+        ]
+        details["credits"]["crew"] = [
+            {"id": 3, "name": "Jean-Luc Godard", "job": "Director", "department": "Directing"}
+        ]
+        engine.tmdb.records[269] = details
+        engine.tmdb.search_pages[("Breathless", 1)] = {
+            "results": [{
+                "id": 269,
+                "title": "Breathless",
+                "original_title": "À bout de souffle",
+                "release_date": "1960-03-16",
+            }],
+            "total_pages": 1,
+            "total_results": 1,
+        }
+
+        candidate, match, evidence = engine._find_movie([
+            {"url": "https://play.google.com/store/movies/details?id=eDqHf0j8GUc.P"},
+            {"url": "https://play.google.com/store/movies/details?id=D1_Pzd4ayj0.P"},
+        ])
+
+        self.assertEqual(candidate["id"], 269)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 269)
+        self.assertEqual(
+            match["identity_source"],
+            "google_lens_google_play_page_metadata_via_tmdb_details",
+        )
+        self.assertEqual(
+            match["identity_method"],
+            "lens_google_play_page_metadata_tmdb_match",
+        )
+        self.assertEqual(engine.google_play.calls, google_play_ids)
+        self.assertEqual(engine.tmdb.search_calls, [("Breathless", 1)])
+        self.assertEqual(engine.tmdb.details_calls, [269])
+        self.assertEqual(
+            evidence["google_play_metadata_resolution"]["status"],
+            "resolved",
+        )
+        self.assertEqual(
+            evidence["google_play_metadata_resolution"]["selected_tmdb_id"],
+            269,
+        )
+        self.assertTrue(
+            evidence["google_play_metadata_resolution"]["candidate_matches"][0]["accepted"]
+        )
+
+    def test_google_play_page_runtime_conflict_keeps_film_in_review(self):
+        engine = self.make_engine()
+        movie_id = "eDqHf0j8GUc.P"
+        engine.wikidata.google_play_results[movie_id] = {
+            "status": "no_match",
+            "wikidata_ids": [],
+            "result_count": 0,
+        }
+        engine.google_play.pages[movie_id] = {
+            "provider": "google_play_movie_page",
+            "status": "ok",
+            "google_play_id": movie_id,
+            "title": "Breathless",
+            "description": (
+                "A small time crook, Michel Poiccard, chased by the police after "
+                "stealing a car and fleeing to Italy."
+            ),
+            "year": 1961,
+            "runtime_minutes": 90,
+            "directors": [],
+            "cast": [],
+        }
+        details = movie_details(269, "tt0053472", "Breathless")
+        details["release_date"] = "1960-03-16"
+        details["runtime"] = 130
+        details["overview"] = (
+            "A small time thief, Michel Poiccard, steals a car and flees to Italy."
+        )
+        details["credits"]["cast"] = [
+            {"id": 1, "name": "Jean-Paul Belmondo", "character": "Michel Poiccard", "order": 0}
+        ]
+        engine.tmdb.records[269] = details
+        engine.tmdb.search_pages[("Breathless", 1)] = {
+            "results": [{"id": 269, "title": "Breathless", "original_title": "Breathless"}],
+            "total_pages": 1,
+            "total_results": 1,
+        }
+
+        candidate, match, evidence = engine._find_movie([
+            {"url": f"https://play.google.com/store/movies/details?id={movie_id}"},
+        ])
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(
+            evidence["google_play_metadata_resolution"]["status"],
+            "no_verified_tmdb_metadata_match",
+        )
+        self.assertIn(
+            "runtime_difference_over_8_minutes",
+            evidence["google_play_metadata_resolution"]["candidate_matches"][0]["page_comparisons"][0]["conflicts"],
+        )
+
 
     def test_google_play_title_slug_does_not_trigger_wikidata_lookup(self):
         engine = self.make_engine()

@@ -58,8 +58,13 @@ class TMDBClient:
             },
         )
 
-    def search_movies(self, query: str, year: int | None = None) -> dict[str, Any]:
-        """Return TMDB text-search candidates; these are suggestions, not identity proof."""
+    def search_movies(
+        self,
+        query: str,
+        year: int | None = None,
+        page: int = 1,
+    ) -> dict[str, Any]:
+        """Return one page of TMDB text-search candidates; these are suggestions, not identity proof."""
         title_query = " ".join(str(query or "").split())
         if not title_query:
             return {"results": []}
@@ -67,7 +72,7 @@ class TMDBClient:
             "query": title_query,
             "include_adult": "false",
             "language": self.language,
-            "page": 1,
+            "page": max(1, min(int(page), 500)),
         }
         if isinstance(year, int) and 1870 <= year <= 2100:
             params["primary_release_year"] = year
