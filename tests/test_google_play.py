@@ -69,6 +69,7 @@ class GooglePlayMetadataTests(unittest.TestCase):
         self.assertEqual(parse_runtime_minutes("PT1H30M"), 90)
         self.assertEqual(parse_runtime_minutes("90 minutes"), 90)
         self.assertEqual(parse_runtime_minutes("1 hr 30 min"), 90)
+        self.assertEqual(parse_runtime_minutes("1h30m"), 90)
         self.assertEqual(parse_runtime_minutes(105), 105)
         self.assertIsNone(parse_runtime_minutes("unknown"))
 
