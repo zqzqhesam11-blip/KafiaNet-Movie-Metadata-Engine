@@ -1884,6 +1884,10 @@ class BrightDataGoogleLensClient:
                 "data_format": request_diag.get("data_format", "parsed_light"),
                 "response_modes_attempted": request_diag.get("response_modes_attempted", []),
                 "response_headers": request_diag.get("response_headers", {}),
+                "provider_error_code": request_diag.get("provider_error_code"),
+                "provider_error_message": request_diag.get("provider_error_message"),
+                "provider_error_retries": request_diag.get("provider_error_retries", 0),
+                "provider_retry_country": request_diag.get("provider_retry_country"),
                 "error": f"{type(exc).__name__}: {str(exc)[:300]}",
             }
 
