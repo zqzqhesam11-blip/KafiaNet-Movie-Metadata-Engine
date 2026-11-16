@@ -169,6 +169,10 @@ def parse_runtime_minutes(value: Any) -> int | None:
         seconds = int(iso.group(3) or 0)
         total = hours * 60 + minutes + (1 if seconds >= 30 else 0)
         return total if 1 <= total <= 600 else None
+    compact_hours = re.fullmatch(r"\s*(\d+)\s*h\s*(?:(\d+)\s*m)?\s*", text, flags=re.I)
+    if compact_hours:
+        total = int(compact_hours.group(1)) * 60 + int(compact_hours.group(2) or 0)
+        return total if 1 <= total <= 600 else None
     hours = re.search(r"(\d+)\s*(?:h|hr|hrs|hour|hours)\b", text, flags=re.I)
     minutes = re.search(r"(\d+)\s*(?:m|min|mins|minute|minutes)\b", text, flags=re.I)
     total = (int(hours.group(1)) * 60 if hours else 0) + (
