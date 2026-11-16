@@ -54,6 +54,17 @@ class GooglePlayMetadataTests(unittest.TestCase):
         self.assertEqual(result["genres"], ["Drama", "Crime"])
         self.assertFalse(result["automatic_match_allowed"])
 
+    def test_parses_visible_year_and_duration_when_schema_fields_are_absent(self):
+        body = """
+        <html><head>
+          <meta property="og:title" content="Breathless - Movies on Google Play">
+          <meta property="og:description" content="A small time crook, Michel Poiccard, flees to Italy.">
+        </head><body><div>1960 • 90 minutes</div></body></html>
+        """
+        result = parse_google_play_movie_html("D1_Pzd4ayj0.P", body)
+        self.assertEqual(result["year"], 1960)
+        self.assertEqual(result["runtime_minutes"], 90)
+
     def test_parses_runtime_formats(self):
         self.assertEqual(parse_runtime_minutes("PT1H30M"), 90)
         self.assertEqual(parse_runtime_minutes("90 minutes"), 90)
@@ -91,6 +102,32 @@ class GooglePlayMetadataTests(unittest.TestCase):
             client.close()
 
         self.assertEqual(len(requests), 1)
+
+    def test_client_fetches_page_without_following_external_redirects(self):
+        body = """
+        <html><head>
+          <meta property="og:title" content="Breathless - Movies on Google Play">
+          <meta property="og:description" content="A small time crook, Michel Poiccard, flees to Italy.">
+        </head><body></body></html>
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.host, "play.google.com")
+            return httpx.Response(200, text=body, request=request)
+
+        client = GooglePlayMetadataClient.__new__(GooglePlayMetadataClient)
+        client.client = httpx.Client(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=False,
+        )
+        try:
+            result = client.fetch_movie_metadata("D1_Pzd4ayj0.P")
+        finally:
+            client.close()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["title"], "Breathless")
+        self.assertEqual(result["google_play_id"], "D1_Pzd4ayj0.P")
 
     def test_tmdb_candidate_requires_exact_title_and_multiple_independent_signals(self):
         metadata = {
@@ -131,7 +168,7 @@ class GooglePlayMetadataTests(unittest.TestCase):
         self.assertTrue(result["character_match"])
         self.assertTrue(result["year_match"])
         self.assertTrue(result["runtime_match"])
-        self.assertGreaterEqual(result["signals"]["description_match"], True)
+        self.assertTrue(result["signals"]["description_match"])
 
     def test_tmdb_candidate_with_runtime_conflict_is_rejected(self):
         metadata = {
