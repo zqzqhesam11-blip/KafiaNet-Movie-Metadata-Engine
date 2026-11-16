@@ -94,7 +94,8 @@ class _GooglePlayHTMLParser(HTMLParser):
         value = str(data or "").strip()
         if not value:
             return
-        self.visible_text.append(value)
+        if not self._in_json_ld:
+            self.visible_text.append(value)
         if self._in_title:
             self.title_parts.append(value)
         if self._in_json_ld:
