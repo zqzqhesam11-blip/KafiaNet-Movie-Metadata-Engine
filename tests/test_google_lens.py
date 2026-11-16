@@ -287,11 +287,11 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         )
         self.assertNotIn("PRIVATE", repr(api.last_result_url_diagnostics))
 
-    def test_exact_matches_provider_error_still_attempts_visual_matches(self):
+    def test_exact_matches_other_provider_error_still_attempts_visual_matches(self):
         exact_error = Mock()
         exact_error.status_code = 200
-        exact_error.text = "reject element"
-        exact_error.headers = {"x-brd-error-code": "reject_element"}
+        exact_error.text = "temporary upstream processing failure"
+        exact_error.headers = {"x-brd-error-code": "upstream_error"}
         exact_error.json.side_effect = ValueError("not JSON")
 
         visual_response = Mock()
