@@ -29,6 +29,8 @@ MAX_NORMALIZED_RESULTS = 80
 MAX_GOOGLE_GOTO_RESOLUTIONS = 3
 GOOGLE_GOTO_TIMEOUT_SECONDS = 8.0
 MAX_TRANSIENT_RETRIES = 2
+MAX_BRIGHTDATA_REJECT_ELEMENT_RETRIES = 1
+BRIGHTDATA_REJECT_ELEMENT_RETRY_DELAY_SECONDS = 2
 RATE_LIMIT_BACKOFF_SECONDS = (5, 15, 30)
 MAX_RATE_LIMIT_RETRIES = len(RATE_LIMIT_BACKOFF_SECONDS)
 MAX_RATE_LIMIT_WAIT_SECONDS = 60
@@ -957,6 +959,8 @@ class BrightDataGoogleLensClient:
         data_format: str | None = "parsed_light",
         response_format: str = "raw",
         retry_empty_success: bool = True,
+        retry_reject_element: bool = False,
+        retry_country: str = "us",
     ) -> tuple[httpx.Response, Any, int, int]:
         """POST one SERP request with bounded transport and HTTP 429 backoff.
 
@@ -979,6 +983,8 @@ class BrightDataGoogleLensClient:
         transient_retries = 0
         rate_limit_retries = 0
         wait_seconds = 0
+        provider_error_retries = 0
+        provider_retry_country: str | None = None
         self.last_request_diagnostics = {
             "attempts": 0,
             "rate_limit_retries": 0,
@@ -998,6 +1004,10 @@ class BrightDataGoogleLensClient:
                 # form and should not be sent as an HTTP header to api.brightdata.com.
                 if data_format is not None:
                     request_payload["data_format"] = data_format
+                if provider_retry_country:
+                    # A single geo-targeted retry can recover transient Lens
+                    # extraction failures without changing the image or query.
+                    request_payload["country"] = provider_retry_country
                 response = self.client.post(
                     BRIGHTDATA_REQUEST_URL,
                     headers=None,
@@ -1037,6 +1047,22 @@ class BrightDataGoogleLensClient:
                 if inner_status:
                     effective_status = inner_status
 
+            headers = getattr(response, "headers", {}) or {}
+            provider_error_code = str(
+                (
+                    headers.get("x-brd-error-code")
+                    or headers.get("x-brd-err-code")
+                    or ""
+                ) if hasattr(headers, "get") else ""
+            ).strip().casefold()
+            provider_error_message = str(
+                (
+                    headers.get("x-brd-error")
+                    or headers.get("x-brd-err-msg")
+                    or ""
+                ) if hasattr(headers, "get") else ""
+            ).strip()
+
             empty_success_body = (
                 200 <= effective_status < 300
                 and (
@@ -1049,6 +1075,20 @@ class BrightDataGoogleLensClient:
                     )
                 )
             )
+
+            # Bright Data may return HTTP 200 while reporting a failed Lens
+            # extraction in x-brd-error-code. Do not mistake that for an empty
+            # successful search. Retry this specific provider signal only once,
+            # through a known SERP geo target; all identity checks remain local.
+            if (
+                retry_reject_element
+                and provider_error_code == "reject_element"
+                and provider_error_retries < MAX_BRIGHTDATA_REJECT_ELEMENT_RETRIES
+            ):
+                provider_error_retries += 1
+                provider_retry_country = str(retry_country or "us").strip().casefold()
+                time.sleep(BRIGHTDATA_REJECT_ELEMENT_RETRY_DELAY_SECONDS)
+                continue
 
             if (
                 (
@@ -1081,6 +1121,8 @@ class BrightDataGoogleLensClient:
                 "x-brd-error",
                 "x-brd-err-code",
                 "x-brd-err-msg",
+                "x-brd-status-code",
+                "proxy-status",
                 "x-brd-rate-limit",
                 "x-brd-rate-limit-period-ms",
                 "x-response-id",
@@ -1103,6 +1145,10 @@ class BrightDataGoogleLensClient:
                 "response_headers": safe_response_headers,
                 "response_body_empty": bool(empty_success_body or not response_text.strip()),
                 "response_body_bytes": len(response_text.encode("utf-8", errors="replace")),
+                "provider_error_code": provider_error_code or None,
+                "provider_error_message": provider_error_message[:180] or None,
+                "provider_error_retries": provider_error_retries,
+                "provider_retry_country": provider_retry_country,
             })
             return response, payload, effective_status, attempt
 
@@ -1588,12 +1634,26 @@ class BrightDataGoogleLensClient:
                 f"Google Lens {tab} image search ({mode})",
                 data_format=("parsed_light" if mode == "parsed_light" else None),
                 retry_empty_success=False,
+                retry_reject_element=True,
+                retry_country="us",
             )
             total_attempts += int(attempts or 0)
             response_modes.append(mode)
-            request_diagnostics.append(
-                dict(getattr(self, "last_request_diagnostics", {}) or {})
-            )
+            request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
+            request_diagnostics.append(request_diag)
+            if request_diag.get("provider_error_code") == "reject_element":
+                # The one geo-targeted retry also failed. The alternative JSON
+                # selector repeats the same rejected extraction and wastes a
+                # second request, so stop this tab with a precise diagnostic.
+                self.last_request_diagnostics.update({
+                    "response_modes_attempted": list(response_modes),
+                    "data_format": "parsed_light" if mode == "parsed_light" else "json",
+                })
+                raise BrightDataAPIError(
+                    "Bright Data rejected Google Lens result extraction "
+                    f"(reject_element: {request_diag.get('provider_error_message') or 'no detail'}) "
+                    f"after one {request_diag.get('provider_retry_country') or 'US'} geo retry"
+                )
             return response, payload, effective_status
 
         def raise_for_http_status(
@@ -1657,6 +1717,13 @@ class BrightDataGoogleLensClient:
                 "response_headers": dict(last_request.get("response_headers") or {}),
                 "response_body_empty": last_request.get("response_body_empty"),
                 "response_body_bytes": last_request.get("response_body_bytes"),
+                "provider_error_code": last_request.get("provider_error_code"),
+                "provider_error_message": last_request.get("provider_error_message"),
+                "provider_error_retries": sum(
+                    int(item.get("provider_error_retries") or 0)
+                    for item in request_diagnostics
+                ),
+                "provider_retry_country": last_request.get("provider_retry_country"),
                 "response_modes_attempted": list(response_modes),
                 "data_format": "parsed_light" if selected_mode == "parsed_light" else "json",
             }
@@ -1726,6 +1793,10 @@ class BrightDataGoogleLensClient:
             "data_format": aggregate_diagnostics["data_format"],
             "response_modes_attempted": list(response_modes),
             "response_headers": aggregate_diagnostics["response_headers"],
+            "provider_error_code": aggregate_diagnostics.get("provider_error_code"),
+            "provider_error_message": aggregate_diagnostics.get("provider_error_message"),
+            "provider_error_retries": aggregate_diagnostics.get("provider_error_retries", 0),
+            "provider_retry_country": aggregate_diagnostics.get("provider_retry_country"),
             "structured_identifier_counts": self._structured_identifier_counts(normalized),
             **self._raw_result_diagnostics(rows),
         }
@@ -1770,6 +1841,7 @@ class BrightDataGoogleLensClient:
 
         self.last_result_url_diagnostics = {}
         exact_search_error: BrightDataAPIError | None = None
+        exact_provider_error_code: str | None = None
         try:
             exact_results, exact_rows, exact_diag = self._request_lens_tab(image_url, LENS_TAB)
             exact_results = [{**row, "lens_tab": LENS_TAB} for row in exact_results]
@@ -1797,6 +1869,7 @@ class BrightDataGoogleLensClient:
             # visual_matches is unavailable. Preserve the failure, then let the
             # normal fallback tab run once. Quota failures are handled above.
             request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
+            exact_provider_error_code = request_diag.get("provider_error_code")
             exact_search_error = exc
             exact_results = []
             exact_url_diag = {}
@@ -1824,10 +1897,15 @@ class BrightDataGoogleLensClient:
         visual_fallback_skipped_reason = (
             "exact_matches_has_official_id" if exact_ids else None
         )
+        if exact_provider_error_code == "reject_element":
+            visual_fallback_skipped_reason = "brightdata_reject_element_after_geo_retry"
 
         # If exact_matches yields no official identifier, also inspect the
         # visual_matches tab. Titles/captions do not suppress this lookup.
-        if not exact_ids:
+        # A persistent provider-level reject_element after the controlled geo
+        # retry applies to the Lens extraction itself; do not repeat the same
+        # failing call for a second Lens tab.
+        if not exact_ids and exact_provider_error_code != "reject_element":
             try:
                 visual_results, visual_rows, visual_diag = self._request_lens_tab(
                     image_url, LENS_FALLBACK_TAB
@@ -1954,6 +2032,26 @@ class BrightDataGoogleLensClient:
             },
             "response_headers": dict(
                 tabs.get(LENS_FALLBACK_TAB, tabs[LENS_TAB]).get("response_headers") or {}
+            ),
+            "provider_error_code": next(
+                (
+                    item.get("provider_error_code")
+                    for item in tabs.values()
+                    if item.get("provider_error_code")
+                ),
+                None,
+            ),
+            "provider_error_retries": sum(
+                int(item.get("provider_error_retries") or 0)
+                for item in tabs.values()
+            ),
+            "provider_retry_country": next(
+                (
+                    item.get("provider_retry_country")
+                    for item in tabs.values()
+                    if item.get("provider_retry_country")
+                ),
+                None,
             ),
             "attempts": attempts,
             "rate_limit_retries": sum(
