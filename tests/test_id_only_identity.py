@@ -467,6 +467,84 @@ class IdOnlyIdentityTests(unittest.TestCase):
             evidence["google_play_metadata_resolution"]["candidate_matches"][0]["accepted"]
         )
 
+    def test_google_play_page_year_prefilter_keeps_correct_candidate_under_details_limit(self):
+        engine = self.make_engine()
+        movie_id = "eDqHf0j8GUc.P"
+        page_description = (
+            "A small time crook, Michel Poiccard, chased by the police after "
+            "stealing a car, shoots one of them and flees. Back in Paris he "
+            "finds an American girlfriend and convinces her to go to Italy."
+        )
+        engine.google_play.pages[movie_id] = {
+            "provider": "google_play_movie_page",
+            "status": "ok",
+            "google_play_id": movie_id,
+            "title": "Breathless",
+            "description": page_description,
+            "year": 1961,
+            "runtime_minutes": 90,
+            "directors": [],
+            "cast": [],
+        }
+
+        details = movie_details(269, "tt0053472", "Breathless")
+        details["original_title"] = "À bout de souffle"
+        details["release_date"] = "1960-03-16"
+        details["runtime"] = 90
+        details["overview"] = (
+            "A small-time thief steals a car and impulsively murders a motorcycle "
+            "policeman. Wanted by the authorities, he attempts to persuade a girl "
+            "to run away to Italy with him."
+        )
+        details["credits"]["cast"] = [
+            {"id": 1, "name": "Jean-Paul Belmondo", "character": "Michel Poiccard", "order": 0},
+            {"id": 2, "name": "Jean Seberg", "character": "Patricia Franchini", "order": 1},
+        ]
+        engine.tmdb.records[269] = details
+
+        # Simulate 18 unrelated exact-title matches from different decades.
+        # Their known years conflict with the official Play page by more than
+        # the evaluator's hard two-year threshold, so details calls are unnecessary.
+        unrelated = [
+            {
+                "id": 1000 + offset,
+                "title": "Breathless",
+                "original_title": "Breathless",
+                "release_date": f"{1980 + offset}-01-01",
+            }
+            for offset in range(18)
+        ]
+        correct = {
+            "id": 269,
+            "title": "Breathless",
+            "original_title": "À bout de souffle",
+            "release_date": "1960-03-16",
+        }
+        search_rows = unrelated + [correct]
+        engine.tmdb.search_pages[("Breathless", 1)] = {
+            "results": search_rows,
+            "total_pages": 1,
+            "total_results": len(search_rows),
+        }
+
+        candidate, match, evidence = engine._find_movie([
+            {"url": f"https://play.google.com/store/movies/details?id={movie_id}"},
+        ])
+
+        resolution = evidence["google_play_metadata_resolution"]
+        self.assertEqual(candidate["id"], 269)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(match["tmdb_id"], 269)
+        self.assertEqual(match["identity_method"], "lens_google_play_page_metadata_tmdb_match")
+        self.assertEqual(resolution["candidate_count"], 19)
+        self.assertEqual(resolution["candidate_count_after_prefilter"], 1)
+        self.assertEqual(resolution["year_conflict_pruned_count"], 18)
+        self.assertEqual(resolution["candidate_details_count"], 1)
+        self.assertEqual(resolution["year_conflict_pruned_ids"], [
+            1000 + offset for offset in range(18)
+        ])
+        self.assertEqual(engine.tmdb.details_calls, [269])
+
     def test_google_play_page_runtime_conflict_keeps_film_in_review(self):
         engine = self.make_engine()
         movie_id = "eDqHf0j8GUc.P"
