@@ -336,14 +336,30 @@ class MetadataEngine:
         return payload["sha256"]
 
     def _stop_for_provider_server_error(self, diagnostics: Any) -> bool:
-        """Stop the remaining batch after an exhausted Bright Data 5xx response."""
+        """Stop the remaining batch after an exhausted provider-wide Lens failure."""
         if not isinstance(diagnostics, dict):
             return False
         raw_status = diagnostics.get("http_status")
         try:
             status_code = int(raw_status)
         except (TypeError, ValueError):
-            return False
+            status_code = None
+
+        provider_error_code = str(diagnostics.get("provider_error_code") or "").strip().casefold()
+        try:
+            provider_error_retries = int(diagnostics.get("provider_error_retries") or 0)
+        except (TypeError, ValueError):
+            provider_error_retries = 0
+
+        # Bright Data may return HTTP 200 while explicitly rejecting Lens
+        # extraction. Once the single geo-targeted retry also fails, stop the
+        # batch instead of spending two more requests on every remaining poster.
+        if provider_error_code == "reject_element" and provider_error_retries >= 1:
+            self._stop_batch = True
+            self._provider_stop_status = status_code or 200
+            self._provider_stop_reason = "brightdata_reject_element_after_geo_retry"
+            return True
+
         if status_code not in TRANSIENT_PROVIDER_HTTP_STATUSES:
             return False
         self._stop_batch = True
@@ -931,17 +947,39 @@ class MetadataEngine:
         movie_result is returned. All accepted IDs still require TMDB movie-details
         verification before a READY identity can be emitted.
         """
-        reverse_image_failed = any(
-            isinstance(item, dict) and item.get("error")
-            for item in (reverse_image_results or [])
-        )
-        observed_lens_tmdb_ids = extract_tmdb_movie_ids(reverse_image_results)
-        observed_lens_imdb_ids = extract_imdb_ids(reverse_image_results)
-        observed_lens_wikidata_ids = extract_wikidata_ids(reverse_image_results)
-        observed_lens_google_play_ids = extract_google_play_ids(reverse_image_results)
+        reverse_image_rows = [
+            item for item in (reverse_image_results or [])
+            if isinstance(item, dict)
+        ]
+        reverse_image_failed = any(item.get("error") for item in reverse_image_rows)
+
+        # The visual_matches tab contains visually similar pages as well as
+        # near-duplicate artwork. It is useful for reviewer context, but it must
+        # never supply an identity-bearing ID. Only exact_matches rows may
+        # promote TMDB, IMDb, Wikidata, or Google Play identifiers.
+        # Untagged rows remain accepted for backward compatibility with saved
+        # legacy evidence and focused tests that supply a single exact tab.
+        exact_identity_rows = [
+            item for item in reverse_image_rows
+            if item.get("lens_tab") != "visual_matches"
+        ]
+        visual_match_rows = [
+            item for item in reverse_image_rows
+            if item.get("lens_tab") == "visual_matches"
+        ]
+        observed_lens_tmdb_ids = extract_tmdb_movie_ids(exact_identity_rows)
+        observed_lens_imdb_ids = extract_imdb_ids(exact_identity_rows)
+        observed_lens_wikidata_ids = extract_wikidata_ids(exact_identity_rows)
+        observed_lens_google_play_ids = extract_google_play_ids(exact_identity_rows)
+        visual_matches_identifiers_ignored = {
+            "tmdb_ids": extract_tmdb_movie_ids(visual_match_rows),
+            "imdb_ids": extract_imdb_ids(visual_match_rows),
+            "wikidata_ids": extract_wikidata_ids(visual_match_rows),
+            "google_play_ids": extract_google_play_ids(visual_match_rows),
+        }
         # Prefer identifiers carried by official movie URLs or explicitly typed
-        # Lens metadata. Captions, product IDs, title slugs, filenames and folder
-        # labels never create or select a movie ID.
+        # Lens metadata from exact_matches. Captions, visual suggestions, product
+        # IDs, title slugs, filenames and folder labels never create movie IDs.
         direct_tmdb_ids = observed_lens_tmdb_ids[:1]
         direct_imdb_ids = observed_lens_imdb_ids[:1]
         google_play_resolution: dict[str, Any] = {
@@ -1205,6 +1243,8 @@ class MetadataEngine:
                 "imdb_to_tmdb_ids": {},
                 "wikidata_ids_seen": list(observed_lens_wikidata_ids),
                 "google_play_ids_seen": list(observed_lens_google_play_ids),
+                "visual_matches_identifiers_ignored": visual_matches_identifiers_ignored,
+                "identity_identifier_source": "exact_matches_only",
                 "wikidata_to_tmdb_ids": (
                     {wikidata_resolution.get("selected_wikidata_id"): list(wikidata_tmdb_ids)}
                     if wikidata_resolution.get("selected_wikidata_id") else {}
@@ -1215,6 +1255,7 @@ class MetadataEngine:
                 "errors": [],
             },
             "candidate_identities": [],
+            "visual_matches_identifiers_ignored": visual_matches_identifiers_ignored,
             "wikidata_resolution": wikidata_resolution,
             "google_play_resolution": google_play_resolution,
             "google_play_metadata_resolution": google_play_metadata_resolution,
@@ -1277,10 +1318,22 @@ class MetadataEngine:
             }, evidence
 
         if reverse_image_failed and not (lens_tmdb_ids or lens_imdb_ids):
+            provider_error = next(
+                (
+                    str(item.get("message") or item.get("error") or "").strip()
+                    for item in reverse_image_rows
+                    if item.get("error")
+                    and str(item.get("message") or item.get("error") or "").strip()
+                ),
+                "",
+            )
+            reason = "Google Lens provider extraction or URL resolution failed; no exact-match movie ID was verified"
+            if provider_error:
+                reason += ": " + " ".join(provider_error.split())[:220]
             return None, {
                 "status": "review",
                 "confidence": 0.0,
-                "reason": "Google Lens image lookup or URL resolution failed; no official movie ID was available",
+                "reason": reason,
                 "candidate_ids": [],
             }, evidence
 
@@ -2710,6 +2763,14 @@ class MetadataEngine:
                 lens_error = safe_log_detail(
                     f"{first_error.get('type', 'ProviderError')}: {first_error.get('message') or first_error.get('error')}"
                 )
+            ignored_visual_ids = (identity_evidence.get("id_resolution") or {}).get(
+                "visual_matches_identifiers_ignored"
+            ) or {}
+            ignored_visual_ids_text = ",".join(
+                f"{key.removesuffix('_ids')}:{','.join(str(value) for value in values[:5])}"
+                for key, values in ignored_visual_ids.items()
+                if values
+            ) or "none"
             response_modes = lens_diag.get("response_modes_attempted") or {}
             if isinstance(response_modes, dict):
                 response_modes_text = ",".join(
@@ -2824,6 +2885,8 @@ class MetadataEngine:
                 f"official_imdb_ids={','.join(str(value) for value in (lens_diag.get('official_imdb_ids') or [])[:10]) or 'none'} "
                 f"lens_wikidata_ids={','.join(lens_diag.get('lens_wikidata_ids') or []) or 'none'} "
                 f"lens_google_play_ids={','.join(lens_diag.get('lens_google_play_ids') or []) or 'none'} "
+                f"identity_ids_source=exact_matches_only "
+                f"visual_ids_ignored='{safe_log_detail(ignored_visual_ids_text, 180)}' "
                 f"google_play_id_lookup='{safe_log_detail(google_play_resolution_text, 180)}' "
                 f"google_play_page_match='{safe_log_detail(google_play_page_resolution_text, 180)}' "
                 f"google_play_page_results={google_play_page_resolution_log.get('tmdb_search_result_count', 0)} "
@@ -2875,9 +2938,18 @@ class MetadataEngine:
                     flush=True,
                 )
             if self._stop_batch:
+                if self._provider_stop_reason == "brightdata_reject_element_after_geo_retry":
+                    stop_detail = (
+                        "Bright Data Lens extraction rejected with reject_element "
+                        f"after one US geo retry (HTTP {self._provider_stop_status})"
+                    )
+                else:
+                    stop_detail = (
+                        f"provider HTTP {self._provider_stop_status} "
+                        f"({self._provider_stop_reason or 'provider_limit'})"
+                    )
                 print(
-                    f"[KafiaNet] STOP: provider HTTP {self._provider_stop_status} "
-                    f"({self._provider_stop_reason or 'provider_limit'}); "
+                    f"[KafiaNet] STOP: {stop_detail}; "
                     "remaining posters were not queried and this batch will not write catalog changes.",
                     flush=True,
                 )

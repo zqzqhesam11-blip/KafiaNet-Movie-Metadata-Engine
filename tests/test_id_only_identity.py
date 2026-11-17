@@ -1079,5 +1079,109 @@ class IdOnlyIdentityTests(unittest.TestCase):
         }]
         self.assertEqual(extract_tmdb_movie_ids(results), [10754])
 
+    def test_visual_matches_official_imdb_id_is_ignored_for_movie_identity(self):
+        engine = self.make_engine()
+        rows = [{
+            "lens_tab": "visual_matches",
+            "title": "A visually similar but unrelated movie",
+            "resolved_url": "https://www.imdb.com/title/tt0095468/",
+        }]
+
+        candidate, match, evidence = engine._find_movie(rows)
+
+        self.assertIsNone(candidate)
+        self.assertEqual(match["status"], "review")
+        self.assertEqual(engine.tmdb.find_calls, [])
+        self.assertEqual(engine.tmdb.details_calls, [])
+        self.assertEqual(
+            evidence["id_resolution"]["visual_matches_identifiers_ignored"]["imdb_ids"],
+            ["tt0095468"],
+        )
+        self.assertEqual(
+            evidence["id_resolution"]["identity_identifier_source"],
+            "exact_matches_only",
+        )
+
+    def test_exact_google_play_id_is_not_conflicted_by_visual_match_id(self):
+        engine = self.make_engine()
+        engine.tmdb.records[10754]["external_ids"]["wikidata_id"] = "Q12345"
+        rows = [
+            {
+                "lens_tab": "exact_matches",
+                "url": "https://play.google.com/store/movies/details?id=KuBCXRtFvO8",
+            },
+            {
+                "lens_tab": "visual_matches",
+                "url": "https://play.google.com/store/movies/details?id=D1_Pzd4ayj0.P",
+            },
+        ]
+
+        candidate, match, evidence = engine._find_movie(rows)
+
+        self.assertEqual(candidate["id"], 10754)
+        self.assertEqual(match["status"], "ready")
+        self.assertEqual(engine.wikidata.google_play_calls, ["KuBCXRtFvO8"])
+        self.assertEqual(
+            evidence["google_play_resolution"]["google_play_ids_seen"],
+            ["KuBCXRtFvO8"],
+        )
+        self.assertEqual(
+            evidence["id_resolution"]["visual_matches_identifiers_ignored"]["google_play_ids"],
+            ["D1_Pzd4ayj0.P"],
+        )
+
+    def test_persistent_reject_element_after_geo_retry_stops_batch(self):
+        engine = MetadataEngine.__new__(MetadataEngine)
+        engine._stop_batch = False
+        engine._provider_stop_status = None
+        engine._provider_stop_reason = None
+        engine.reverse_image = SimpleNamespace(
+            last_lens_diagnostics={
+                "http_status": 200,
+                "provider_error_code": "reject_element",
+                "provider_error_retries": 1,
+                "provider_retry_country": "us",
+            },
+            search_by_image_url=Mock(
+                side_effect=RuntimeError(
+                    "Bright Data rejected Google Lens extraction after one us geo retry"
+                )
+            ),
+        )
+
+        rows = engine._reverse_image_results("https://example.test/poster.jpg")
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["stop_batch"])
+        self.assertTrue(engine._stop_batch)
+        self.assertEqual(engine._provider_stop_status, 200)
+        self.assertEqual(
+            engine._provider_stop_reason,
+            "brightdata_reject_element_after_geo_retry",
+        )
+
+    def test_reject_element_before_geo_retry_does_not_trip_provider_circuit_breaker(self):
+        engine = MetadataEngine.__new__(MetadataEngine)
+        engine._stop_batch = False
+        engine._provider_stop_status = None
+        engine._provider_stop_reason = None
+        engine.reverse_image = SimpleNamespace(
+            last_lens_diagnostics={
+                "http_status": 200,
+                "provider_error_code": "reject_element",
+                "provider_error_retries": 0,
+            },
+            search_by_image_url=Mock(
+                side_effect=RuntimeError("initial reject element")
+            ),
+        )
+
+        rows = engine._reverse_image_results("https://example.test/poster.jpg")
+
+        self.assertFalse(rows[0].get("stop_batch", False))
+        self.assertFalse(engine._stop_batch)
+        self.assertIsNone(engine._provider_stop_reason)
+
+
 if __name__ == "__main__":
     unittest.main()
