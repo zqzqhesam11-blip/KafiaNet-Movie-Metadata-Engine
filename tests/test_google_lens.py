@@ -287,11 +287,11 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         )
         self.assertNotIn("PRIVATE", repr(api.last_result_url_diagnostics))
 
-    def test_exact_matches_provider_error_still_attempts_visual_matches(self):
+    def test_exact_matches_other_provider_error_still_attempts_visual_matches(self):
         exact_error = Mock()
         exact_error.status_code = 200
-        exact_error.text = "reject element"
-        exact_error.headers = {"x-brd-error-code": "reject_element"}
+        exact_error.text = "temporary upstream processing failure"
+        exact_error.headers = {"x-brd-error-code": "upstream_error"}
         exact_error.json.side_effect = ValueError("not JSON")
 
         visual_response = Mock()
@@ -776,6 +776,81 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         api.client.post.return_value = response
         with self.assertRaisesRegex(BrightDataAPIError, "non-JSON response"):
             api.search_by_image_url("https://example.com/poster.jpg")
+
+    def test_retries_brightdata_reject_element_once_with_us_geo_and_recovers(self):
+        rejected = Mock()
+        rejected.status_code = 200
+        rejected.text = ""
+        rejected.headers = {
+            "content-type": "application/json",
+            "x-brd-error-code": "reject_element",
+            "x-brd-error": "reject element found",
+        }
+        rejected.json.side_effect = ValueError("empty response")
+
+        payload = {
+            "exact_matches": [{
+                "title": "A Short Film About Killing",
+                "link": "https://www.imdb.com/title/tt0095468/",
+            }]
+        }
+        recovered = Mock()
+        recovered.status_code = 200
+        recovered.text = json.dumps(payload)
+        recovered.headers = {"content-type": "application/json"}
+        recovered.json.return_value = payload
+
+        api = self.make_client()
+        api.client.post.side_effect = [rejected, recovered]
+
+        with patch("app.google_lens.time.sleep") as sleep:
+            rows = api.search_by_image_url("https://example.com/poster.jpg")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["lens_identifiers"]["imdb_ids"], ["tt0095468"])
+        self.assertEqual(api.client.post.call_count, 2)
+        first_payload = api.client.post.call_args_list[0].kwargs["json"]
+        retry_payload = api.client.post.call_args_list[1].kwargs["json"]
+        self.assertNotIn("country", first_payload)
+        self.assertEqual(retry_payload["country"], "us")
+        sleep.assert_called_once_with(2)
+        self.assertEqual(api.last_lens_diagnostics["provider_error_retries"], 1)
+        self.assertEqual(api.last_lens_diagnostics["provider_retry_country"], "us")
+        self.assertEqual(api.last_lens_diagnostics["attempts"], 2)
+
+    def test_persistent_reject_element_stops_json_and_visual_retries(self):
+        rejected = Mock()
+        rejected.status_code = 200
+        rejected.text = ""
+        rejected.headers = {
+            "content-type": "application/json",
+            "x-brd-error-code": "reject_element",
+            "x-brd-error": "reject element found",
+        }
+        rejected.json.side_effect = ValueError("empty response")
+
+        api = self.make_client()
+        api.client.post.side_effect = [rejected, rejected]
+
+        with patch("app.google_lens.time.sleep") as sleep:
+            with self.assertRaisesRegex(
+                BrightDataAPIError,
+                "reject_element.*after one us geo retry",
+            ):
+                api.search_by_image_url("https://example.com/poster.jpg")
+
+        self.assertEqual(api.client.post.call_count, 2)
+        self.assertEqual(api.last_lens_diagnostics["provider_error_code"], "reject_element")
+        self.assertEqual(api.last_lens_diagnostics["provider_error_retries"], 1)
+        self.assertEqual(
+            api.last_lens_diagnostics["visual_fallback_skipped_reason"],
+            "brightdata_reject_element_after_geo_retry",
+        )
+        self.assertEqual(
+            api.last_lens_diagnostics["lens_tabs_attempted"],
+            ["exact_matches"],
+        )
+        sleep.assert_called_once_with(2)
 
 
     def test_google_lens_goto_resolves_official_imdb_location_without_following_redirects(self):
