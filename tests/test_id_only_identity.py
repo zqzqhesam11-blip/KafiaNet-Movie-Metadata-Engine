@@ -1183,5 +1183,31 @@ class IdOnlyIdentityTests(unittest.TestCase):
         self.assertIsNone(engine._provider_stop_reason)
 
 
+    def test_proxy_wrapped_upstream_502_stops_batch(self):
+        engine = MetadataEngine.__new__(MetadataEngine)
+        engine._stop_batch = False
+        engine._provider_stop_status = None
+        engine._provider_stop_reason = None
+        engine.reverse_image = SimpleNamespace(
+            last_lens_diagnostics={
+                "http_status": 502,
+                "provider_error_code": "proxy_upstream_error",
+            },
+            search_by_image_url=Mock(
+                side_effect=RuntimeError(
+                    "Bright Data proxy upstream returned received-status=502"
+                )
+            ),
+        )
+
+        rows = engine._reverse_image_results("https://example.test/poster.jpg")
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["stop_batch"])
+        self.assertTrue(engine._stop_batch)
+        self.assertEqual(engine._provider_stop_status, 502)
+        self.assertEqual(engine._provider_stop_reason, "provider_server_error")
+
+
 if __name__ == "__main__":
     unittest.main()
