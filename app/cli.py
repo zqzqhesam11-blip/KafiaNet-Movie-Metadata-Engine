@@ -48,6 +48,12 @@ def format_summary(result: dict[str, Any]) -> str:
             f"moved_image_files={result.get('moved_image_files', 0)} "
             f"deleted_old_files={result.get('deleted_old_files', 0)}"
         )
+    if result.get("provider_requests_paused"):
+        lines.append(
+            f"provider_requests_paused=true status={result.get('provider_stop_status')} "
+            f"reason={result.get('provider_stop_reason')} "
+            f"deferred_review={result.get('provider_deferred_review_count', 0)}"
+        )
     if result.get("commit_sha"):
         lines.append(f"commit_sha={result['commit_sha']}")
     if "next_pending_estimate" in result:
@@ -71,6 +77,11 @@ def main() -> int:
         choices=["run", "check-brightdata-config"],
     )
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Process every pending source/review film instead of the configured batch limit",
+    )
     parser.add_argument("--apply", action="store_true", help="Write result JSON to the public poster repository")
     parser.add_argument("--dry-run", action="store_true", help="Explicitly force read-only catalog planning mode")
     parser.add_argument("--verbose", action="store_true", help="Print the full JSON report")
@@ -95,11 +106,15 @@ def main() -> int:
     settings = Settings.from_env()
     if args.command == "check-brightdata-config":
         if (
-            args.limit is not None or args.apply or args.dry_run or args.verbose
+            args.limit is not None or args.all or args.apply or args.dry_run or args.verbose
             or args.plan_out or args.apply_plan or args.refresh_evidence
         ):
             parser.error("check-brightdata-config does not accept batch or write options")
         return check_brightdata_config(settings)
+    if args.all and (
+        args.limit is not None or args.plan_out or args.apply_plan
+    ):
+        parser.error("--all cannot be combined with --limit, --plan-out, or --apply-plan")
     if args.plan_out and (args.apply or args.apply_plan):
         parser.error("--plan-out is DRY_RUN-only; do not combine it with --apply or --apply-plan")
     if args.apply_plan and (not args.apply or args.dry_run):
@@ -112,7 +127,7 @@ def main() -> int:
         apply=apply,
         require_research=not bool(args.apply_plan),
     )
-    limit = args.limit or settings.batch_limit
+    limit = 0 if args.all else (args.limit or settings.batch_limit)
     engine = MetadataEngine(settings, research_enabled=not bool(args.apply_plan))
     try:
         result = engine.run_batch(
