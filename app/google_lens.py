@@ -1640,6 +1640,59 @@ class BrightDataGoogleLensClient:
             total_attempts += int(attempts or 0)
             response_modes.append(mode)
             request_diag = dict(getattr(self, "last_request_diagnostics", {}) or {})
+            response_headers = {
+                str(name).casefold(): str(value or "").strip()
+                for name, value in (request_diag.get("response_headers") or {}).items()
+            }
+            proxy_status_text = response_headers.get("proxy-status", "")
+            brd_status_text = response_headers.get("x-brd-status-code", "")
+            upstream_status_match = re.search(
+                r"\\breceived-status\\s*=\\s*(\\d{3})\\b",
+                proxy_status_text,
+                flags=re.IGNORECASE,
+            ) or re.search(
+                r"\\b(?:http(?:_status)?|status(?:_code)?)\\s*[:=]\\s*(\\d{3})\\b",
+                brd_status_text,
+                flags=re.IGNORECASE,
+            )
+            try:
+                upstream_status = int(upstream_status_match.group(1)) if upstream_status_match else 0
+            except (TypeError, ValueError):
+                upstream_status = 0
+
+            # Bright Data may wrap an upstream proxy 5xx in an outer HTTP 200.
+            # Treat the embedded received-status as the real provider status and
+            # stop before trying the alternate JSON format or visual_matches tab.
+            proxy_error_text = response_headers.get("x-brd-error", "").casefold()
+            if (
+                200 <= int(effective_status) < 300
+                and upstream_status >= 500
+                and (
+                    "proxy error" in proxy_error_text
+                    or "http_protocol_error" in proxy_status_text.casefold()
+                    or "received-status=" in proxy_status_text.casefold()
+                )
+            ):
+                request_diag.update({
+                    "http_status": upstream_status,
+                    "provider_error_code": "proxy_upstream_error",
+                    "provider_error_message": (
+                        response_headers.get("x-brd-error")
+                        or f"Bright Data proxy upstream returned HTTP {upstream_status}"
+                    )[:180],
+                    "proxy_upstream_status": upstream_status,
+                })
+                self.last_request_diagnostics.update(request_diag)
+                self.last_request_diagnostics.update({
+                    "response_modes_attempted": list(response_modes),
+                    "data_format": "parsed_light" if mode == "parsed_light" else "json",
+                })
+                request_diag = dict(self.last_request_diagnostics)
+                raise BrightDataAPIError(
+                    "Bright Data proxy returned an outer HTTP 200 but its upstream request "
+                    f"failed with received-status={upstream_status}; stopping this Lens lookup"
+                )
+
             request_diagnostics.append(request_diag)
             if request_diag.get("provider_error_code") == "reject_element":
                 # The one geo-targeted retry also failed. The alternative JSON
@@ -1903,13 +1956,18 @@ class BrightDataGoogleLensClient:
         )
         if exact_provider_error_code == "reject_element":
             visual_fallback_skipped_reason = "brightdata_reject_element_after_geo_retry"
+        elif exact_provider_error_code == "proxy_upstream_error":
+            visual_fallback_skipped_reason = "brightdata_proxy_upstream_error"
 
         # If exact_matches yields no official identifier, also inspect the
         # visual_matches tab. Titles/captions do not suppress this lookup.
         # A persistent provider-level reject_element after the controlled geo
         # retry applies to the Lens extraction itself; do not repeat the same
         # failing call for a second Lens tab.
-        if not exact_ids and exact_provider_error_code != "reject_element":
+        if not exact_ids and exact_provider_error_code not in {
+            "reject_element",
+            "proxy_upstream_error",
+        }:
             try:
                 visual_results, visual_rows, visual_diag = self._request_lens_tab(
                     image_url, LENS_FALLBACK_TAB
