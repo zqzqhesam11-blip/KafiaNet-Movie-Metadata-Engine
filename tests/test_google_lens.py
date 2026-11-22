@@ -818,6 +818,33 @@ class BrightDataGoogleLensClientTests(unittest.TestCase):
         self.assertEqual(api.last_lens_diagnostics["provider_retry_country"], "us")
         self.assertEqual(api.last_lens_diagnostics["attempts"], 2)
 
+    def test_proxy_wrapped_upstream_502_stops_json_and_visual_retries(self):
+        proxy_error = Mock()
+        proxy_error.status_code = 200
+        proxy_error.text = ""
+        proxy_error.headers = {
+            "content-type": "application/json",
+            "x-brd-error": "Proxy Error",
+            "proxy-status": 'brd.superproxy.io; received-status=502; error="http_protocol_error"',
+        }
+        proxy_error.json.side_effect = ValueError("empty response")
+
+        api = self.make_client()
+        api.client.post.return_value = proxy_error
+
+        with self.assertRaisesRegex(BrightDataAPIError, "received-status=502"):
+            api.search_by_image_url("https://example.com/poster.jpg")
+
+        self.assertEqual(api.client.post.call_count, 1)
+        diagnostics = api.last_lens_diagnostics
+        self.assertEqual(diagnostics["http_status"], 502)
+        self.assertEqual(diagnostics["provider_error_code"], "proxy_upstream_error")
+        self.assertEqual(
+            diagnostics["visual_fallback_skipped_reason"],
+            "brightdata_proxy_upstream_error",
+        )
+        self.assertEqual(diagnostics["lens_tabs_attempted"], ["exact_matches"])
+
     def test_persistent_reject_element_stops_json_and_visual_retries(self):
         rejected = Mock()
         rejected.status_code = 200
