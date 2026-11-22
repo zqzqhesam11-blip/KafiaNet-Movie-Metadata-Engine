@@ -2612,24 +2612,37 @@ class MetadataEngine:
         else:
             # Root folders need their first move. Unchanged REVIEW posters reuse
             # their last saved decision and do not spend research quota again.
-            pending = [
+            all_pending = [
                 item for item in folders
                 if item["folder"] not in old_by_folder
                 or old_by_folder[item["folder"]].get("status") == "review"
                 or item.get("source_prefix") == item["folder"]
-            ][: max(1, limit)]
+            ]
+            pending = all_pending if limit <= 0 else all_pending[:limit]
 
+        batch_requested = len(pending) if limit <= 0 else limit
         records: list[dict[str, Any]] = []
         item_by_folder = {item["folder"]: item for item in pending}
         total = len(pending)
         print(f"[KafiaNet] Selected {total} pending film(s). Mode={'APPLY' if apply else 'DRY_RUN'}.", flush=True)
+        provider_deferred_review_count = 0
+        provider_stop_announced = False
         for position, item in enumerate(pending, start=1):
             print(
                 f"[KafiaNet] [{position}/{total}] START {item['folder']}",
                 flush=True,
             )
             previous_row = old_by_folder.get(item["folder"]) or {}
+            research_deferred = bool(self._stop_batch)
             try:
+                if research_deferred:
+                    provider_deferred_review_count += 1
+                    raise RuntimeError(
+                        "Research deferred because the provider circuit is open "
+                                               f"({self._provider_stop_reason or 'provider_limit'}, "
+                        f"HTTP {self._provider_stop_status}); classified as REVIEW "
+                        "without sending another provider request"
+                    )
                 if plan_records_by_folder is not None:
                     # Reuse the exact saved DRY_RUN decision and evidence.
                     # This branch performs no Lens, Google Search, or TMDB requests.
@@ -2937,7 +2950,7 @@ class MetadataEngine:
                     f"posters={tmdb_data.get('poster_count', 0)}",
                     flush=True,
                 )
-            if self._stop_batch:
+            if self._stop_batch and not provider_stop_announced:
                 if self._provider_stop_reason == "brightdata_reject_element_after_geo_retry":
                     stop_detail = (
                         "Bright Data Lens extraction rejected with reject_element "
@@ -2949,61 +2962,12 @@ class MetadataEngine:
                         f"({self._provider_stop_reason or 'provider_limit'})"
                     )
                 print(
-                    f"[KafiaNet] STOP: {stop_detail}; "
-                    "remaining posters were not queried and this batch will not write catalog changes.",
+                    f"[KafiaNet] PROVIDER_PAUSED: {stop_detail}; "
+                    f"{max(0, total - position)} remaining selected film(s) will be "
+                    "classified as REVIEW without further provider requests and included in the batch commit.",
                     flush=True,
                 )
-                break
-
-        if self._stop_batch:
-            return {
-                "mode": "STOPPED_PROVIDER_LIMIT",
-                "source_repo": self.settings.posters_repo,
-                "branch": self.settings.posters_branch,
-                "source_folders_found": len(folders),
-                "already_indexed_before_batch": len(old_items),
-                "batch_requested": limit,
-                "batch_selected": len(records),
-                "ready": sum(1 for item in records if item.get("status") == "ready"),
-                "review": sum(1 for item in records if item.get("status") == "review"),
-                "duplicates_in_this_batch": sum(1 for item in records if item.get("status") == "duplicate"),
-                "reverse_image_unresponsive": sum(
-                    1 for item in records
-                    if (item.get("reverse_image") or {}).get("latest_query", {}).get("status")
-                    in {"error", "processing_error"}
-                ),
-                "reverse_image_no_matches": sum(
-                    1 for item in records
-                    if (item.get("reverse_image") or {}).get("latest_query", {}).get("status") == "no_matches"
-                ),
-                "reverse_image_previous_evidence_reused": sum(
-                    1 for item in records
-                    if (item.get("reverse_image") or {}).get("results_source") == "previous_saved"
-                ),
-                "reverse_image_official_id_backlinks": sum(
-                    len(((item.get("reverse_image") or {}).get("evidence") or {}).get("imdb_ids", []))
-                    + len(((item.get("reverse_image") or {}).get("evidence") or {}).get("tmdb_ids", []))
-                    for item in records
-                ),
-                "reverse_image_resolved_identities": sum(
-                    1 for item in records if item.get("identity")
-                ),
-                "reverse_image_identity_conflicts": sum(
-                    1 for item in records
-                    if "multiple distinct official IMDb/TMDB movie identities"
-                    in str((item.get("match") or {}).get("reason") or "")
-                ),
-                "planned_output_files": [],
-                "planned_image_moves": [],
-                "planned_source_image_deletes": [],
-                "written_files": 0,
-                "moved_image_files": 0,
-                "deleted_old_files": 0,
-                "provider_stop_status": self._provider_stop_status,
-                "provider_stop_reason": self._provider_stop_reason,
-                "records": records,
-                "next_pending_estimate": max(0, len(pending) - len(records)),
-            }
+                provider_stop_announced = True
 
         # Snapshot actual decisions before output-path/duplicate reconciliation
         # mutates the in-memory record objects below.
@@ -3230,7 +3194,7 @@ class MetadataEngine:
             "branch": self.settings.posters_branch,
             "source_folders_found": len(folders),
             "already_indexed_before_batch": len(old_items),
-            "batch_requested": limit,
+            "batch_requested": batch_requested,
             "batch_selected": len(records),
             "ready": ready_count,
             "review": review_count,
@@ -3265,6 +3229,10 @@ class MetadataEngine:
             "planned_output_files": sorted(files),
             "planned_image_moves": sorted(moves),
             "planned_source_image_deletes": image_deletes,
+            "provider_requests_paused": bool(self._stop_batch),
+            "provider_stop_status": self._provider_stop_status,
+            "provider_stop_reason": self._provider_stop_reason,
+            "provider_deferred_review_count": provider_deferred_review_count,
             "records": records,
             "next_pending_estimate": next_pending_estimate,
         }
