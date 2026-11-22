@@ -1647,11 +1647,11 @@ class BrightDataGoogleLensClient:
             proxy_status_text = response_headers.get("proxy-status", "")
             brd_status_text = response_headers.get("x-brd-status-code", "")
             upstream_status_match = re.search(
-                r"\\breceived-status\\s*=\\s*(\\d{3})\\b",
+                r"\breceived-status\s*=\s*(\d{3})\b",
                 proxy_status_text,
                 flags=re.IGNORECASE,
             ) or re.search(
-                r"\\b(?:http(?:_status)?|status(?:_code)?)\\s*[:=]\\s*(\\d{3})\\b",
+                r"\b(?:http(?:_status)?|status(?:_code)?)\s*[:=]\s*(\d{3})\b",
                 brd_status_text,
                 flags=re.IGNORECASE,
             )
