@@ -230,6 +230,116 @@ class PosterOrganizationTests(unittest.TestCase):
         self.assertIn("جاهز/Original Folder (1998)/poster.jpg", committed["moves"])
         self.assertNotIn("Correct Film (2020)", " ".join(committed["moves"]))
 
+    def test_unresolved_film_is_moved_to_review_with_metadata(self):
+        item = {
+            "folder": "Unresolved Film (2024)",
+            "source_prefix": "Unresolved Film (2024)",
+            "image_path": "Unresolved Film (2024)/poster.jpg",
+            "poster_files": [
+                {
+                    "path": "Unresolved Film (2024)/poster.jpg",
+                    "relative_path": "poster.jpg",
+                    "sha": "unresolved-poster-sha",
+                    "mode": "100644",
+                }
+            ],
+        }
+        record = {
+            "source": {
+                "folder": item["folder"],
+                "image_path": item["image_path"],
+                "image_url": "https://raw.example/unresolved.jpg",
+            },
+            "match": {"status": "review", "reason": "No verified official movie ID"},
+            "reverse_image": {
+                "latest_query": {"status": "no_matches"},
+                "results_source": "live",
+                "evidence": {},
+            },
+            "tmdb": None,
+            "tmdb_id": None,
+            "imdb_id": None,
+            "identity": None,
+            "status": "review",
+        }
+        engine = self.make_engine([item], {"items": []}, {item["folder"]: record})
+
+        result = engine.run_batch(limit=1, apply=True)
+
+        committed = engine.github.committed
+        review_image = "مراجعة/Unresolved Film (2024)/poster.jpg"
+        review_json = "مراجعة/Unresolved Film (2024)/Unresolved Film (2024).json"
+        self.assertEqual(result["mode"], "APPLY")
+        self.assertEqual(result["review"], 1)
+        self.assertIn(review_image, committed["moves"])
+        self.assertIn(item["image_path"], committed["deletes"])
+        self.assertIn(review_json, committed["files"])
+        saved = json.loads(committed["files"][review_json])
+        self.assertEqual(saved["status"], "review")
+        self.assertIsNone(saved["tmdb_id"])
+        self.assertEqual(saved["source"]["image_path"], review_image)
+
+    def test_provider_failure_defers_remaining_films_to_review_and_still_applies(self):
+        def item_for(folder):
+            return {
+                "folder": folder,
+                "source_prefix": folder,
+                "image_path": f"{folder}/poster.jpg",
+                "poster_files": [
+                    {
+                        "path": f"{folder}/poster.jpg",
+                        "relative_path": "poster.jpg",
+                        "sha": f"{folder}-sha",
+                        "mode": "100644",
+                    }
+                ],
+            }
+
+        items = [item_for("Film A"), item_for("Film B")]
+        engine = self.make_engine(items, {"items": []}, {})
+        calls = []
+
+        def record_for(item, previous_output_path=None):
+            calls.append(item["folder"])
+            engine._stop_batch = True
+            return {
+                "source": {
+                    "folder": item["folder"],
+                    "image_path": item["image_path"],
+                    "image_url": "https://raw.example/" + item["folder"],
+                },
+                "match": {"status": "review", "reason": "Provider error; no verified identity"},
+                "reverse_image": {
+                    "latest_query": {"status": "error"},
+                    "results_source": "none",
+                    "evidence": {},
+                },
+                "tmdb": None,
+                "tmdb_id": None,
+                "imdb_id": None,
+                "identity": None,
+                "status": "review",
+            }
+
+        engine._record_for_folder = record_for
+
+        result = engine.run_batch(limit=0, apply=True)
+
+        committed = engine.github.committed
+        self.assertEqual(calls, ["Film A"])
+        self.assertEqual(result["mode"], "APPLY")
+        self.assertEqual(result["batch_requested"], 2)
+        self.assertEqual(result["batch_selected"], 2)
+        self.assertEqual(result["review"], 2)
+        self.assertEqual(result["provider_requests_paused"], True)
+        self.assertEqual(result["provider_deferred_review_count"], 1)
+        self.assertIn("مراجعة/Film A/poster.jpg", committed["moves"])
+        self.assertIn("مراجعة/Film B/poster.jpg", committed["moves"])
+        self.assertIn("مراجعة/Film B/Film B.json", committed["files"])
+        deferred_record = json.loads(committed["files"]["مراجعة/Film B/Film B.json"])
+        self.assertEqual(deferred_record["status"], "review")
+        self.assertIn("classified as REVIEW", deferred_record["processing_error"]["message"])
+
     def test_review_folder_can_be_promoted_to_ready(self):
         item = {
             "folder": "Unresolved Film (2021)",

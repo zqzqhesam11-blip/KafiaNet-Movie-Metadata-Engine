@@ -43,6 +43,25 @@ class CliSummaryTests(unittest.TestCase):
         self.assertNotIn("very/long/path.json", output)
         self.assertNotIn("poster.jpg", output)
 
+    def test_apply_summary_reports_provider_pause_and_deferred_reviews(self):
+        output = format_summary({
+            "mode": "APPLY",
+            "batch_selected": 12,
+            "batch_requested": 12,
+            "ready": 8,
+            "review": 4,
+            "duplicates_in_this_batch": 0,
+            "provider_requests_paused": True,
+            "provider_stop_status": 502,
+            "provider_stop_reason": "provider_server_error",
+            "provider_deferred_review_count": 3,
+        })
+
+        self.assertIn(
+            "provider_requests_paused=true status=502 reason=provider_server_error deferred_review=3",
+            output,
+        )
+
     def test_dry_run_summary_reports_counts_only(self):
         output = format_summary({
             "mode": "DRY_RUN",

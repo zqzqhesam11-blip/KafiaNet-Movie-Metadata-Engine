@@ -18,7 +18,7 @@ To keep this project free:
 - Create/use only the SERP API free tier.
 - Do not add a payment card, deposit funds, or activate a paid plan.
 - Do not configure automatic top-ups or any paid balance.
-- HTTP 402 stops the batch without retry. HTTP 429 uses a small bounded backoff; a persistent limit stops the batch safely. Do not add funds.
+- HTTP 402 is never retried. HTTP 429 and transient provider failures use bounded retry behavior. When the provider circuit opens, the engine stops sending provider requests but does not abandon the selected batch: films not yet researched are written as REVIEW so APPLY can finish without wasting more quota. Do not add funds.
 - Google Lens is the only image-discovery provider. The engine reads official TMDB movie IDs or IMDb title IDs from Lens results; IMDb title IDs are accepted from the canonical title page or its official `/mediaviewer/rm…/` route (not unrelated subpages such as `/news`). When Exact Matches has no ID, it also checks Lens Visual Matches.
 - Some Lens results use opaque Google `/goto?url=CAES…` links. The engine resolves at most **three** such links per Lens tab, sequentially, using an unauthenticated GET with automatic redirects disabled. It accepts only an HTTPS `Location` that is itself an official IMDb title/mediaviewer page or TMDB movie page. It does not decode the token, parse interstitial HTML, follow a second redirect, or send the Bright Data bearer token to Google. A block, rate-limit, or verification interstitial stops further attempts for that tab.
 - Lens response parsing uses one documented selector per request: `x-unblock-data-format: parsed_light` first, then one `brd_json=1` fallback only when Bright Data returns an empty or unrecognized HTTP-200 body. It does not repeat the same empty request three times. Empty responses remain provider errors, never `no_matches`; safe response status/headers are retained for diagnosis.
@@ -27,7 +27,7 @@ To keep this project free:
 - AFI Catalog and BFI National Archive are not queried by the ID-only automatic identity path. Any pre-existing catalogue references remain reviewer context only and are never proof of identity.
 - Wikipedia, Wikidata, AFI, and BFI results always use `identity_evidence=false` and `automatic_match_allowed=false`. Only an official TMDB/IMDb identifier resolved and verified through TMDB can authorize READY. Folder names and image filenames are never used as search inputs.
 - Separately, the poster image bytes are OCR-processed locally by RapidOCR. Up to three OCR text hints may be sent to TMDB `/search/movie`; returned rows are saved only as manual-review suggestions under `ocr.tmdb_suggestions` and are never fed into identity resolution or automatic READY decisions.
-- At most two bounded retries are made for transient 5xx gateway errors, transport failures, and 5xx statuses inside Bright Data's HTTP-200 response envelope. HTTP 402/429 quota responses are never retried and stop the batch.
+- At most two bounded retries are made for transient 5xx gateway errors, transport failures, and 5xx statuses inside Bright Data's HTTP-200 response envelope. HTTP 402/429 quota responses are never retried. After an exhausted provider-wide failure, remaining selected films are marked REVIEW without further provider calls; an APPLY run still commits the complete selected batch.
 - Bright Data free credits may be shared with other products or tools using the same account. Keep the key private.
 
 References:
@@ -47,7 +47,7 @@ References:
 - During APPLY, source movie folders are classified into `جاهز/` or `مراجعة/` in one Git tree commit with their JSON metadata.
 - The source movie-folder name is never changed. Only the JSON basename changes to the movie title and release year returned by TMDB.
 - Image filenames, extensions, bytes, and Git blob SHAs are preserved.
-- Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
+- Every film without a verified official identity is classified as REVIEW and placed under `مراجعة/`. Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
 - Automatic movie identity comes from the first official TMDB movie ID in Lens' ranked results. The first official IMDb title ID is also retained as a fallback: if Lens has no TMDB ID, or the direct TMDB ID cannot be resolved and verified, the engine resolves the IMDb ID with TMDB `/find/{imdb_id}` and verifies the returned movie details include the same IMDb ID. Google Search, title similarity, Lens captions, and source-folder names do not create or veto an ID. Local OCR, Wikipedia, Wikidata, AFI, and BFI remain reviewer aids only.
 - Secondary IDs from lower-ranked Lens rows are retained in diagnostics but do not veto the first ranked ID after TMDB verifies it. If neither the direct TMDB ID nor the IMDb fallback can be resolved and verified, the item remains REVIEW.
 - Movie title, release date/year, country, director, cast, overview, ratings, external IMDb ID and other metadata are read from the verified TMDB movie record. The title saved for catalog naming is the title returned by TMDB; Lens title text and country clues are not used.
@@ -104,9 +104,11 @@ python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
 python -m app.cli check-brightdata-config
 python -m app.cli run --limit 1
+# APPLY every pending film (no DRY_RUN and no five-film batch cap):
+python -u -m app.cli run --apply --all
 ```
 
-The run command defaults to **DRY RUN** and does not write or move catalog files. It performs Google Lens image matching and then TMDB identifier lookups/details verification only; there is no Google Search title fallback. Wikipedia/Wikidata reviewer research adds extra requests only when `REVIEW_RESEARCH_ENABLED=true`. Live Lens requests may consume provider quota.
+The run command defaults to **DRY RUN** and does not write or move catalog files. Use `--apply --all` to apply every pending source/review film in one batch, without the configured five-film limit. Films lacking verified official identity go to `مراجعة/`. If Bright Data fails globally, the engine pauses further provider calls, marks the not-yet-researched selected films REVIEW, and still commits the complete batch. It performs Google Lens image matching and then TMDB identifier lookups/details verification only; there is no Google Search title fallback. Wikipedia/Wikidata reviewer research adds extra requests only when `REVIEW_RESEARCH_ENABLED=true`. Live Lens requests may consume provider quota.
 
 ## Deterministic DRY_RUN / APPLY
 
