@@ -11,6 +11,7 @@ on:
       - 'requirements.txt'
       - 'engine/**'
       - 'android-helper/**'
+      - 'efootball-saf-helper/**'
       - 'qml/**'
       - 'assets/**'
       - 'ui/**'
@@ -87,6 +88,18 @@ jobs:
           $supportDir = 'build\android_support'
           New-Item -ItemType Directory -Force -Path $supportDir | Out-Null
           Copy-Item -LiteralPath $helperApk -Destination (Join-Path $supportDir 'CNPlayHubShizukuBridge.apk') -Force
+
+          gradle -p efootball-saf-helper :app:assembleRelease --no-daemon --console=plain
+          if ($LASTEXITCODE -ne 0) { throw 'eFootball SAF companion build failed.' }
+          $efootballHelperApk = 'efootball-saf-helper\app\build\outputs\apk\release\app-release.apk'
+          if (-not (Test-Path -LiteralPath $efootballHelperApk -PathType Leaf)) {
+            throw 'eFootball SAF companion APK was not produced.'
+          }
+          if ((Get-Item -LiteralPath $efootballHelperApk).Length -lt 10000) {
+            throw 'eFootball SAF companion APK looks incomplete.'
+          }
+          Copy-Item -LiteralPath $efootballHelperApk -Destination (Join-Path $supportDir 'KafiaNetEFootballSAF.apk') -Force
+          Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $supportDir 'KafiaNetEFootballSAF.apk') | Format-List
 
           $shizukuUrl = 'https://github.com/RikkaApps/Shizuku/releases/download/v13.6.0/shizuku-v13.6.0.r1086.2650830c-release.apk'
           $shizukuApk = Join-Path $supportDir 'Shizuku.apk'
@@ -182,6 +195,9 @@ jobs:
             'android-helper\app\src\main\AndroidManifest.xml',
             'android-helper\app\src\main\java\com\kafianet\shizukubridge\MainActivity.java',
             'android-helper\app\src\main\java\com\kafianet\shizukubridge\TransferUserService.java',
+            'efootball-saf-helper\app\src\main\AndroidManifest.xml',
+            'efootball-saf-helper\app\build.gradle',
+            'efootball-saf-helper\app\src\main\java\com\kafianet\efootball\saf\MainActivity.java',
             'platform-tools\adb.exe',
             'platform-tools\AdbWinApi.dll',
             'platform-tools\AdbWinUsbApi.dll',
@@ -378,7 +394,7 @@ jobs:
           Write-Host 'NO EXTERNAL PYTHON RUNTIME PATH REQUIRED' -ForegroundColor Green
           Write-Host ("EXE SHA256: {0}" -f (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)
           $androidSupport = Join-Path $bundleDir '_internal\android_support'
-          foreach ($supportFile in @('Shizuku.apk', 'CNPlayHubShizukuBridge.apk')) {
+          foreach ($supportFile in @('Shizuku.apk', 'CNPlayHubShizukuBridge.apk', 'KafiaNetEFootballSAF.apk')) {
             $supportPath = Join-Path $androidSupport $supportFile
             if (-not (Test-Path -LiteralPath $supportPath -PathType Leaf)) {
               throw "Bundled Android support file is missing: $supportFile"
@@ -388,7 +404,7 @@ jobs:
               throw "Bundled Android support file looks incomplete: $supportFile"
             }
           }
-          Write-Host 'Verified bundled Shizuku and KafiaNet helper APKs.' -ForegroundColor Green
+          Write-Host 'Verified bundled Shizuku, Shizuku bridge and eFootball SAF helper APKs.' -ForegroundColor Green
           Write-Host 'STATIC BUNDLE CHECK: PASS' -ForegroundColor Green
 
       - name: Run frozen Qt startup smoke test

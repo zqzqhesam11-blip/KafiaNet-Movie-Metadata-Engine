@@ -121,6 +121,10 @@ class FakeOperationEngine(QObject):
         self.finished.emit(success, message)
 
 
+class FakeEFootballSAFEngine(FakeOperationEngine):
+    """Test double distinct from the ordinary ADB transfer engine."""
+
+
 class DiscoveryEngine:
     _thread = None
 
@@ -153,6 +157,7 @@ def rows(serials):
 
 def make_controller():
     app_qml.ADBEngine = FakeOperationEngine
+    app_qml.EFootballSAFEngine = FakeEFootballSAFEngine
     controller = app_qml.AppController()
     controller.adb_engine = DiscoveryEngine()
     # Isolate validation from persistent user settings and history files.
@@ -830,6 +835,10 @@ def test_pubg_source_size_selects_sibling_folder():
                 str(expected_source),
                 expected_destination,
             )]
+            operation = controller._active_operations["SERIAL_A"]
+            assert operation["phase"] == "adb_direct"
+            assert operation["transfer_backend"] == "adb"
+            assert operation["target_package"] == "com.tencent.ig"
             engine.finish(True, "copy complete")
 
         summary = controller.getTransferSummary()
@@ -891,9 +900,13 @@ def test_pubg_flash_uses_fixed_source_and_exact_package_destination():
     with TemporaryDirectory() as directory:
         root = Path(directory) / "games"
         flash_folder = root / "ببجي (PUBG FLASH)"
-        saved_folder = flash_folder / "Saved"
-        saved_folder.mkdir(parents=True)
-        (saved_folder / "flash_data.pak").write_bytes(b"flash")
+        expected_sources = {}
+        for size_name in ("Saved", "Medium", "Low"):
+            size_root = flash_folder / size_name
+            payload = size_root if size_name == "Saved" else size_root / "Saved"
+            payload.mkdir(parents=True)
+            (payload / "flash_data.pak").write_bytes(size_name.encode("ascii"))
+            expected_sources[size_name] = payload
 
         app_qml.build_usb_source_root = lambda: root
         app_qml.find_game_folder = lambda selected_root, _name: (
@@ -909,26 +922,31 @@ def test_pubg_flash_uses_fixed_source_and_exact_package_destination():
             "display_name": "Galaxy Flash",
         }
 
-        controller.copyGame("PUBG Mobile Flash")
-        engine = engine_for("SERIAL_A")
         expected_destination = (
             "/storage/emulated/0/Android/data/com.tencent.igfit/"
             "files/UE4Game/ShadowTrackerExtra/ShadowTrackerExtra/Saved"
         )
-        assert engine.calls[-1] == (
-            "push",
-            "SERIAL_A",
-            str(saved_folder),
-            expected_destination,
-        )
-        operation = controller._active_operations["SERIAL_A"]
-        assert operation["source_root"] == str(root)
-        assert operation["destination"] == expected_destination
+        for size_name in ("Saved", "Medium", "Low"):
+            assert controller.setPubgSourceSize(size_name) is True
+            controller.copyGame("PUBG Mobile Flash")
+            engine = engine_for("SERIAL_A")
+            operation = controller._active_operations["SERIAL_A"]
+            assert engine.calls[-1] == (
+                "push",
+                "SERIAL_A",
+                str(expected_sources[size_name]),
+                expected_destination,
+            )
+            assert operation["phase"] == "adb_direct"
+            assert operation["transfer_backend"] == "adb"
+            assert operation["target_package"] == "com.tencent.igfit"
+            assert operation["source_root"] == str(root)
+            assert operation["destination"] == expected_destination
+            engine.finish(True, "copy complete")
+
     app_qml.build_usb_source_root = original_usb_root
     app_qml.find_game_folder = original_find_game
     app_qml.get_game = original_get_game
-
-
 
 def test_pubg_flash_requires_saved_source_directory():
     controller = make_controller()
@@ -2179,13 +2197,12 @@ def test_versioned_games_discover_select_and_route_exact_folders():
         assert len(captured) == 1
         efootball_copy = captured[-1]
         assert efootball_copy["game_version"] == "2021"
-        assert [Path(part["source"]).name for part in efootball_copy["copy_parts"]] == ["data", "obb"]
-        assert efootball_copy["copy_parts"][0]["destination"] == (
-            "/sdcard/Android/data/com.konami.pesam/"
-        )
-        assert efootball_copy["copy_parts"][1]["destination"] == (
-            "/sdcard/Android/obb/com.konami.pesam/"
-        )
+        assert efootball_copy["target_package"] == "com.ziru.official"
+        assert efootball_copy["transfer_backend"] == "efootball_saf"
+        assert efootball_copy["phase"] == "efootball_saf"
+        assert len(efootball_copy["copy_parts"]) == 1
+        assert efootball_copy["copy_parts"][0]["destination"] == "SAF://eFootball/data"
+        assert Path(efootball_copy["copy_parts"][0]["source"]) == efootball_2021 / "data"
         assert Path(efootball_copy["source"]) == efootball_2021 / "data"
 
         gta_versions = controller.getGameVersions("Grand Theft Auto")
@@ -2248,6 +2265,48 @@ def test_gta_copy_refuses_to_guess_unverified_package_id():
         assert started == []
         assert any("Package ID" in message for message in messages)
         assert not any("com.rockstar" in message for message in messages)
+
+
+def test_efootball_uses_saf_engine_and_never_starts_shizuku_fallback():
+    controller = make_controller()
+    with TemporaryDirectory() as directory:
+        source = Path(directory) / "data"
+        (source / "files").mkdir(parents=True)
+        (source / "files" / "assetpacks.bin").write_bytes(b"efootball")
+        operation = {
+            "serial": "SERIAL_A",
+            "model": "Test Phone",
+            "device_name": "Test Phone",
+            "game": "eFootball",
+            "game_version": "2027",
+            "kind": "copy",
+            "target_type": "android",
+            "source": str(source),
+            "destination": "SAF://eFootball/data",
+            "copy_parts": [{
+                "source": str(source),
+                "destination": "SAF://eFootball/data",
+                "label": "بيانات eFootball (Ziru_27)",
+            }],
+            "copy_part_index": 0,
+            "transfer_backend": "efootball_saf",
+            "phase": "efootball_saf",
+            "completed": False,
+            "cancelled": False,
+            "history_recorded": False,
+        }
+        controller._begin_shizuku_fallback = lambda *_args: (
+            (_ for _ in ()).throw(AssertionError("eFootball SAF must not fall back to Shizuku"))
+        )
+        controller._start_operation(operation)
+        engine = operation["engine"]
+        assert isinstance(engine, FakeEFootballSAFEngine)
+        assert engine.calls == [(
+            "push", "SERIAL_A", str(source), "SAF://eFootball/data"
+        )]
+        engine.finish(False, "simulated SAF error")
+        assert operation["phase"] == "final"
+        assert operation["completed"] is True
 
 
 def test_copy_parts_are_one_sequential_device_operation():
@@ -2604,7 +2663,19 @@ def test_paths_and_ui():
     assert '["-s", device, "uninstall", helper_package]' in engine_source
     assert '"signature mismatch" in detail' in engine_source
     assert '"signatures do not match" in detail' in engine_source
-    assert "CNPlayHubShizukuBridge.apk" in Path(".github/workflows/build-self-contained-installer.yml").read_text(encoding="utf-8")
+    workflow_source = Path(".github/workflows/build-self-contained-installer.yml").read_text(encoding="utf-8")
+    assert "CNPlayHubShizukuBridge.apk" in workflow_source
+    assert "KafiaNetEFootballSAF.apk" in workflow_source
+    saf_helper_source = Path(
+        "efootball-saf-helper/app/src/main/java/com/kafianet/efootball/saf/MainActivity.java"
+    ).read_text(encoding="utf-8")
+    assert "ACTION_OPEN_DOCUMENT_TREE" in saf_helper_source
+    assert "com.ziru.official.MTDataFilesProvider" in saf_helper_source
+    assert "takePersistableUriPermission" in saf_helper_source
+    assert "onNewIntent(Intent intent)" in saf_helper_source
+    assert '"/file"' in saf_helper_source
+    assert "DocumentsContract.renameDocument(" in saf_helper_source
+    assert "from engine.efootball_saf_engine import EFootballSAFEngine" in current
     transfer_user_java = Path(
         "android-helper/app/src/main/java/com/kafianet/shizukubridge/TransferUserService.java"
     ).read_text(encoding="utf-8")
@@ -2915,6 +2986,7 @@ def run_once():
     test_adb_oem_compatibility_probe_reads_real_facts_without_writes()
     test_oem_compatibility_settings_toggle_and_disable_gate()
     test_versioned_games_discover_select_and_route_exact_folders()
+    test_efootball_uses_saf_engine_and_never_starts_shizuku_fallback()
     test_gta_copy_refuses_to_guess_unverified_package_id()
     test_copy_parts_are_one_sequential_device_operation()
     test_secure_mkdirs_partial_directory_retry_is_scoped_to_saved()

@@ -51,6 +51,7 @@ if "--qt-import-smoke-test" in sys.argv:
 
 from engine.transfer_engine import TransferEngine
 from engine.adb_engine import ADBEngine
+from engine.efootball_saf_engine import EFootballSAFEngine
 from engine.path_manager import PathManager
 from engine.game_config import (
     get_game,
@@ -70,7 +71,7 @@ ADB_PACKAGE_IDS = {
     "Free Fire": "com.dts.freefireth",
     "Fortnite": "com.epicgames.fortnite",
     "Genshin Impact": "com.miHoYo.GenshinImpact",
-    "eFootball": "com.konami.pesam",
+    "eFootball": "com.ziru.official",
     "PUBG Mobile": "com.tencent.ig",
     "PUBG Mobile Flash": "com.tencent.igfit",
     "Call of Duty Mobile": "com.activision.callofduty.shooter",
@@ -152,6 +153,10 @@ def build_shizuku_apk_path():
 
 def build_shizuku_helper_apk_path():
     return BASE_DIR / "android_support" / "CNPlayHubShizukuBridge.apk"
+
+
+def build_efootball_saf_helper_apk_path():
+    return BASE_DIR / "android_support" / "KafiaNetEFootballSAF.apk"
 
 
 def _read_axml_package_name(manifest_bytes):
@@ -1804,7 +1809,14 @@ class AppController(QObject):
     def _start_operation(self, operation):
         serial = operation["serial"]
         is_usb_target = operation.get("target_type") == "usb_storage"
-        engine = TransferEngine() if is_usb_target else ADBEngine()
+        is_efootball_saf = operation.get("transfer_backend") == "efootball_saf"
+        engine = (
+            TransferEngine()
+            if is_usb_target
+            else EFootballSAFEngine()
+            if is_efootball_saf
+            else ADBEngine()
+        )
         operation["engine"] = engine
         operation.setdefault(
             "phase",
@@ -1846,6 +1858,7 @@ class AppController(QObject):
                 else "جاري إزالة التثبيت" if is_uninstall
                 else "جاري نسخ الملفات من الهاتف" if is_pull
                 else "جاري النسخ إلى الفلاشة" if is_usb_target
+                else "جاري النسخ المباشر إلى eFootball عبر SAF" if is_efootball_saf
                 else "جاري النسخ المباشر عبر ADB"
             ),
             operation_text=(
@@ -1861,6 +1874,8 @@ class AppController(QObject):
                 if is_pull
                 else "نسخ ملفات جديدة إلى الفلاشة وتخطي الموجود"
                 if is_usb_target
+                else "نسخ مباشر إلى مساحة eFootball الخاصة بـ Ziru_27 عبر SAF"
+                if is_efootball_saf
                 else "محاولة النسخ مباشرة إلى مجلد اللعبة"
             ),
             speed="--" if is_install or is_uninstall or is_pull else "0 B/s",
@@ -1956,6 +1971,11 @@ class AppController(QObject):
 
         phase = operation.get("phase", "normal")
         engine = operation.get("engine")
+
+        if phase == "efootball_saf":
+            operation["phase"] = "final"
+            self._finished_for_device(serial, success, message)
+            return
 
         if phase == "adb_direct":
             if (
@@ -2770,6 +2790,27 @@ class AppController(QObject):
                 "/sdcard/Android/data/com.dts.freefireth/"
             )
 
+        elif game_name == "eFootball":
+            package_id = ADB_PACKAGE_IDS["eFootball"]
+            data_folder = self._find_case_insensitive_child_directory(source, "data")
+            if data_folder is None or not data_folder.is_dir():
+                self.messageChanged.emit(
+                    "مجلد data لمصدر eFootball غير موجود داخل الإصدار المحدد: "
+                    + str(source / "data")
+                )
+                return
+            target_package = package_id
+            source = data_folder
+            copy_parts = [{
+                "source": str(data_folder),
+                "destination": "SAF://eFootball/data",
+                "label": "بيانات eFootball (Ziru_27)",
+            }]
+            adb_destination = copy_parts[0]["destination"]
+            print("EFOOTBALL ZIRU_27 PACKAGE:", package_id)
+            print("EFOOTBALL SAF SOURCE:", data_folder)
+            print("EFOOTBALL SAF DESTINATION: provider data tree")
+
         elif game_name in VERSIONED_GAME_NAMES:
             package_id = self._package_id_for_version(game_name, source)
             if not package_id:
@@ -3039,6 +3080,8 @@ class AppController(QObject):
                 local_destination = target_root / "CN PlayHub" / game_name
                 if selected_game_version:
                     local_destination = local_destination / selected_game_version
+                if game_name == "eFootball":
+                    local_destination = local_destination / "data"
                 operation = {
                     "serial": serial,
                     "model": device_name,
@@ -3104,8 +3147,9 @@ class AppController(QObject):
                 "source_root": str(selected_source_root),
                 "game_size": self._pubg_source_size if game_name in ("PUBG Mobile", "PUBG Mobile Flash") else "",
                 "target_package": target_package,
+                "transfer_backend": "efootball_saf" if game_name == "eFootball" else "adb",
                 "shizuku_fallback_attempted": False,
-                "phase": "adb_direct"
+                "phase": "efootball_saf" if game_name == "eFootball" else "adb_direct"
             }
             self._start_operation(operation)
             started += 1
@@ -3116,6 +3160,9 @@ class AppController(QObject):
             )
 
     def _pull_destination_for_game(self, game_name):
+        if str(game_name) == "eFootball":
+            # Ziru_27 exposes this tree through SAF, not a normal ADB path.
+            return None
         game_config = get_game(str(game_name))
         if not game_config:
             return None
@@ -3187,6 +3234,8 @@ class AppController(QObject):
     @Slot(str, result=str)
     def getPhoneGameDestination(self, game_name):
         game_name = str(game_name or "")
+        if game_name == "eFootball":
+            return ""
         if game_name in VERSIONED_GAME_NAMES:
             package_id = self._selected_game_package_id(game_name)
             return "/sdcard/Android/data/" + package_id + "/" if package_id else ""
