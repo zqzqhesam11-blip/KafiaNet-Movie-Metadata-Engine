@@ -2983,7 +2983,7 @@ class AppController(QObject):
         print("ADB DEVICES:", target_devices)
         print("ADB DESTINATION:", adb_destination)
 
-        # Avoid a duplicate source-tree walk here; the transfer engine enumerates once for progress.
+        # Avoid a duplicate source-tree walk; only the transfer engine enumerates the source for progress.
 
         self.currentGame = game_name
 
