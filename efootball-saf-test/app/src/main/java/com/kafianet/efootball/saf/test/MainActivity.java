@@ -485,7 +485,7 @@ public final class MainActivity extends Activity {
                     Uri restored = DocumentsContract.renameDocument(
                             getContentResolver(), backup, fileName
                     );
-                    backup = restored;
+                    backup = null;
                 }
                 throw new IllegalStateException("provider could not commit the completed temporary file");
             }
@@ -529,7 +529,7 @@ public final class MainActivity extends Activity {
         if (relativePath == null || relativePath.trim().isEmpty()) {
             throw new IllegalArgumentException("relative file path is empty");
         }
-        String normalized = relativePath.replace('\\\\', '/');
+        String normalized = relativePath.replace('\\', '/');
         if (normalized.startsWith("/") || normalized.contains(":") || normalized.indexOf('\0') >= 0) {
             throw new SecurityException("absolute or invalid destination path rejected");
         }
