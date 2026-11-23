@@ -805,20 +805,6 @@ class ADBEngine(QObject):
             return False
         return result.returncode == 0
 
-    def _set_remote_game_permissions(self, device, destination):
-        """Make the copied game-data tree writable by the game process."""
-        root = str(destination or "").replace("\\", "/").rstrip("/")
-        if not root:
-            raise ValueError("Android game-data destination is empty.")
-        command = "chmod -R a+rwX " + self._shell_quote(root)
-        result = self._run(["-s", device, "shell", command], timeout=10 * 60)
-        if result.returncode != 0:
-            detail = str(result.stderr or result.stdout or "").strip()
-            raise RuntimeError(
-                "KAFIANET_POST_COPY_PERMISSION_ERROR: تعذر تجهيز صلاحيات ملفات اللعبة للحفظ: "
-                + (detail or "chmod failed")
-            )
-
     @staticmethod
     def _combined_progress_percent(total_bytes, offset_bytes, attempt_bytes):
         """Return monotonic overall progress across reconnect retries."""
@@ -868,11 +854,6 @@ class ADBEngine(QObject):
             # PUBG Saved must already exist. Never create Saved or its parents.
             # --------------------------------------------------------
             check_path = destination.rstrip("/") or destination
-            check_file = (
-                check_path.rstrip("/")
-                + f'/.kafianet_write_test_{os.getpid()}_'
-                f'{threading.get_ident()}_{time.time_ns()}'
-            )
             normalized_check_path = check_path.replace("\\", "/").lower()
             is_saved_destination = (
                 "/android/data/" in normalized_check_path
@@ -888,11 +869,6 @@ class ADBEngine(QObject):
                 "operation not permitted",
                 "eacces",
                 "errno 13",
-            )
-            missing_markers = (
-                "no such file or directory",
-                "does not exist",
-                "not found",
             )
             no_space_markers = (
                 "no space left on device",
@@ -936,75 +912,18 @@ class ADBEngine(QObject):
                     self.finished.emit(False, failure)
                     return
 
-            write_result = subprocess.run(
-                [
-                    self.adb, "-s", device, "shell", "touch", check_file
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=10,
-            )
-            if write_result.returncode != 0:
-                check_error = (
-                    str(write_result.stderr or "").strip()
-                    or str(write_result.stdout or "").strip()
-                    or "write test failed"
+            # Saved must already exist. Do not create, write, chmod, or remove anything in that root.
+            # ADB may be unable to inspect a protected Android/data path; route that case to
+            # Shizuku, which performs its own read-only destination check before copying.
+            if is_saved_destination and not self._remote_directory_exists(device, check_path):
+                failure = (
+                    "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED: "
+                    "تعذر على ADB التحقق من مجلد Saved؛ سيتم فحص الوجهة عبر Shizuku: "
+                    + check_path
                 )
-                lowered = check_error.lower()
-                if "/android/data/" in normalized_check_path and any(
-                    marker in lowered for marker in permission_markers
-                ):
-                    failure = "KAFIANET_ANDROID_DATA_PERMISSION_DENIED: " + check_error
-                elif any(marker in lowered for marker in missing_markers):
-                    if is_saved_destination:
-                        # ADB may report protected Android/data paths as missing.
-                        # UID 2000 must inspect the actual Saved directory.
-                        failure = (
-                            "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED: "
-                            "تعذر على ADB التحقق من مجلد Saved المحمي؛ سيتم فحصه عبر Shizuku: "
-                            + check_path
-                        )
-                    else:
-                        failure = (
-                            "KAFIANET_DESTINATION_MISSING: مجلد الوجهة غير موجود: "
-                            + check_path
-                        )
-                elif any(marker in lowered for marker in ("not a directory", "is not a directory")):
-                    failure = (
-                        "KAFIANET_DESTINATION_NOT_DIRECTORY: مسار الوجهة ليس مجلدًا: "
-                        + check_path
-                    )
-                elif any(marker in lowered for marker in no_space_markers):
-                    failure = "KAFIANET_NO_SPACE: " + check_error
-                else:
-                    failure = "KAFIANET_DESTINATION_WRITE_CHECK_FAILED: " + check_error
-                self.statusChanged.emit("تعذر الكتابة إلى مجلد الوجهة")
+                self.statusChanged.emit("سيتم فحص وجهة Saved عبر Shizuku...")
                 self.finished.emit(False, failure)
                 return
-
-            cleanup_result = subprocess.run(
-                [
-                    self.adb, "-s", device, "shell", "rm", "-f", check_file
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=10,
-            )
-            if cleanup_result.returncode != 0:
-                print(
-                    "ADB PREFLIGHT CLEANUP WARNING:",
-                    cleanup_result.stderr.strip() or cleanup_result.stdout.strip()
-                )
 
             manifest, total_bytes = self._build_direct_stream_manifest(source_path)
 
@@ -1362,8 +1281,6 @@ class ADBEngine(QObject):
 
             if return_code == 0:
 
-                self.statusChanged.emit("جاري تجهيز صلاحيات ملفات اللعبة...")
-                self._set_remote_game_permissions(device, requested_destination)
                 elapsed = max(
                     time.monotonic()
                     - start_time,
