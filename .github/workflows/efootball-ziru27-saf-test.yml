@@ -1,0 +1,61 @@
+name: eFootball Ziru_27 SAF Test Build
+
+on:
+  push:
+    branches:
+      - test/efootball-ziru27-saf-20261123
+    paths:
+      - 'efootball-saf-test/**'
+      - '.github/workflows/efootball-ziru27-saf-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-helper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout isolated test branch
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Validate PC streaming script syntax
+        run: python -m py_compile efootball-saf-test/test_copy_efootball_saf.py
+
+      - name: Build isolated SAF test APK
+        working-directory: efootball-saf-test
+        run: gradle --no-daemon assembleDebug
+
+      - name: Verify APK output
+        run: |
+          test -s efootball-saf-test/app/build/outputs/apk/debug/app-debug.apk
+          ls -lh efootball-saf-test/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Stage test bundle
+        run: |
+          mkdir -p dist/efootball-ziru27-saf-test
+          cp efootball-saf-test/app/build/outputs/apk/debug/app-debug.apk dist/efootball-ziru27-saf-test/KafiaNet-EFootball-SAF-Test.apk
+          cp efootball-saf-test/test_copy_efootball_saf.py dist/efootball-ziru27-saf-test/
+          cp efootball-saf-test/README.md dist/efootball-ziru27-saf-test/
+
+      - name: Upload test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: KafiaNet-EFootball-Ziru27-SAF-Test
+          path: dist/efootball-ziru27-saf-test/
+          if-no-files-found: error
+          retention-days: 14
