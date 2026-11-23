@@ -2559,8 +2559,10 @@ def test_paths_and_ui():
     assert "prepareDestinationWritable(" not in transfer_user_java
     assert "makeDestinationWritableTree(" not in transfer_user_java
     assert "MessageDigest" not in transfer_user_java
-    assert "Os.chmod(" in transfer_user_java
-    assert "ensureWritable(File root, File target)" in transfer_user_java
+    assert "Os.chmod(" not in transfer_user_java
+    assert "startDirectStreamFile(" in transfer_user_java
+    assert "new FileOutputStream(temporary, false)" in transfer_user_java
+    assert "output.getFD().sync()" in transfer_user_java
     assert "Os.rename(" in transfer_user_java
     assert ".kafianet-" in transfer_user_java and ".part" in transfer_user_java
     assert "KafiaNetTransfer" not in transfer_user_java
@@ -2595,7 +2597,7 @@ def test_paths_and_ui():
     helper_create = helper_activity_java[helper_activity_java.index("protected void onCreate("):helper_activity_java.index("protected void onNewIntent(")]
     assert helper_create.index("addRequestPermissionResultListener") < helper_create.index("addBinderReceivedListenerSticky")
     assert "initializeShizuku();" not in helper_create
-    assert "Os.chmod(folder.getAbsolutePath(), 0777)" in Path("android-helper/app/src/main/java/com/kafianet/shizukubridge/TransferUserService.java").read_text(encoding="utf-8")
+    assert "Os.chmod(folder.getAbsolutePath(), 0777)" not in transfer_user_java
     helper_manifest = Path("android-helper/app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
     assert "targetSdk 29" in helper_gradle
     assert "disable 'ExpiredTargetSdkVersion'" in helper_gradle
