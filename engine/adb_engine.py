@@ -793,7 +793,7 @@ class ADBEngine(QObject):
         return parent
 
     def _remote_directory_exists(self, device, remote_path):
-        """Read-only directory check; deliberately does not mkdir or chmod."""
+        """Inspect a remote directory without changing its contents or permissions."""
         command = "test -d " + self._shell_quote(remote_path)
         try:
             result = self._run(
