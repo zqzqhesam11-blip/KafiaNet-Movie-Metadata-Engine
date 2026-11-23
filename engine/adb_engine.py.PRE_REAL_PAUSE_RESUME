@@ -1,0 +1,812 @@
+﻿import os
+import re
+import subprocess
+import threading
+import time
+import ctypes
+from pathlib import Path
+
+from PySide6.QtCore import QObject, Signal, Slot
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+class ADBEngine(QObject):
+
+    progressChanged = Signal(int, str, str)
+    statusChanged = Signal(str)
+    finished = Signal(bool, str)
+    devicesChanged = Signal(list)
+
+    def __init__(self):
+        super().__init__()
+
+        self.adb = self._get_adb_path()
+
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+
+        self._cancel_event = threading.Event()
+
+        self._thread = None
+        self._current_process = None
+
+    def _get_adb_path(self):
+
+        adb = BASE_DIR / "platform-tools" / "adb.exe"
+
+        if adb.exists():
+            return str(adb)
+
+        return "adb"
+
+    def _run(self, args, timeout=None):
+
+        command = [
+            self.adb,
+            *args
+        ]
+
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            startupinfo=startupinfo,
+            creationflags=0x08000000,
+            timeout=timeout
+        )
+
+    @Slot(result=list)
+    def get_devices(self):
+
+        result = self._run(
+            ["devices"]
+        )
+
+        devices = []
+
+        for line in result.stdout.splitlines():
+
+            line = line.strip()
+
+            if not line or line.startswith("List of devices"):
+                continue
+
+            parts = line.split()
+
+            if len(parts) < 2:
+                continue
+
+            serial = parts[0]
+            state = parts[1]
+
+            if state != "device":
+                continue
+
+            model_result = self._run(
+                [
+                    "-s",
+                    serial,
+                    "shell",
+                    "getprop",
+                    "ro.product.model"
+                ]
+            )
+
+            manufacturer_result = self._run(
+                [
+                    "-s",
+                    serial,
+                    "shell",
+                    "getprop",
+                    "ro.product.manufacturer"
+                ]
+            )
+
+            model = model_result.stdout.strip()
+            manufacturer = manufacturer_result.stdout.strip()
+
+            if not model:
+                model = "Android"
+
+            if not manufacturer:
+                manufacturer = "Android"
+
+            devices.append({
+                "serial": serial,
+                "model": model,
+                "manufacturer": manufacturer,
+                "name": f"{manufacturer} {model} [{serial}]"
+            })
+
+        self.devicesChanged.emit(devices)
+
+        return devices
+
+    def _format_size(self, size):
+
+        units = [
+            "B",
+            "KB",
+            "MB",
+            "GB",
+            "TB"
+        ]
+
+        size = float(size)
+
+        for unit in units:
+
+            if size < 1024:
+                return f"{size:.1f} {unit}"
+
+            size /= 1024
+
+        return f"{size:.1f} PB"
+
+    def _format_time(self, seconds):
+
+        seconds = max(int(seconds), 0)
+
+        hours = seconds // 3600
+
+        minutes = (seconds % 3600) // 60
+
+        seconds = seconds % 60
+
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _get_remote_size(self, device, remote_path):
+
+        try:
+
+            result = self._run(
+                [
+                    '-s',
+                    device,
+                    'shell',
+                    'stat',
+                    '-c',
+                    '%s',
+                    remote_path
+                ],
+                timeout=5
+            )
+
+            value = result.stdout.strip()
+
+            if value.isdigit():
+                return int(value)
+
+        except Exception:
+            pass
+
+        return 0
+
+    def _parse_progress(self, line):
+
+        match = re.search(
+            r'(\d+)%\s+(\d+(?:\.\d+)?)([KMGTP]?B)/s',
+            line
+        )
+
+        if not match:
+            return
+
+        percent = int(match.group(1))
+
+        speed_value = float(match.group(2))
+
+        speed_unit = match.group(3)
+
+        multipliers = {
+            "B": 1,
+            "KB": 1024,
+            "MB": 1024 ** 2,
+            "GB": 1024 ** 3,
+            "TB": 1024 ** 4
+        }
+
+        speed = speed_value * multipliers.get(
+            speed_unit,
+            1
+        )
+
+        self.progressChanged.emit(
+            percent,
+            self._format_size(speed) + "/s",
+            "00:00"
+        )
+
+    def _push_thread(
+        self,
+        device,
+        source,
+        destination
+    ):
+
+        try:
+
+            self.statusChanged.emit(
+                "???? ????? ??? ??????..."
+            )
+
+            source_path = Path(source)
+
+            if not source_path.exists():
+
+                self.finished.emit(
+                    False,
+                    "?????? ??? ?????"
+                )
+
+                return
+
+            destination = destination.rstrip("/") + "/"
+
+            # ==========================================
+            # BUILD TRANSFER FILE LIST
+            # ==========================================
+
+            if source_path.is_dir():
+
+                transfer_files = [
+                    p
+                    for p in source_path.rglob("*")
+                    if p.is_file()
+                ]
+
+                if not transfer_files:
+
+                    self.progressChanged.emit(
+                        100,
+                        "0 B/s",
+                        "00:00"
+                    )
+
+                    self.statusChanged.emit(
+                        "?????? ????"
+                    )
+
+                    self.finished.emit(
+                        True,
+                        "?? ????? ?????"
+                    )
+
+                    return
+
+                total_bytes = sum(
+                    p.stat().st_size
+                    for p in transfer_files
+                )
+
+            else:
+
+                transfer_files = [
+                    source_path
+                ]
+
+                total_bytes = source_path.stat().st_size
+
+            print()
+            print("========================================")
+            print("ADB TRANSFER ENGINE")
+            print("========================================")
+            print("TOTAL FILES:", len(transfer_files))
+            print("TOTAL BYTES:", total_bytes)
+            print(
+                "TOTAL SIZE:",
+                self._format_size(total_bytes)
+            )
+            print("========================================")
+
+            completed_bytes = 0
+            transfer_start = time.monotonic()
+
+            # ==========================================
+            # TRANSFER FILES
+            # ==========================================
+
+            for index, item in enumerate(
+                transfer_files,
+                start=1
+            ):
+
+                if self._cancel_event.is_set():
+
+                    self.finished.emit(
+                        False,
+                        "?? ????? ?????"
+                    )
+
+                    return
+
+                self._pause_event.wait()
+
+                item_size = item.stat().st_size
+
+                # ======================================
+                # CALCULATE ADB TARGET
+                # ======================================
+
+                if source_path.is_dir():
+
+                    relative = item.relative_to(
+                        source_path
+                    )
+
+                    target = (
+                        destination
+                        + str(relative).replace("\\", "/")
+                    )
+
+                    # Create the parent directory when
+                    # needed before pushing the file.
+                    parent = target.rsplit("/", 1)[0]
+
+                    if parent:
+
+                        self._run(
+                            [
+                                "-s",
+                                device,
+                                "shell",
+                                "mkdir",
+                                "-p",
+                                parent
+                            ]
+                        )
+
+                else:
+
+                    target = destination
+
+                print()
+                print("ADB ITEM:", str(item))
+                print("ADB TARGET:", target)
+                print("ITEM SIZE:", self._format_size(item_size))
+
+                command = [
+                    self.adb,
+                    "-s",
+                    device,
+                    "push",
+                    str(item),
+                    target
+                ]
+
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+
+                self._current_process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    startupinfo=startupinfo,
+                    creationflags=0x08000000,
+                    bufsize=1
+                )
+
+                process = self._current_process
+
+                monitor_stop = threading.Event()
+
+                def monitor_transfer():
+
+                    while not monitor_stop.is_set():
+
+                        if self._cancel_event.is_set():
+                            break
+
+                        try:
+
+                            remote_size = self._get_remote_size(
+                                device,
+                                target
+                            )
+
+                            remote_size = max(
+                                0,
+                                min(remote_size, item_size)
+                            )
+
+                            current_completed = (
+                                completed_bytes
+                                + remote_size
+                            )
+
+                            elapsed = max(
+                                time.monotonic() - transfer_start,
+                                0.001
+                            )
+
+                            if total_bytes > 0:
+                                percent = int(
+                                    current_completed
+                                    * 100
+                                    / total_bytes
+                                )
+                            else:
+                                percent = 100
+
+                            percent = max(
+                                0,
+                                min(percent, 99)
+                            )
+
+                            speed = (
+                                current_completed
+                                / elapsed
+                            )
+
+                            if speed > 0:
+
+                                remaining = max(
+                                    total_bytes - current_completed,
+                                    0
+                                )
+
+                                eta_seconds = (
+                                    remaining / speed
+                                )
+
+                            else:
+
+                                eta_seconds = 0
+
+                            speed_text = (
+                                self._format_size(speed)
+                                + "/s"
+                            )
+
+                            eta_text = self._format_time(
+                                eta_seconds
+                            )
+
+                            print(
+                                "LIVE PROGRESS:",
+                                self._format_size(
+                                    current_completed
+                                ),
+                                "/",
+                                self._format_size(
+                                    total_bytes
+                                ),
+                                "|",
+                                percent,
+                                "%",
+                                "| SPEED:",
+                                speed_text,
+                                "| ETA:",
+                                eta_text
+                            )
+
+                            self.progressChanged.emit(
+                                percent,
+                                speed_text,
+                                eta_text
+                            )
+
+                        except Exception as e:
+
+                            print(
+                                "LIVE MONITOR ERROR:",
+                                e
+                            )
+
+                        monitor_stop.wait(0.5)
+
+                monitor_thread = threading.Thread(
+                    target=monitor_transfer,
+                    daemon=True
+                )
+
+                monitor_thread.start()
+
+                try:
+
+                    for line in process.stdout:
+
+                        if self._cancel_event.is_set():
+
+                            process.terminate()
+
+                            self.finished.emit(
+                                False,
+                                "?? ????? ?????"
+                            )
+
+                            return
+
+                        self._pause_event.wait()
+
+                        line = line.strip()
+
+                        if line:
+
+                            print(
+                                "ADB:",
+                                line
+                            )
+
+                finally:
+
+                    monitor_stop.set()
+
+                    monitor_thread.join(
+                        timeout=2
+                    )
+
+                return_code = process.wait()
+                self._current_process = None
+
+                if return_code != 0:
+
+                    self.finished.emit(
+                        False,
+                        "??? ??? ??????? ??? ADB"
+                    )
+
+                    return
+
+                # ======================================
+                # UPDATE REAL TRANSFER STATISTICS
+                # ======================================
+
+                completed_bytes += item_size
+
+                elapsed = (
+                    time.monotonic()
+                    - transfer_start
+                )
+
+                if elapsed <= 0:
+                    elapsed = 0.001
+
+                speed = (
+                    completed_bytes
+                    / elapsed
+                )
+
+                remaining_bytes = max(
+                    total_bytes - completed_bytes,
+                    0
+                )
+
+                if speed > 0:
+
+                    eta_seconds = (
+                        remaining_bytes
+                        / speed
+                    )
+
+                else:
+
+                    eta_seconds = 0
+
+                percent = int(
+                    (
+                        completed_bytes
+                        / total_bytes
+                    ) * 100
+                )
+
+                percent = max(
+                    0,
+                    min(percent, 100)
+                )
+
+                print(
+                    "TRANSFER:",
+                    self._format_size(completed_bytes),
+                    "/",
+                    self._format_size(total_bytes),
+                    "|",
+                    percent,
+                    "%",
+                    "| SPEED:",
+                    self._format_size(speed) + "/s",
+                    "| ETA:",
+                    self._format_time(eta_seconds)
+                )
+
+                self.progressChanged.emit(
+                    percent,
+                    self._format_size(speed) + "/s",
+                    self._format_time(eta_seconds)
+                )
+
+            # ==========================================
+            # TRANSFER COMPLETE
+            # ==========================================
+
+            total_elapsed = (
+                time.monotonic()
+                - transfer_start
+            )
+
+            if total_elapsed <= 0:
+                total_elapsed = 0.001
+
+            final_speed = (
+                total_bytes
+                / total_elapsed
+            )
+
+            self.progressChanged.emit(
+                100,
+                self._format_size(final_speed) + "/s",
+                "00:00"
+            )
+
+            print()
+            print("========================================")
+            print("ADB TRANSFER COMPLETE")
+            print("TOTAL:", self._format_size(total_bytes))
+            print(
+                "TIME:",
+                self._format_time(total_elapsed)
+            )
+            print(
+                "AVERAGE SPEED:",
+                self._format_size(final_speed) + "/s"
+            )
+            print("========================================")
+
+            self.statusChanged.emit(
+                "????? ????? ??? ??????"
+            )
+
+            self.finished.emit(
+                True,
+                "?? ??? ?????? ??? ?????? ?????"
+            )
+
+        except Exception as e:
+
+            self.statusChanged.emit(
+                "??? ??? ?? ADB"
+            )
+
+            self.finished.emit(
+                False,
+                str(e)
+            )
+
+    @Slot(str, str, str)
+    def push(self, device, source, destination):
+
+        if self._thread and self._thread.is_alive():
+            return
+
+        self._pause_event.set()
+
+        self._cancel_event.clear()
+
+        self._thread = threading.Thread(
+            target=self._push_thread,
+            args=(
+                device,
+                source,
+                destination
+            ),
+            daemon=True
+        )
+
+        self._thread.start()
+
+    @Slot(str)
+    def install(self, device, apk):
+
+        def worker():
+
+            try:
+
+                if not os.path.isfile(apk):
+
+                    self.finished.emit(
+                        False,
+                        "ملف APK غير موجود"
+                    )
+
+                    return
+
+                self.statusChanged.emit(
+                    "جاري تثبيت التطبيق..."
+                )
+
+                result = self._run(
+                    [
+                        "-s",
+                        device,
+                        "install",
+                        "-r",
+                        apk
+                    ],
+                    timeout=3600
+                )
+
+                output = (
+                    result.stdout.strip()
+                    + "\n"
+                    + result.stderr.strip()
+                ).strip()
+
+                print("ADB INSTALL:", output)
+
+                if result.returncode == 0:
+
+                    self.progressChanged.emit(
+                        100,
+                        "0 B/s",
+                        "00:00"
+                    )
+
+                    self.statusChanged.emit(
+                        "اكتمل التثبيت"
+                    )
+
+                    self.finished.emit(
+                        True,
+                        "تم تثبيت التطبيق بنجاح"
+                    )
+
+                else:
+
+                    self.finished.emit(
+                        False,
+                        output or "فشل تثبيت التطبيق"
+                    )
+
+            except Exception as e:
+
+                self.finished.emit(
+                    False,
+                    str(e)
+                )
+
+        threading.Thread(
+            target=worker,
+            daemon=True
+        ).start()
+
+    @Slot()
+    def pause(self):
+
+        self._pause_event.clear()
+
+        self.statusChanged.emit(
+            "متوقف مؤقتًا"
+        )
+
+    @Slot()
+    def resume(self):
+
+        self._pause_event.set()
+
+        self.statusChanged.emit(
+            "جاري النسخ إلى الهاتف..."
+        )
+
+    @Slot()
+    def cancel(self):
+
+        self._cancel_event.set()
+
+        self._pause_event.set()
+
+

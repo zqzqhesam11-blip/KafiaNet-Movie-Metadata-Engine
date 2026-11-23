@@ -1,0 +1,678 @@
+name: KafiaNet Control Pro - Final Windows Build
+
+on:
+  push:
+    branches:
+      - feature/kafianet-control-pro-shizuku-final-20261123
+    paths:
+      - '.github/workflows/build-self-contained-installer.yml'
+      - 'app_qml.py'
+      - 'build_full.spec'
+      - 'requirements.txt'
+      - 'engine/**'
+      - 'android-helper/**'
+      - 'qml/**'
+      - 'assets/**'
+      - 'ui/**'
+      - 'games.json'
+      - 'platform-tools/**'
+      - 'validation/**'
+  workflow_dispatch:
+
+concurrency:
+  group: kafianet-control-pro-windows-latest-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, smoke-test and compress optimized bundled app
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --upgrade pip
+          python -m pip install 'PySide6==6.11.2' 'psutil>=7,<8' pyinstaller
+          if ($LASTEXITCODE -ne 0) { throw 'Build dependency installation failed.' }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'Build environment has broken dependencies.' }
+
+      - name: Set up JDK 17 for Android bridge
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK 35
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.10.2'
+          cache-provider: basic
+
+      - name: Build Android Shizuku bridge and bundle official Shizuku
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gradle -p android-helper :app:assembleRelease --no-daemon --console=plain
+          if ($LASTEXITCODE -ne 0) { throw 'Android Shizuku bridge build failed.' }
+
+          $helperApk = 'android-helper\app\build\outputs\apk\release\app-release.apk'
+          if (-not (Test-Path -LiteralPath $helperApk -PathType Leaf)) {
+            throw 'Android Shizuku bridge APK was not produced.'
+          }
+
+          $supportDir = 'build\android_support'
+          New-Item -ItemType Directory -Force -Path $supportDir | Out-Null
+          Copy-Item -LiteralPath $helperApk -Destination (Join-Path $supportDir 'KafiaNetShizukuBridge.apk') -Force
+
+          $shizukuUrl = 'https://github.com/RikkaApps/Shizuku/releases/download/v13.6.0/shizuku-v13.6.0.r1086.2650830c-release.apk'
+          $shizukuApk = Join-Path $supportDir 'Shizuku.apk'
+          Invoke-WebRequest -Uri $shizukuUrl -OutFile $shizukuApk -TimeoutSec 180 -Headers @{ 'User-Agent' = 'KafiaNetControlPro' }
+          if ((Get-Item -LiteralPath $shizukuApk).Length -lt 1000000) {
+            throw 'Official Shizuku APK download is incomplete or invalid.'
+          }
+          Get-FileHash -Algorithm SHA256 -LiteralPath $shizukuApk | Format-List
+          Write-Host 'Android bridge and official Shizuku APKs are ready for PyInstaller.' -ForegroundColor Green
+      - name: Download official Google Android SDK Platform-Tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip'
+          $archive = Join-Path $env:RUNNER_TEMP 'platform-tools-latest-windows.zip'
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'google-platform-tools'
+          Invoke-WebRequest -Uri $url -OutFile $archive -TimeoutSec 180 -Headers @{ 'User-Agent' = 'KafiaNetControlPro CI' }
+          if ((Get-Item -LiteralPath $archive).Length -lt 5MB) {
+            throw 'Google Platform-Tools archive is incomplete.'
+          }
+          $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash
+          Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
+          $downloadedTools = Join-Path $extractRoot 'platform-tools'
+          if (-not (Test-Path -LiteralPath $downloadedTools -PathType Container)) {
+            throw 'Google archive does not contain the expected platform-tools folder.'
+          }
+
+          # Replace the repository copy with Google's official distribution
+          # before validation and packaging; no local PATH or D:\games fallback.
+          $platformTools = Join-Path $PWD 'platform-tools'
+          if (Test-Path -LiteralPath $platformTools) {
+            Remove-Item -LiteralPath $platformTools -Recurse -Force
+          }
+          Copy-Item -LiteralPath $downloadedTools -Destination $platformTools -Recurse
+
+          $adb = Join-Path $platformTools 'adb.exe'
+          $version = (& $adb version 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '37\.0\.3') {
+            throw "Expected official Platform-Tools 37.0.3. adb version output: $version"
+          }
+          foreach ($name in @('AdbWinApi.dll', 'AdbWinUsbApi.dll', 'fastboot.exe')) {
+            $toolFile = Join-Path $platformTools $name
+            if (-not (Test-Path -LiteralPath $toolFile -PathType Leaf)) {
+              throw "Official Google Platform-Tools file missing: $name"
+            }
+          }
+
+          Write-Host "Google official Platform-Tools SHA256: $archiveHash"
+          Get-FileHash -Algorithm SHA256 -LiteralPath $adb | Format-List
+          Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $platformTools 'AdbWinApi.dll') | Format-List
+          Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $platformTools 'AdbWinUsbApi.dll') | Format-List
+          Write-Host 'OFFICIAL GOOGLE PLATFORM-TOOLS 37.0.3 READY' -ForegroundColor Green
+
+      - name: Run branch regression simulation
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m compileall -q app_qml.py engine validation
+          if ($LASTEXITCODE -ne 0) { throw 'Python source syntax validation failed.' }
+          python validation\multi_device_simulation.py
+          if ($LASTEXITCODE -ne 0) { throw 'Branch regression simulation failed.' }
+          python validation\transfer_modes_simulation.py
+          if ($LASTEXITCODE -ne 0) { throw 'Transfer mode / USB no-overwrite simulation failed.' }
+          python validation\pull_path_mapping_simulation.py
+          if ($LASTEXITCODE -ne 0) { throw 'Phone-to-PC path mapping simulation failed.' }
+          python validation\shizuku_transfer_policy_simulation.py
+          if ($LASTEXITCODE -ne 0) { throw 'Shizuku transfer policy simulation failed.' }
+          python validation\dashboard_artwork_simulation.py
+          if ($LASTEXITCODE -ne 0) { throw 'Dashboard artwork discovery simulation failed.' }
+          python validation\transfer_summary_today_simulation.py
+          if ($LASTEXITCODE -ne 0) { throw "Today successful-copy summary simulation failed." }
+
+      - name: Validate app source imports
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $required = @(
+            'app_qml.py',
+            'build_full.spec',
+            'games.json',
+            'qml\main.qml',
+            'engine\adb_engine.py',
+            'engine\transfer_engine.py',
+            'engine\path_manager.py',
+            'engine\game_config.py',
+            'android-helper\app\src\main\AndroidManifest.xml',
+            'android-helper\app\src\main\java\com\kafianet\shizukubridge\MainActivity.java',
+            'android-helper\app\src\main\java\com\kafianet\shizukubridge\TransferUserService.java',
+            'platform-tools\adb.exe',
+            'platform-tools\AdbWinApi.dll',
+            'platform-tools\AdbWinUsbApi.dll',
+            'platform-tools\fastboot.exe'
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Required app file missing: $file"
+            }
+          }
+
+          @'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          import PySide6, psutil
+          from engine.adb_engine import ADBEngine
+          from engine.transfer_engine import TransferEngine
+          from engine.path_manager import PathManager
+          from engine.game_config import get_game, find_game_folder
+          print("Python:", sys.version)
+          print("PySide6:", PySide6.__version__)
+          print("psutil:", psutil.__version__)
+          print("Application module imports: OK")
+          '@ | Set-Content -LiteralPath "$env:RUNNER_TEMP\validate_app.py" -Encoding utf8
+
+          python "$env:RUNNER_TEMP\validate_app.py"
+          if ($LASTEXITCODE -ne 0) { throw 'Application source import validation failed.' }
+
+      - name: Download official PUBG MOBILE FLASH icon
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assetPath = 'assets\games\pubg_flash.png'
+          $downloadPath = Join-Path $env:RUNNER_TEMP 'pubg_flash_official_download'
+          New-Item -ItemType Directory -Force -Path 'assets\games' | Out-Null
+          $officialIconUrl = 'https://play-lh.googleusercontent.com/4qaNVoTDU9SwTGFSOlENhnKWQ44dVmdu6N6cAgg6rgXkX0Em_4xqGbs0naQqhZz2HVsKUs1jABcWPC7ByBiGvA=w240-h480'
+          Invoke-WebRequest -Uri $officialIconUrl -OutFile $downloadPath -TimeoutSec 60 -Headers @{ 'User-Agent' = 'Mozilla/5.0' }
+          python -m pip install Pillow
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install the temporary image converter.' }
+          @'
+          from PIL import Image
+          import sys
+          source, target = sys.argv[1], sys.argv[2]
+          with Image.open(source) as image:
+              image.verify()
+          with Image.open(source) as image:
+              image.convert("RGBA").save(target, format="PNG", optimize=True)
+          with Image.open(target) as image:
+              if image.format != "PNG" or image.width < 64 or image.height < 64:
+                  raise SystemExit("Converted official PUBG FLASH icon is invalid.")
+          print("Official PUBG FLASH icon converted to PNG.")
+          '@ | Set-Content -LiteralPath "$env:RUNNER_TEMP\convert_pubg_flash.py" -Encoding utf8
+          python "$env:RUNNER_TEMP\convert_pubg_flash.py" $downloadPath (Join-Path $PWD $assetPath)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not convert the official PUBG FLASH icon to PNG.' }
+          $imageBytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD $assetPath))
+          if ($imageBytes.Length -lt 4096) { throw 'Converted PUBG FLASH icon is unexpectedly small.' }
+          Write-Host ("Official PUBG FLASH icon embedded: {0:N1} KB" -f ($imageBytes.Length / 1KB))
+
+      - name: Commit downloaded official PUBG MOBILE FLASH icon to project
+        if: github.event_name == 'push' && github.repository == 'zqzqhesam10-netizen/KafiaNetControlPro2' && github.ref == 'refs/heads/feature/transfer-history-pubg-size-20261114'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git add -- 'assets/games/pubg_flash.png'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not stage the official PUBG FLASH icon.' }
+          $stagedFiles = git diff --cached --name-only
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect staged changes for the PUBG FLASH icon.' }
+          if ($stagedFiles) {
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'Add official PUBG MOBILE FLASH app icon'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not commit the official PUBG FLASH icon.' }
+            git push origin 'HEAD:refs/heads/feature/transfer-history-pubg-size-20261114'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not push the official PUBG FLASH icon to the project branch.' }
+            Write-Host 'OFFICIAL PUBG FLASH ICON COMMITTED TO PROJECT' -ForegroundColor Green
+          } else {
+            Write-Host 'Official PUBG FLASH icon is already committed.'
+          }
+
+      - name: Embed QML, images and game metadata into Qt resources
+        shell: pwsh
+        env:
+          PYTHONUTF8: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'build' | Out-Null
+          $repoRoot = (Get-Location).Path.TrimEnd('\')
+          $resourceFiles = @()
+          $resourceFiles += Get-Item -LiteralPath 'games.json'
+          $resourceFiles += Get-ChildItem -LiteralPath 'qml' -Recurse -File -Filter '*.qml' |
+            Where-Object { $_.Name -ne 'main_login_test.qml' }
+          $resourceFiles += Get-ChildItem -LiteralPath 'assets' -Recurse -File
+
+          $qrcLines = [System.Collections.Generic.List[string]]::new()
+          $qrcLines.Add('<RCC>')
+          $qrcLines.Add('  <qresource prefix="/">')
+          foreach ($file in $resourceFiles) {
+            $relative = $file.FullName.Substring($repoRoot.Length).TrimStart('\', '/').Replace('\', '/')
+            $safeAlias = [System.Security.SecurityElement]::Escape($relative)
+            $safePath = [System.Security.SecurityElement]::Escape($file.FullName.Replace('\', '/'))
+            $qrcLines.Add(('    <file alias="{0}">{1}</file>' -f $safeAlias, $safePath))
+          }
+          $qrcLines.Add('  </qresource>')
+          $qrcLines.Add('</RCC>')
+          Set-Content -LiteralPath 'build\kafianet_resources.qrc' -Value $qrcLines -Encoding utf8
+
+          $rcc = (Get-Command 'pyside6-rcc' -ErrorAction Stop).Source
+          & $rcc 'build\kafianet_resources.qrc' -o 'build\ui_resources_rc.py'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath 'build\ui_resources_rc.py' -PathType Leaf)) {
+            throw 'Failed to compile QML/assets/games.json into Qt resources.'
+          }
+          Write-Host ("Embedded Qt resource files: {0}" -f $resourceFiles.Count)
+
+      - name: Build compact onedir app with embedded Python and required Qt libraries
+        shell: pwsh
+        env:
+          PYTHONUTF8: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m PyInstaller --clean --noconfirm build_full.spec
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
+
+          $bundleDir = Join-Path $PWD 'dist\KAFIA_NET_CONTROL_PRO'
+          $exe = Join-Path $bundleDir 'KAFIA_NET_CONTROL_PRO.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw "Self-contained app was not produced: $exe"
+          }
+
+          $bundleBytes = [double](Get-ChildItem -LiteralPath $bundleDir -File -Recurse | Measure-Object -Property Length -Sum).Sum
+          if ($bundleBytes -lt 50MB) {
+            throw "Bundle is unexpectedly small ($bundleBytes bytes); refusing to publish a possibly incomplete bundle."
+          }
+
+          Write-Host "Self-contained app directory: $bundleDir"
+          Write-Host ("Uncompressed bundle size: {0:N2} MB" -f ($bundleBytes / 1MB))
+          Write-Host ("EXE SHA256: {0}" -f (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)
+
+      - name: Verify the frozen bundle output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDir = Join-Path $PWD 'dist\KAFIA_NET_CONTROL_PRO'
+          $exe = Join-Path $bundleDir 'KAFIA_NET_CONTROL_PRO.exe'
+
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw "Self-contained EXE is missing: $exe"
+          }
+          $bundleBytes = [double](Get-ChildItem -LiteralPath $bundleDir -File -Recurse | Measure-Object -Property Length -Sum).Sum
+          if ($bundleBytes -lt 50MB) {
+            throw "Bundle size is unexpectedly small: $bundleBytes bytes"
+          }
+
+          $spec = Get-Content -LiteralPath 'build_full.spec' -Raw
+          if ($spec.Contains('_keep_ui_bundle') -or
+              $spec.Contains('a.datas = [entry for entry in a.datas if')) {
+            throw 'The self-contained UI build must not prune PySide6 QML modules.'
+          }
+          foreach ($requiredText in @('COLLECT(', 'PySide6.QtQml', 'PySide6.QtQuick', '"ui_resources_rc"', '("platform-tools", "platform-tools")')) {
+            if (-not $spec.Contains($requiredText)) {
+              throw "PyInstaller spec is missing expected modules or resources: $requiredText"
+            }
+          }
+          if ($spec.Contains('("qml", "qml")') -or
+              $spec.Contains('("engine", "engine")') -or
+              $spec.Contains('("ui", "ui")') -or
+              $spec.Contains('("assets", "assets")') -or
+              $spec.Contains('("games.json", ".")')) {
+            throw 'Raw application QML/Python/images/game JSON must not be copied as loose files.'
+          }
+
+          $pythonRuntime = Get-ChildItem -LiteralPath $bundleDir -Recurse -File -Filter 'python314.dll' | Select-Object -First 1
+          $qtCore = Get-ChildItem -LiteralPath $bundleDir -Recurse -File -Filter 'Qt6Core.dll' | Select-Object -First 1
+          $qtQml = Get-ChildItem -LiteralPath $bundleDir -Recurse -File -Filter 'Qt6Qml.dll' | Select-Object -First 1
+          $adb = Join-Path $bundleDir '_internal\platform-tools\adb.exe'
+          if (-not $pythonRuntime) { throw 'Bundled Python runtime (python314.dll) is missing.' }
+          if (-not $qtCore -or -not $qtQml) { throw 'Required Qt runtime DLLs are missing from the bundle.' }
+          if (-not (Test-Path -LiteralPath $adb -PathType Leaf)) {
+            $adb = Join-Path $bundleDir 'platform-tools\adb.exe'
+          }
+          if (-not (Test-Path -LiteralPath $adb -PathType Leaf)) { throw 'Bundled ADB tools are missing.' }
+
+          # Qt's own QML controls remain required runtime files; reject app QML copied loose outside PySide6.
+          $looseAppQml = @(Get-ChildItem -LiteralPath $bundleDir -Recurse -File -Filter '*.qml' |
+            Where-Object { $_.FullName -notmatch '[\\/](PySide6[\\/](Qt[\\/])?qml)[\\/]' })
+          $rawGamesJson = @(Get-ChildItem -LiteralPath $bundleDir -Recurse -File -Filter 'games.json')
+          if ($looseAppQml -or $rawGamesJson) {
+            throw 'Application QML/game config leaked into the frozen output instead of embedded resources.'
+          }
+
+          Write-Host ("Verified self-contained onedir bundle: {0:N2} MB" -f ($bundleBytes / 1MB))
+          Write-Host ("Bundled Python: {0}" -f $pythonRuntime.FullName)
+          Write-Host ("Bundled Qt Core: {0}" -f $qtCore.FullName)
+          Write-Host 'NO EXTERNAL PYTHON RUNTIME PATH REQUIRED' -ForegroundColor Green
+          Write-Host ("EXE SHA256: {0}" -f (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)
+          $androidSupport = Join-Path $bundleDir '_internal\android_support'
+          foreach ($supportFile in @('Shizuku.apk', 'KafiaNetShizukuBridge.apk')) {
+            $supportPath = Join-Path $androidSupport $supportFile
+            if (-not (Test-Path -LiteralPath $supportPath -PathType Leaf)) {
+              throw "Bundled Android support file is missing: $supportFile"
+            }
+            $minimumSize = if ($supportFile -eq 'Shizuku.apk') { 1000000 } else { 10000 }
+            if ((Get-Item -LiteralPath $supportPath).Length -lt $minimumSize) {
+              throw "Bundled Android support file looks incomplete: $supportFile"
+            }
+          }
+          Write-Host 'Verified bundled Shizuku and KafiaNet helper APKs.' -ForegroundColor Green
+          Write-Host 'STATIC BUNDLE CHECK: PASS' -ForegroundColor Green
+
+      - name: Run frozen Qt startup smoke test
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_BACKEND: software
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'dist\KAFIA_NET_CONTROL_PRO\KAFIA_NET_CONTROL_PRO.exe'
+
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = $exe
+          $psi.Arguments = '--qt-import-smoke-test'
+          $psi.UseShellExecute = $false
+          $psi.CreateNoWindow = $true
+          $psi.EnvironmentVariables['QT_QPA_PLATFORM'] = 'offscreen'
+          $psi.EnvironmentVariables['QT_QUICK_BACKEND'] = 'software'
+          $proc = [System.Diagnostics.Process]::Start($psi)
+
+          if (-not $proc.WaitForExit(120000)) {
+            try { $proc.Kill() } catch {}
+            throw 'Frozen Qt startup smoke test timed out after 120 seconds.'
+          }
+          if ($proc.ExitCode -ne 0) {
+            throw "Frozen Qt startup smoke test failed with exit code $($proc.ExitCode)."
+          }
+          Write-Host 'FROZEN QT STARTUP SMOKE TEST: PASS' -ForegroundColor Green
+
+      - name: Run frozen embedded-QML and transfer-panel smoke test
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_BACKEND: software
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'dist\KAFIA_NET_CONTROL_PRO\KAFIA_NET_CONTROL_PRO.exe'
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = $exe
+          $psi.Arguments = '--protected-build-smoke-test'
+          $psi.UseShellExecute = $false
+          $psi.CreateNoWindow = $true
+          $psi.RedirectStandardOutput = $true
+          $psi.RedirectStandardError = $true
+          $psi.EnvironmentVariables['QT_QPA_PLATFORM'] = 'offscreen'
+          $psi.EnvironmentVariables['QT_QUICK_BACKEND'] = 'software'
+          $proc = [System.Diagnostics.Process]::Start($psi)
+
+          if (-not $proc.WaitForExit(120000)) {
+            try { $proc.Kill() } catch {}
+            throw 'Embedded-QML/transfer-panel smoke test timed out after 120 seconds.'
+          }
+          $stdout = $proc.StandardOutput.ReadToEnd()
+          $stderr = $proc.StandardError.ReadToEnd()
+          if ($stdout) { Write-Host $stdout }
+          if ($stderr) { Write-Host $stderr }
+          if ($proc.ExitCode -ne 0) {
+            throw "Embedded-QML/transfer-panel smoke test failed with exit code $($proc.ExitCode)."
+          }
+          if ($stdout -notmatch 'DASHBOARD_UI_SMOKE_TEST: PASS') {
+            throw 'Dashboard UI smoke-test marker was missing.'
+          }
+          if ($stdout -notmatch 'TRANSFER_PANEL_SIGNAL_SMOKE_TEST: PASS') {
+            throw 'Transfer panel did not pass its visibility/signal smoke test.'
+          }
+          Write-Host 'FROZEN EMBEDDED-QML AND TRANSFER-PANEL SMOKE TEST: PASS' -ForegroundColor Green
+
+      - name: Create portable onedir package as an immediate fallback
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDir = Join-Path $PWD 'dist\KAFIA_NET_CONTROL_PRO'
+          $zip = Join-Path $PWD 'KAFIA_NET_CONTROL_PRO_SelfContained_Portable.zip'
+          if (-not (Test-Path -LiteralPath (Join-Path $bundleDir 'KAFIA_NET_CONTROL_PRO.exe') -PathType Leaf)) {
+            throw 'Self-contained application is missing before portable packaging.'
+          }
+          if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+          Compress-Archive -Path (Join-Path $bundleDir '*') -DestinationPath $zip -CompressionLevel Optimal
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
+            throw 'Portable self-contained package ZIP was not created.'
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            if ($archive.Entries.Count -lt 100) {
+              throw "Portable archive looks incomplete: only $($archive.Entries.Count) entries."
+            }
+            $requiredEntries = @(
+              'KAFIA_NET_CONTROL_PRO.exe',
+              '_internal/python314.dll',
+              '_internal/PySide6/Qt6Core.dll',
+              '_internal/platform-tools/adb.exe'
+            )
+            $entryNames = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+            foreach ($requiredEntry in $requiredEntries) {
+              if ($entryNames -notcontains $requiredEntry) {
+                throw "Portable archive is missing required bundled file: $requiredEntry"
+              }
+            }
+          } finally {
+            $archive.Dispose()
+          }
+
+          $zipItem = Get-Item -LiteralPath $zip
+          if ($zipItem.Length -lt 50000000) {
+            throw "Portable ZIP is unexpectedly small: $($zipItem.Length) bytes."
+          }
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          "SHA256  KAFIA_NET_CONTROL_PRO_SelfContained_Portable.zip  $hash" |
+            Set-Content -LiteralPath 'KAFIA_NET_CONTROL_PRO_SelfContained_Portable_SHA256.txt' -Encoding ascii
+          Write-Host ("Portable package size: {0:N2} MB" -f ((Get-Item -LiteralPath $zip).Length / 1MB))
+          Write-Host ("Portable package SHA256: {0}" -f $hash)
+
+      - name: Verify portable package before Windows release publishing
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $portable = 'KAFIA_NET_CONTROL_PRO_SelfContained_Portable.zip'
+          $checksum = 'KAFIA_NET_CONTROL_PRO_SelfContained_Portable_SHA256.txt'
+          foreach ($file in @($portable, $checksum)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Portable release file is missing: $file"
+            }
+          }
+          $zip = Get-Item -LiteralPath $portable
+          if ($zip.Length -lt 50000000) {
+            throw "Portable release ZIP is unexpectedly small: $($zip.Length) bytes."
+          }
+          Write-Host ("Verified portable release package: {0:N2} MB" -f ($zip.Length / 1MB))
+
+      - name: Install Inno Setup for standard-compression installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
+
+      - name: Build compressed self-contained installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path installer | Out-Null
+
+          @'
+          [Setup]
+          AppId={{DCE1D2AB-50A0-49A0-9ED1-8DA445E54C91}
+          AppName=KAFIA NET CONTROL PRO
+          AppVersion=1.4.0
+          AppPublisher=KAFIA NET CONTROL PRO
+          DefaultDirName={autopf}\KAFIA NET CONTROL PRO
+          DefaultGroupName=KAFIA NET CONTROL PRO
+          OutputDir=installer
+          OutputBaseFilename=KAFIA_NET_CONTROL_PRO_SelfContained_Setup
+          Compression=lzma2
+          SolidCompression=yes
+          ArchitecturesInstallIn64BitMode=x64compatible
+          PrivilegesRequired=admin
+          Uninstallable=yes
+          WizardStyle=modern
+
+          [Files]
+          Source: "dist\KAFIA_NET_CONTROL_PRO\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{autodesktop}\KAFIA NET CONTROL PRO"; Filename: "{app}\KAFIA_NET_CONTROL_PRO.exe"
+          Name: "{group}\KAFIA NET CONTROL PRO"; Filename: "{app}\KAFIA_NET_CONTROL_PRO.exe"
+
+          [Run]
+          Filename: "{app}\KAFIA_NET_CONTROL_PRO.exe"; Description: "تشغيل KAFIA NET CONTROL PRO"; Flags: nowait postinstall skipifsilent
+          '@ | Set-Content -LiteralPath 'installer.iss' -Encoding utf8
+
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) { throw "Inno Setup compiler not found: $iscc" }
+          & $iscc 'installer.iss'
+          if ($LASTEXITCODE -ne 0) { throw 'Compressed installer build failed.' }
+
+          $installer = Join-Path $PWD 'installer\KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe'
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+            throw 'Self-contained installer was not produced.'
+          }
+          Write-Host ("Installer size: {0:N2} MB" -f ((Get-Item -LiteralPath $installer).Length / 1MB))
+          Write-Host ("Installer SHA256: {0}" -f (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash)
+
+      - name: Create checksums and upload installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = 'installer\KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe'
+          $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
+          "SHA256  KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe  $hash" |
+            Set-Content -LiteralPath 'installer\SHA256SUMS.txt' -Encoding ascii
+
+      - name: Publish Windows downloads to GitHub Release
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = 'kafianet-control-pro-windows-latest'
+          $releaseTitle = 'KAFIA NET CONTROL PRO - Final Windows (Latest)'
+
+          $assets = @(
+            'installer/KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe',
+            'installer/SHA256SUMS.txt',
+            'KAFIA_NET_CONTROL_PRO_SelfContained_Portable.zip',
+            'KAFIA_NET_CONTROL_PRO_SelfContained_Portable_SHA256.txt'
+          )
+          foreach ($asset in $assets) {
+            if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
+              throw "Windows release asset is missing: $asset"
+            }
+          }
+
+          # Use Release assets instead of Actions artifacts: the latter can be
+          # blocked by the repository/account Actions storage quota.
+          $releaseListRaw = gh release list --limit 100 --json tagName
+          if ($LASTEXITCODE -ne 0) { throw 'Could not query existing GitHub releases.' }
+          $releaseList = @($releaseListRaw | ConvertFrom-Json)
+          $releaseExists = @($releaseList | Where-Object { $_.tagName -eq $tag }).Count -gt 0
+
+          if (-not $releaseExists) {
+            gh release create $tag --target $env:GITHUB_SHA --title $releaseTitle --notes 'KAFIA NET CONTROL PRO self-contained Windows installer and portable package. Android Shizuku helper APK is bundled in the Windows package. Built and smoke-tested by GitHub Actions.' --prerelease
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create the Windows latest release.' }
+          } else {
+            # Move only the dedicated Windows latest tag to this tested commit.
+            # No branch, especially main, is modified by this operation.
+            git tag --force $tag $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) { throw 'Could not update the local Windows release tag.' }
+            git push origin "refs/tags/$tag" --force
+            if ($LASTEXITCODE -ne 0) { throw 'Could not update the Windows latest release tag on GitHub.' }
+          }
+
+          # Retire files belonging to the removed changed-files-only updater.
+          $releaseBeforePublishRaw = gh release view $tag --json assets
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect existing Windows release assets.' }
+          $releaseBeforePublish = $releaseBeforePublishRaw | ConvertFrom-Json
+          $existingAssetNames = @($releaseBeforePublish.assets | ForEach-Object { $_.name })
+          foreach ($retiredAsset in @(
+            'KAFIA_NET_CONTROL_PRO_Bundle_Manifest.json',
+            'KAFIA_NET_CONTROL_PRO_Update.zip',
+            'KAFIA_NET_CONTROL_PRO_Update_SHA256.txt'
+          )) {
+            if ($existingAssetNames -contains $retiredAsset) {
+              gh release delete-asset $tag $retiredAsset --yes
+              if ($LASTEXITCODE -ne 0) { throw "Could not retire obsolete release asset: $retiredAsset" }
+            }
+          }
+
+          gh release upload $tag @assets --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not upload the Windows release assets.' }
+
+          $publishedRaw = gh release view $tag --json tagName,name,url,assets
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the published Windows release.' }
+          $published = $publishedRaw | ConvertFrom-Json
+          $publishedNames = @($published.assets | ForEach-Object { $_.name })
+          foreach ($asset in @(
+            'KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe',
+            'SHA256SUMS.txt',
+            'KAFIA_NET_CONTROL_PRO_SelfContained_Portable.zip',
+            'KAFIA_NET_CONTROL_PRO_SelfContained_Portable_SHA256.txt'
+          )) {
+            if ($publishedNames -notcontains $asset) {
+              throw "Windows release is missing uploaded asset: $asset"
+            }
+          }
+          foreach ($retiredAsset in @(
+            'KAFIA_NET_CONTROL_PRO_Bundle_Manifest.json',
+            'KAFIA_NET_CONTROL_PRO_Update.zip',
+            'KAFIA_NET_CONTROL_PRO_Update_SHA256.txt'
+          )) {
+            if ($publishedNames -contains $retiredAsset) {
+              throw "Obsolete update-only asset remains in the Windows release: $retiredAsset"
+            }
+          }
+
+          $releaseApiRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not retrieve the Windows Latest release ID.' }
+          $releaseApi = $releaseApiRaw | ConvertFrom-Json
+          gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$($releaseApi.id)" -F prerelease=false
+          if ($LASTEXITCODE -ne 0) { throw 'Could not promote the verified Windows Latest release to final.' }
+
+          Write-Host "WINDOWS RELEASE PUBLISHED: $($published.url)" -ForegroundColor Green
+          Write-Host 'WINDOWS RELEASE ASSET VERIFICATION: PASS' -ForegroundColor Green
+          Write-Host 'WINDOWS RELEASE FINAL STATUS: PASS' -ForegroundColor Green

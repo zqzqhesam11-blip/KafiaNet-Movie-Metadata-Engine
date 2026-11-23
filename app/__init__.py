@@ -1,1 +1,0 @@
-"""KafiaNet cloud metadata engine."""

@@ -1,0 +1,59 @@
+name: KafiaNet Control Pro - Build and Validate Bundled Shizuku Helper
+
+on:
+  push:
+    branches:
+      - feature/kafianet-control-pro-shizuku-final-20261123
+    paths:
+      - '.github/workflows/build-shizuku-bridge-fix.yml'
+      - 'android-helper/**'
+      - 'validation/shizuku_direct_stream_chmod_policy.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kafianet-control-pro-shizuku-helper-validation
+  cancel-in-progress: false
+
+jobs:
+  build-android-helper:
+    name: Build and validate final bundled Shizuku helper APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout isolated test branch
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK 35
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.10.2'
+          cache-provider: basic
+
+      - name: Validate direct-stream chmod policy
+        run: python3 validation/shizuku_direct_stream_chmod_policy.py
+
+      - name: Build release APK
+        run: gradle -p android-helper :app:assembleRelease --no-daemon --console=plain
+
+      - name: Verify APK output and calculate SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="android-helper/app/build/outputs/apk/release/app-release.apk"
+          test -s "$apk"
+          ls -lh "$apk"
+          sha256sum "$apk" | tee android-helper-shizuku-bridge-SHA256.txt
+

@@ -1,132 +1,28 @@
-# KafiaNet Movie Metadata Engine
+# KAFIA NET CONTROL PRO — self-contained Windows build
 
-Cloud worker for enriching the public KafiaNet poster catalog with verified TMDB metadata.
+The released installer is built from the current branch using PyInstaller. Python, PySide6, Qt DLLs, Qt Quick/QML runtime modules, ADB, application logic, QML screens, game images and game metadata are bundled or embedded; the installed application does not need an external Python runtime under D:\games\py.
 
-## Repositories and providers
+The Android fallback is bundled into the Windows build. Direct ADB is tried first for every phone; only a phone that rejects writes to Android/data receives the Shizuku APK and KafiaNet companion when they are missing. Android may require approval for Shizuku and a user-selected folder grant. Shizuku without Root runs as ADB Shell and cannot override every Android/OEM storage restriction.
 
-- Source images: `zqzqhesam11-blip/KafiaNet-Movie-Posters` (public).
-- Engine code: `zqzqhesam11-blip/KafiaNet-Movie-Metadata-Engine`.
-- Reverse-image provider: Google Lens `exact_matches` tab through the Bright Data SERP API.
-- Local poster OCR: RapidOCR with ONNX Runtime CPU; no external OCR API or OCR secret.
-- Metadata results are written to the poster repository only when APPLY is explicitly requested.
+## UI and build verification
 
-## Free-tier and no-payment setup
+- The build retains all PySide6 QML modules instead of pruning them to save package size.
+- The frozen-app smoke test checks the sidebar, games dashboard, and transfer panel in the embedded QML.
+- The smoke test emits a test transfer-list signal and verifies that the transfer panel actually becomes visible.
+- The installer is not published unless the frozen UI and transfer-panel smoke tests pass.
 
-Bright Data advertises a recurring SERP API free tier of **5,000 requests per month with no credit card required**. The allowance renews monthly. Bright Data's free-tier guidance says requests stop when the free allowance is exhausted unless the account has deposited funds.
-
-To keep this project free:
-- Create/use only the SERP API free tier.
-- Do not add a payment card, deposit funds, or activate a paid plan.
-- Do not configure automatic top-ups or any paid balance.
-- HTTP 402 is never retried. HTTP 429 and transient provider failures use bounded retry behavior. When the provider circuit opens, the engine stops sending provider requests but does not abandon the selected batch: films not yet researched are written as REVIEW so APPLY can finish without wasting more quota. Do not add funds.
-- Google Lens is the only image-discovery provider. The engine reads official TMDB movie IDs or IMDb title IDs from Lens results; IMDb title IDs are accepted from the canonical title page or its official `/mediaviewer/rm…/` route (not unrelated subpages such as `/news`). When Exact Matches has no ID, it also checks Lens Visual Matches.
-- Some Lens results use opaque Google `/goto?url=CAES…` links. The engine resolves at most **three** such links per Lens tab, sequentially, using an unauthenticated GET with automatic redirects disabled. It accepts only an HTTPS `Location` that is itself an official IMDb title/mediaviewer page or TMDB movie page. It does not decode the token, parse interstitial HTML, follow a second redirect, or send the Bright Data bearer token to Google. A block, rate-limit, or verification interstitial stops further attempts for that tab.
-- Lens response parsing uses one documented selector per request: `x-unblock-data-format: parsed_light` first, then one `brd_json=1` fallback only when Bright Data returns an empty or unrecognized HTTP-200 body. It does not repeat the same empty request three times. Empty responses remain provider errors, never `no_matches`; safe response status/headers are retained for diagnosis.
-- TMDB is then queried by identifier only: `/movie/{id}` for a TMDB ID or `/find/{imdb_id}` for an IMDb ID, followed by `/movie/{id}` details verification. No Google Search or TMDB title search is used to establish identity.
-- Optional reviewer-only research from Wikipedia, Wikidata, and TMDB text suggestions is **disabled by default** (`REVIEW_RESEARCH_ENABLED=false`). It adds serial network requests but cannot establish identity or authorize READY; enable it only for manual investigation.
-- AFI Catalog and BFI National Archive are not queried by the ID-only automatic identity path. Any pre-existing catalogue references remain reviewer context only and are never proof of identity.
-- Wikipedia, Wikidata, AFI, and BFI results always use `identity_evidence=false` and `automatic_match_allowed=false`. Only an official TMDB/IMDb identifier resolved and verified through TMDB can authorize READY. Folder names and image filenames are never used as search inputs.
-- Separately, the poster image bytes are OCR-processed locally by RapidOCR. Up to three OCR text hints may be sent to TMDB `/search/movie`; returned rows are saved only as manual-review suggestions under `ocr.tmdb_suggestions` and are never fed into identity resolution or automatic READY decisions.
-- At most two bounded retries are made for transient 5xx gateway errors, transport failures, and 5xx statuses inside Bright Data's HTTP-200 response envelope. HTTP 402/429 quota responses are never retried. After an exhausted provider-wide failure, remaining selected films are marked REVIEW without further provider calls; an APPLY run still commits the complete selected batch.
-- Bright Data free credits may be shared with other products or tools using the same account. Keep the key private.
-
-References:
-- Google Lens through Bright Data: https://brightdata.com/products/serp-api/google-search/reverse-image
-- Wikidata Action API: https://www.wikidata.org/w/api.php
-- AFI Catalog: https://catalog.afi.com/
-- BFI National Archive Collections Search: https://collections-search.bfi.org.uk/
-- Wikipedia MediaWiki API: https://www.mediawiki.org/wiki/API:Search
-- TMDB API documentation: https://developer.themoviedb.org/docs
-- Bright Data free tier: https://github.com/brightdata/cli#free-tier
-
-**Important:** DRY_RUN does not write to the poster repository, but it does perform live Google Lens requests and consumes Bright Data free-tier requests. Start with `--limit 1`.
-
-## Safety and matching behavior
-
-- The CLI defaults to **DRY RUN**. It never writes to GitHub unless `--apply` is supplied.
-- During APPLY, source movie folders are classified into `جاهز/` or `مراجعة/` in one Git tree commit with their JSON metadata.
-- The source movie-folder name is never changed. Only the JSON basename changes to the movie title and release year returned by TMDB.
-- Image filenames, extensions, bytes, and Git blob SHAs are preserved.
-- Every film without a verified official identity is classified as REVIEW and placed under `مراجعة/`. Existing `مراجعة/` entries are retried on later batches. `جاهز/` and `مكرر/` are not treated as new source folders.
-- Automatic movie identity comes from the first official TMDB movie ID in Lens' ranked results. The first official IMDb title ID is also retained as a fallback: if Lens has no TMDB ID, or the direct TMDB ID cannot be resolved and verified, the engine resolves the IMDb ID with TMDB `/find/{imdb_id}` and verifies the returned movie details include the same IMDb ID. Google Search, title similarity, Lens captions, and source-folder names do not create or veto an ID. Local OCR, Wikipedia, Wikidata, AFI, and BFI remain reviewer aids only.
-- Secondary IDs from lower-ranked Lens rows are retained in diagnostics but do not veto the first ranked ID after TMDB verifies it. If neither the direct TMDB ID nor the IMDb fallback can be resolved and verified, the item remains REVIEW.
-- Movie title, release date/year, country, director, cast, overview, ratings, external IMDb ID and other metadata are read from the verified TMDB movie record. The title saved for catalog naming is the title returned by TMDB; Lens title text and country clues are not used.
-- TMDB movie images are requested with `append_to_response=images` and a language fallback. Poster paths are saved with their TMDB image CDN URLs (including w500 and original sizes).
-- Folder names, folder years, poster filenames, image URLs, and catalog labels are not used in movie identity discovery, candidate selection, or identity vetoes.
-- TMDB text search is used for Wikipedia and OCR reviewer suggestions. Wikidata, AFI, and BFI are additional research references only; loose title similarity, country clues, and folder names are never used to select a movie.
-- Each JSON record stores Wikipedia results under `wikipedia`, Wikidata cross-checks under `wikidata`, and AFI/BFI references under `catalog_sources`. The matching summary reports `wikidata_status`, `wikidata_candidates`, `afi_catalog_results`, and `bfi_archive_results`.
-- Every READY JSON and `metadata/index.json` row records the `tmdb_id` explicitly. The `imdb_id` is also saved when TMDB supplies it; otherwise it remains null. TMDB IDs are never invented.
-- A failed, blocked, or unparsed live response is recorded as an error, not as a successful empty result. Google `/goto` resolution is separately bounded to three sequential redirects per Lens tab; failed or non-official destinations remain unresolved and never become IDs. Previously saved results are reusable only when their stored diagnostics explicitly identify the `exact_matches` tab; older `visual_matches` evidence is ignored.
-- Each per-film terminal result reports the Lens tab, HTTP status, retry count, result count and error, the count of official TMDB movie URLs, their distinct numeric movie IDs, and the TMDB details-resolution outcome. These diagnostics do not include API secrets.
-- Duplicate identity is based on TMDB movie ID, not title spelling.
-- API keys and tokens are read only from Hostless environment variables. Never commit secrets.
-
-## Local poster OCR
-
-- Runtime: pinned `rapidocr[rtl]==3.10.0` with `onnxruntime==1.31.1` CPU inference.
-- **Disabled by default:** `LOCAL_OCR_ENABLED=false`. The engine does not initialize RapidOCR or load ONNX models unless this variable is explicitly set to `true`.
-- RapidOCR's ONNX models are bundled in its wheel. The Docker build initializes the OCR runtime as a build-time smoke test; this does not load the models into the running web process.
-- When explicitly enabled, OCR downloads only poster pixels from the public `raw.githubusercontent.com` URL generated by the engine, enforces a 12 MiB image limit, and performs inference locally. No cloud OCR provider receives the image or text.
-- OCR output and up to three TMDB text-search suggestion sets are recorded under `ocr`. These are reviewer aids only: they do not add IDs to the identity resolver, cannot produce READY, and cannot change the verified TMDB title.
-- The source-folder name, poster filename, and folder year are never passed as OCR text or search inputs.
-- Enable OCR only on a worker with sufficient memory and CPU headroom. The existing Hostless service allocation of 256 MiB RAM and 0.1 CPU is not considered a safe allocation for in-process OCR inference; keep the setting disabled at those limits.
-
-## Hostless setup
-
-Connect this repository to Hostless as a Docker-based app. The included `hostless.yaml` configures the Docker build and the `/health` HTTP health check.
-
-Required environment variables:
-
-- `TMDB_BEARER_TOKEN`: TMDB v3 API Bearer token.
-- `BRIGHTDATA_API_KEY`: Bright Data API key, stored as a Hostless secret.
-- `BRIGHTDATA_SERP_ZONE`: name of the SERP API free-tier zone created in Bright Data.
-- `GITHUB_TOKEN`: fine-grained token with Contents read/write on the poster repository; required only for APPLY.
-- `POSTERS_REPO`: defaults to `zqzqhesam11-blip/KafiaNet-Movie-Posters`.
-- `POSTERS_BRANCH`: defaults to `main`.
+The installer is self-contained, but no locally distributed executable can be guaranteed impossible to reverse-engineer. The repository is public, so source files committed here remain readable on GitHub; compiled packaging protects the shipped artifact from simple source browsing, not from a determined analyst.
 
 
-#Optional: `TMDB_LANGUAGE` (default `en-US`), `BATCH_LIMIT` (default `5`), `HTTP_TIMEOUT_SECONDS` (default `60`), and `REVIEW_RESEARCH_ENABLED` (default `false`).
+## OEM compatibility diagnostics
 
-## Configuration preflight
+The Settings page provides an optional, persisted, read-only ADB compatibility check. It reads the connected phone's manufacturer, model, Android version, ADB shell identity, Shizuku package presence, server process visibility, and KafiaNet helper presence. It does not write to the phone, change developer settings, inject permission denials, or emulate MIUI/ColorOS/OxygenOS. Manufacturer-specific security toggles cannot be verified reliably from a different OEM's Android build; the page identifies the documented setting where applicable and asks the user to verify its actual state on that phone.
 
-Run:
+## Official Android Platform-Tools
 
-```bash
-python -m app.cli check-brightdata-config
-```
-
-This verifies that required environment variables are present. It intentionally sends **no network request** and does not consume credits or prove that the API key/zone is active.
-
-## Local checks
-
-```bash
-python -m pip install -r requirements.txt
-python -m unittest discover -s tests -v
-python -m app.cli check-brightdata-config
-python -m app.cli run --limit 1
-# APPLY every pending film (no DRY_RUN and no five-film batch cap):
-python -u -m app.cli run --apply --all
-```
-
-The run command defaults to **DRY RUN** and does not write or move catalog files. Use `--apply --all` to apply every pending source/review film in one batch, without the configured five-film limit. Films lacking verified official identity go to `مراجعة/`. If Bright Data fails globally, the engine pauses further provider calls, marks the not-yet-researched selected films REVIEW, and still commits the complete batch. It performs Google Lens image matching and then TMDB identifier lookups/details verification only; there is no Google Search title fallback. Wikipedia/Wikidata reviewer research adds extra requests only when `REVIEW_RESEARCH_ENABLED=true`. Live Lens requests may consume provider quota.
-
-## Deterministic DRY_RUN / APPLY
-
-A normal `--apply` performs new live searches. To ensure APPLY uses the exact identity and evidence reviewed during DRY_RUN, save a local plan and apply that same plan:
-
-```bash
-python -u -m app.cli run --limit 5 --plan-out /tmp/kafianet-plan-001.json
-python -u -m app.cli run --apply --apply-plan /tmp/kafianet-plan-001.json
-```
-
-The plan contains the exact Google Lens results, verified TMDB details, source image blob SHAs, and the poster-repository HEAD. APPLY checks that the repository and every selected image are unchanged, then writes the saved decisions without making new Lens or TMDB requests. A successful commit consumes and deletes the local plan file. Keep both commands in the same running container because the plan file is local, not stored in the public poster repository.
-
-Previously processed posters with an unchanged image SHA keep their saved READY/REVIEW decision and do not trigger another search. Use `--refresh-evidence` only when you intentionally want a new lookup for unchanged REVIEW posters. A changed poster image is detected by its Git blob SHA and is processed as new evidence.
+The self-contained Windows build workflow replaces the checked-out `platform-tools` directory with Google's official Windows Platform-Tools archive from `dl.google.com` before validation and packaging. CI verifies the ADB version and required Windows files, then prints SHA-256 hashes for the archive and core binaries. Official upstream provenance reduces uncertainty about bundled binaries but cannot guarantee that every antivirus product will suppress a warning.
 
 
-- `جاهز/<exact-original-source-folder>/<canonical-title> (<year>).json`: verified TMDB match.
-- `مراجعة/<exact-original-source-folder>/<exact-original-source-folder>.json`: uncertain match.
-- `مكرر/<tmdb-id>/<exact-original-source-folder>/<canonical-title> (<year>).json`: another source folder with the same TMDB identity.
-- `metadata/index.json`: source-folder to TMDB identity/status mapping.
+## Versioned game libraries
 
-The metadata schema writes new provider evidence under `reverse_image` and can still read legacy `tineye` evidence saved by older runs.
+The eFootball and Grand Theft Auto cards discover version folders directly under each game's folder. Choosing a version is saved in the local settings and is reused by install, copy, launch, close and uninstall actions. Android copy treats `data` and `obb` as separate sources and routes them to `Android/data/<package>` and `Android/obb/<package>`. GTA package IDs are extracted from the selected APK manifest; the app will not guess a package path when it cannot verify one.

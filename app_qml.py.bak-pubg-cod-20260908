@@ -1,0 +1,811 @@
+import sys
+import os
+from pathlib import Path
+
+os.environ["QT_QUICK_CONTROLS_STYLE"] = "Fusion"
+
+from PySide6.QtCore import QObject, Signal, Slot, Property
+from PySide6.QtWidgets import QApplication
+from PySide6.QtQml import QQmlApplicationEngine
+
+from engine.transfer_engine import TransferEngine
+from engine.adb_engine import ADBEngine
+from engine.path_manager import PathManager
+from engine.game_config import get_game, find_game_folder
+from transfer_window import TransferWindow
+
+
+BASE_DIR = Path(__file__).resolve().parent
+
+# ?????? Android ???????? ???????
+ADB_PACKAGE_IDS = {
+    "MT Manager": "bin.mt.plus",
+    "Free Fire": "com.dts.freefireth",
+    "Fortnite": "com.epicgames.fortnite",
+    "Genshin Impact": "com.miHoYo.GenshinImpact",
+    "eFootball": "com.konami.pesam",
+    "PUBG Mobile": "com.tencent.ig",
+    "Call of Duty Mobile": "com.activision.callofduty.shooter",
+}
+
+ADB_GAME_DESTINATIONS = {
+    "Fortnite": "/sdcard/Android/data/com.epicgames.fortnite/",
+    "Genshin Impact": "/sdcard/Android/data/com.miHoYo.GenshinImpact/",
+    "eFootball": "/sdcard/Android/data/com.konami.pesam/",
+    "Free Fire": "/sdcard/Android/data/com.dts.freefireth/",
+    "PUBG Mobile": "/sdcard/Android/data/com.tencent.ig/files/UE4Game/ShadowTrackerExtra/ShadowTrackerExtra/Saved/",
+    "Call of Duty Mobile": "/sdcard/Android/data/com.activision.callofduty.shooter/",
+}
+
+# ????? ?????? ??????? ??? ?????? ???? Python ??? ?? ?????
+# ?????? PowerShell.
+def _arabic_name(codepoints):
+    return "".join(chr(x) for x in codepoints)
+
+
+SERVER_GAMES_FOLDER = _arabic_name([
+    0x627, 0x644, 0x639, 0x627, 0x628, 0x64a
+])
+
+
+def build_server_source_root():
+    return Path(r"\\SERVER06\c$") / SERVER_GAMES_FOLDER
+
+
+def build_usb_source_root():
+    return Path(r"D:\games")
+
+
+
+class AppController(QObject):
+
+    messageChanged = Signal(str)
+    transferPercentChanged = Signal(int)
+    transferSpeedChanged = Signal(str)
+    transferEtaChanged = Signal(str)
+    transferFinished = Signal(bool, str)
+    usbChanged = Signal(str)
+    destinationChanged = Signal(str)
+    adbDevicesChanged = Signal(list)
+
+    def __init__(self):
+        super().__init__()
+
+        self.paths = PathManager()
+
+        # ?????? ??????: ????? ??????
+        self.engine = TransferEngine()
+
+        # ???? ADB: ????? ???????? ??? ??????
+        self.adb_engine = ADBEngine()
+
+        self.transfer_window = TransferWindow()
+
+        self.adb_engine.progressChanged.connect(
+            self._progress
+        )
+
+        self.adb_engine.progressChanged.connect(
+            self._transfer_progress
+        )
+
+        self.adb_engine.statusChanged.connect(
+            self._transfer_status
+        )
+
+        self.adb_engine.logChanged.connect(
+            self._transfer_log
+        )
+
+        self.adb_engine.statusChanged.connect(
+            self._status
+        )
+
+        self.adb_engine.finished.connect(
+            self._finished
+        )
+
+        self.engine.progressChanged.connect(
+            self._progress
+        )
+
+        self.engine.statusChanged.connect(
+            self._status
+        )
+
+        self.engine.finished.connect(
+            self._finished
+        )
+
+        self.source_root = build_server_source_root()
+
+        self.destination_root = Path(
+            r"D:\games"
+        )
+
+        self._current_game = ""
+
+        # ???? ADB ??????
+        self.selected_device = ""
+
+        self.current_source = "WIRELESS"
+
+    @Slot()
+    def useWirelessSource(self):
+        self.current_source = "WIRELESS"
+        self.source_root = build_server_source_root()
+        print("SOURCE SELECTED: WIRELESS", self.source_root)
+
+    @Slot()
+    def useUsbSource(self):
+        self.current_source = "USB"
+        self.source_root = Path(r"D:\games") / SERVER_GAMES_FOLDER
+        print("SOURCE SELECTED: USB", self.source_root)
+
+
+        print("CONTROLLER READY")
+        print("SOURCE:", self.source_root)
+        print("DEST:", self.destination_root)
+
+
+    def _transfer_progress(self, percent, speed, eta):
+
+        try:
+            self.transfer_window.show()
+
+            self.transfer_window.update_transfer(
+                percent,
+                speed,
+                eta
+            )
+
+        except Exception as e:
+            print("TRANSFER WINDOW ERROR:", e)
+
+
+    def _transfer_status(self, text):
+
+        try:
+            self.transfer_window.show()
+            self.transfer_window.set_status(text)
+
+        except Exception as e:
+            print("TRANSFER STATUS ERROR:", e)
+
+
+    def _transfer_log(self, text):
+
+        try:
+            self.transfer_window.show()
+
+            self.transfer_window.add_log(
+                text
+            )
+
+        except Exception as e:
+            print(
+                "TRANSFER LOG ERROR:",
+                e
+            )
+
+    def _get_current_game(self):
+        return self._current_game
+
+    def _set_current_game(self, value):
+        if self._current_game != value:
+            self._current_game = value
+            self.currentGameChanged.emit()
+
+    currentGameChanged = Signal()
+    currentGame = Property(
+        str,
+        _get_current_game,
+        _set_current_game,
+        notify=currentGameChanged
+    )
+
+    def _progress(self, percent, speed, eta):
+        print(
+            f"PROGRESS: {percent}% | {speed} | ETA {eta}"
+        )
+
+        self.transferPercentChanged.emit(percent)
+        self.transferSpeedChanged.emit(speed)
+        self.transferEtaChanged.emit(eta)
+
+    def _status(self, message):
+        print("STATUS:", message)
+        self.messageChanged.emit(message)
+
+    def _finished(self, success, message):
+        print(
+            "FINISHED:",
+            success,
+            message
+        )
+
+        self.transferFinished.emit(
+            success,
+            message
+        )
+
+        self.messageChanged.emit(
+            message
+        )
+
+    @Slot(result=list)
+    def getADBDevices(self):
+
+        devices = self.adb_engine.get_devices()
+
+        print("ADB DEVICES:", devices)
+
+        if not devices:
+            self.selected_device = ""
+
+        qml_devices = []
+
+        for d in devices:
+            qml_devices.append(
+                d.get("name", d.get("serial", "Android"))
+            )
+
+        self.adbDevicesChanged.emit(qml_devices)
+
+        return devices
+
+
+    @Slot(str)
+    def selectADBDevice(self, device):
+
+        self.selected_device = device
+
+        print(
+            "ADB DEVICE SELECTED:",
+            device
+        )
+
+        self.messageChanged.emit(
+            f"?? ?????? ??????: {device}"
+        )
+
+
+    @Slot(str)
+    def copyGame(self, game_name):
+
+        print()
+        print("==============================")
+        print("ADB COPY REQUEST:", game_name)
+        print("==============================")
+
+        # ==========================================
+        # AUTO SELECT ADB DEVICE
+        # ==========================================
+
+        if not self.selected_device:
+
+            print("NO ADB DEVICE SELECTED")
+            print("SEARCHING FOR ADB DEVICES...")
+
+            devices = self.adb_engine.get_devices()
+
+            print("ADB DEVICES FOUND:", devices)
+
+            if not devices:
+
+                print("NO ADB DEVICES AVAILABLE")
+
+                self.messageChanged.emit(
+                    "?? ???? ???? ???? ??? ADB"
+                )
+
+                return
+
+            self.selected_device = devices[0]["serial"]
+
+            print(
+                "AUTO ADB DEVICE SELECTED:",
+                self.selected_device
+            )
+
+            self.messageChanged.emit(
+                f"?? ?????? ?????? ????????: {self.selected_device}"
+            )
+
+        # ==========================================
+        # CHECK SOURCE
+        # ==========================================
+
+        if not self.source_root.exists():
+
+            print(
+                "SOURCE NOT FOUND:",
+                self.source_root
+            )
+
+            self.messageChanged.emit(
+                "???? ?????? ??? ?????"
+            )
+
+            return
+
+        # ==========================================
+        # FIND GAME
+        # ==========================================
+
+        source = find_game_folder(
+            self.source_root,
+            game_name
+        )
+
+        if source is None:
+
+            print(
+                "GAME NOT FOUND:",
+                game_name
+            )
+
+            self.messageChanged.emit(
+                f"?????? ??? ??????: {game_name}"
+            )
+
+            return
+
+        game = get_game(game_name)
+
+        if not game:
+
+            print(
+                "GAME CONFIG NOT FOUND:",
+                game_name
+            )
+
+            self.messageChanged.emit(
+                "??????? ?????? ??? ??????"
+            )
+
+            return
+
+        # ==========================================
+        # ADB SOURCE / DESTINATION
+        # ==========================================
+
+        if game_name == "Free Fire":
+
+            source = source / "com.dts.freefireth"
+
+            print("FREE FIRE DATA SOURCE:", source)
+
+            if not source.exists() or not source.is_dir():
+                print("FREE FIRE DATA NOT FOUND:", source)
+                self.messageChanged.emit(
+                    "مجلد Free Fire com.dts.freefireth غير موجود"
+                )
+                return
+
+            adb_destination = (
+                "/sdcard/Android/data/com.dts.freefireth/"
+            )
+
+        elif game_name == "PUBG Mobile":
+
+            # PUBG source on SERVER06 contains the game
+            # folder, while the actual transferable data
+            # is inside the "saved" directory.
+            source = source / "saved"
+
+            adb_destination = (
+                "/sdcard/Android/data/com.tencent.ig/"
+                "files/UE4Game/ShadowTrackerExtra/"
+                "ShadowTrackerExtra/Saved/"
+            )
+
+            print("PUBG SAVED SOURCE:", source)
+
+            if not source.exists() or not source.is_dir():
+
+                print(
+                    "PUBG SAVED SOURCE NOT FOUND:",
+                    source
+                )
+
+                self.messageChanged.emit(
+                    "???? PUBG saved ??? ?????"
+                )
+
+                return
+
+        else:
+
+            adb_destination = ADB_GAME_DESTINATIONS.get(
+                game_name
+            )
+
+            if not adb_destination:
+
+                print(
+                    "ADB DESTINATION NOT CONFIGURED:",
+                    game_name
+                )
+
+                self.messageChanged.emit(
+                    "???? ADB ????? ??? ?????"
+                )
+
+                return
+
+        # ==========================================
+        # DEBUG
+        # ==========================================
+
+        print("SOURCE:", source)
+        print("SOURCE EXISTS:", source.exists())
+        print("SOURCE IS DIR:", source.is_dir())
+        print("ADB DEVICE:", self.selected_device)
+        print("ADB DESTINATION:", adb_destination)
+
+        if source.is_dir():
+
+            try:
+                files = [
+                    p
+                    for p in source.rglob("*")
+                    if p.is_file()
+                ]
+
+                print(
+                    "SOURCE FILE COUNT:",
+                    len(files)
+                )
+
+            except Exception as e:
+
+                print(
+                    "SOURCE SCAN ERROR:",
+                    e
+                )
+
+        self.currentGame = game_name
+
+        self.messageChanged.emit(
+            f"???? ??? {game_name} ??? ??????..."
+        )
+
+        # ==========================================
+        # START ADB TRANSFER
+        # ==========================================
+
+        push_source = str(source)
+
+        # PUBG: push the contents of "saved" into "Saved/",
+        # not the "saved" directory itself.
+        if game_name == "PUBG Mobile":
+            push_source = str(source) + "/."
+
+        self.adb_engine.push(
+            self.selected_device,
+            push_source,
+            adb_destination
+        )
+
+    @Slot(str)
+    def startGameTransfer(self, game_name):
+        self.copyGame(game_name)
+
+    @Slot(str)
+    def launchGame(self, game_name):
+        print()
+        print("==============================")
+        print("ADB LAUNCH REQUEST:", game_name)
+        print("==============================")
+
+        if not self.selected_device:
+            devices = self.adb_engine.get_devices()
+
+            if devices:
+                self.selected_device = devices[0].get(
+                    "serial",
+                    ""
+                )
+
+        if not self.selected_device:
+            self.messageChanged.emit(
+                "لا يوجد جهاز أندرويد متصل"
+            )
+            return
+
+        package_id = ADB_PACKAGE_IDS.get(
+            game_name
+        )
+
+        if not package_id:
+            self.messageChanged.emit(
+                f"لا يوجد Package ID للعبة {game_name}"
+            )
+            return
+
+        print(
+            "DEVICE:",
+            self.selected_device
+        )
+
+        print(
+            "PACKAGE:",
+            package_id
+        )
+
+        try:
+
+            result = self.adb_engine._run(
+                [
+                    "-s",
+                    self.selected_device,
+                    "shell",
+                    "monkey",
+                    "-p",
+                    package_id,
+                    "1"
+                ],
+                timeout=30
+            )
+
+            output = (
+                result.stdout
+                + "\n"
+                + result.stderr
+            ).strip()
+
+            print(
+                "ADB LAUNCH:",
+                output
+            )
+
+            if result.returncode == 0:
+
+                self.messageChanged.emit(
+                    f"تم فتح {game_name}"
+                )
+
+            else:
+
+                self.messageChanged.emit(
+                    f"فشل فتح {game_name}: "
+                    + (
+                        output
+                        or "تأكد من تثبيت اللعبة"
+                    )
+                )
+
+        except Exception as e:
+
+            print(
+                "ADB LAUNCH ERROR:",
+                e
+            )
+
+            self.messageChanged.emit(
+                f"خطأ في فتح اللعبة: {e}"
+            )
+
+    @Slot(str)
+    def installGame(self, game_name):
+
+        print()
+        print("==============================")
+        print("ADB INSTALL REQUEST:", game_name)
+        print("==============================")
+
+        if not self.selected_device:
+
+            print("NO ADB DEVICE SELECTED")
+            print("SEARCHING FOR ADB DEVICES...")
+
+            devices = self.adb_engine.get_devices()
+
+            print("ADB DEVICES FOUND:", devices)
+
+            if not devices:
+
+                print("NO ADB DEVICES AVAILABLE")
+
+                self.messageChanged.emit(
+                    "ظ„ط§ ظٹظˆط¬ط¯ ط¬ظ‡ط§ط² Android ظ…طھطµظ„ ط¹ط¨ط± ADB"
+                )
+
+                return
+
+            self.selected_device = devices[0]["serial"]
+
+            print(
+                "AUTO ADB DEVICE SELECTED:",
+                self.selected_device
+            )
+
+            self.messageChanged.emit(
+                f"طھظ… ط§ط®طھظٹط§ط± ط§ظ„ط¬ظ‡ط§ط² طھظ„ظ‚ط§ط¦ظٹط§: {self.selected_device}"
+            )
+
+        if not self.source_root.exists():
+
+            print(
+                "SOURCE NOT FOUND:",
+                self.source_root
+            )
+
+            self.messageChanged.emit(
+                "?????? ??? ????"
+            )
+
+            return
+
+        source = find_game_folder(
+            self.source_root,
+            game_name
+        )
+
+        if source is None:
+
+            print(
+                "GAME FOLDER NOT FOUND:",
+                game_name
+            )
+
+            self.messageChanged.emit(
+                f"?? ??? ?????? ??? ????? {game_name}"
+            )
+
+            return
+
+        # ==========================================
+        # FIND APK INSIDE GAME FOLDER ONLY
+        # ==========================================
+
+        # Never search source.parent.
+        # This prevents installing unrelated APK files
+        # such as MT Manager from another folder.
+
+        apk_files = [
+            p
+            for p in source.rglob("*")
+            if p.is_file() and p.suffix.lower() in [".apk", ".apks", ".apk+"]
+        ]
+
+        if not apk_files:
+
+            print(
+                "GAME APK NOT FOUND:",
+                game_name
+            )
+
+            self.messageChanged.emit(
+                f"ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ APK ط§ظ„ط®ط§طµ ط¨ظ€ {game_name}"
+            )
+
+            return
+
+        if len(apk_files) > 1:
+
+            print(
+                "MULTIPLE GAME APK FILES:",
+                game_name
+            )
+
+            for candidate in apk_files:
+                print(
+                    "APK CANDIDATE:",
+                    candidate
+                )
+
+        # Prefer a real APK. If only an APKS bundle exists,
+        # let ADBEngine install all split APKs together.
+
+        normal_apks = [
+            p for p in apk_files
+            if p.suffix.lower() == ".apk"
+        ]
+
+        apks_bundles = [
+            p for p in apk_files
+            if p.suffix.lower() == ".apks"
+        ]
+
+        if normal_apks:
+            apk = normal_apks[0]
+            install_type = "apk"
+        elif apks_bundles:
+            apk = apks_bundles[0]
+            install_type = "apks"
+        else:
+            self.messageChanged.emit(
+                f"لم يتم العثور على APK صالح لـ {game_name}"
+            )
+            return
+
+        print(
+            "GAME APK SELECTED:",
+            apk
+        )
+
+        print("DEVICE:", self.selected_device)
+        print("APK:", apk)
+        print("INSTALL TYPE:", install_type)
+
+        self.currentGame = game_name
+
+        self.messageChanged.emit(
+            f"جاري تثبيت {game_name}..."
+        )
+
+        if install_type == "apks":
+            self.adb_engine.install_apks(
+                self.selected_device,
+                str(apk)
+            )
+        else:
+            self.adb_engine.install(
+                self.selected_device,
+                str(apk)
+            )
+
+    @Slot()
+    def pauseTransfer(self):
+        self.adb_engine.pause()
+
+    @Slot()
+    def resumeTransfer(self):
+        self.adb_engine.resume()
+
+    @Slot()
+    def cancelTransfer(self):
+        self.adb_engine.cancel()
+
+
+print("STARTING KAFIA NET CONTROL PRO")
+
+app = QApplication(sys.argv)
+
+engine = QQmlApplicationEngine()
+
+controller = AppController()
+
+engine.rootContext().setContextProperty(
+    "appController",
+    controller
+)
+
+engine.rootContext().setContextProperty(
+    "baseDirectory",
+    str(BASE_DIR)
+)
+
+qml_file = BASE_DIR / "qml" / "main.qml"
+
+print("LOADING:", qml_file)
+
+engine.load(
+    str(qml_file)
+)
+
+print(
+    "ROOT OBJECTS:",
+    len(engine.rootObjects())
+)
+
+if not engine.rootObjects():
+
+    print("QML FAILED TO LOAD")
+
+    sys.exit(-1)
+
+print("QML LOADED SUCCESSFULLY")
+print("STARTING QT EVENT LOOP")
+
+exit_code = app.exec()
+
+print(
+    "QT EVENT LOOP ENDED:",
+    exit_code
+)
+
+sys.exit(exit_code)
+

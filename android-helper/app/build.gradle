@@ -1,0 +1,47 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.kafianet.shizukubridge'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.kafianet.shizukubridge'
+        minSdk 24
+        targetSdk 29
+        versionCode 12
+        versionName '1.6.5'
+    }
+
+    buildFeatures {
+        aidl true
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    lint {
+        // This helper is sideloaded by KafiaNet, not distributed through Google Play.
+        // Target 29 intentionally preserves the legacy SAF picker behavior for Android/data.
+        disable 'ExpiredTargetSdkVersion'
+    }
+
+    buildTypes {
+        release {
+            // Release must be installable by ADB. Use the Gradle debug signing
+            // config for this companion package; it does not sign the Windows app.
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
+    implementation 'androidx.documentfile:documentfile:1.0.1'
+}
