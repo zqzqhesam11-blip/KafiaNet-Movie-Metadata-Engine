@@ -929,7 +929,9 @@ def test_pubg_flash_uses_fixed_source_and_exact_package_destination():
         for size_name in ("Saved", "Medium", "Low"):
             assert controller.setPubgSourceSize(size_name) is True
             controller.copyGame("PUBG Mobile Flash")
-            engine = engine_for("SERIAL_A")
+            # Each copy starts a fresh engine; inspect the engine created for this size.
+            engine = FakeOperationEngine.instances[-1]
+            assert engine.serial == "SERIAL_A"
             operation = controller._active_operations["SERIAL_A"]
             assert engine.calls[-1] == (
                 "push",
