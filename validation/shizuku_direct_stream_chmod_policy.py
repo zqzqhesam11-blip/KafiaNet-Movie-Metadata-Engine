@@ -16,7 +16,12 @@ def check(label, condition):
 
 
 check("no chmod calls in Shizuku transfer service", "Os.chmod(" not in service)
-check("no destination preflight API remains", "canWriteDestination(" not in service)
+check("old destination write-probe API is absent", "canWriteDestination(" not in service)
+check("read-only Shizuku destination inspection uses stat", (
+    "inspectDestination(String destination)" in service
+    and "Os.stat(root.getAbsolutePath())" in service
+    and "OsConstants.ENOENT" in service
+))
 check("no canonical authorized-root containment checks remain", all(
     token not in service for token in (
         "ensureWritable(",
@@ -37,15 +42,17 @@ check("unsafe relative paths remain rejected", all(
         '"."',
     )
 ))
-check("direct stream retains temp file, fsync, size check and atomic rename", all(
+check("direct stream avoids fsync and destination re-read while keeping in-stream byte counting", all(
     token in service for token in (
         '".kafianet-"',
         "new FileOutputStream(temporary, false)",
-        "output.getFD().sync()",
         "written != expectedSize",
         "Os.rename(",
+        "stream.completed.await(",
+        "stream.completed.countDown()",
     )
-))
+) and "output.getFD().sync()" not in service and "temporary.length()" not in service)
+check("per-file 100ms status polling is removed", "Thread.sleep(100L)" not in activity)
 check("first-run Shizuku permission is actively polled", (
     "permissionGrantMonitor" in activity
     and "Shizuku.checkSelfPermission()" in activity
@@ -55,10 +62,10 @@ check("permission wait lasts fifteen minutes", (
     "SHIZUKU_PERMISSION_WAIT_TIMEOUT_MS = 15L * 60L * 1000L" in activity
     and "permissionRequestStartedAt" in activity
 ))
-check("Shizuku UserService version advances", ".version(11)" in activity)
+check("Shizuku UserService version advances", ".version(12)" in activity)
 check("HTTP receive buffer is 4 MiB", "new byte[4 * 1024 * 1024]" in activity)
 check("Shizuku writer buffer is 4 MiB", "new byte[4 * 1024 * 1024]" in service)
-check("helper package is 1.6.5 / code 12", (
-    "versionCode 12" in gradle and "versionName '1.6.5'" in gradle
+check("helper package is 1.6.6 / code 13", (
+    "versionCode 13" in gradle and "versionName '1.6.6'" in gradle
 ))
 print("SHIZUKU PERMISSION / STREAM POLICY: PASS")
