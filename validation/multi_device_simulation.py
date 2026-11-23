@@ -2976,7 +2976,7 @@ def run_once():
     test_transfer_history_is_not_truncated_after_500_entries()
     test_direct_stream_rejects_source_size_changes()
     test_direct_stream_manifest_preserves_game_relative_paths()
-    test_post_copy_permission_failure_does_not_install_shizuku()
+    test_saved_copy_never_changes_permissions_or_writes_probe_files()
     test_fullscreen_enters_even_when_native_guard_is_unavailable()
     test_legacy_successful_phone_register_is_no_longer_used()
     test_launch_game_resolves_and_starts_installed_package()
