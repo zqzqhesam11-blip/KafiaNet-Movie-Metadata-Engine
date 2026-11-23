@@ -2260,7 +2260,7 @@ class AppController(QObject):
                 "مهم بخصوص Android/data:",
                 "يبدأ CN PlayHub بمحاولة ADB مباشرة، ولا يثبت MT Manager أو Shizuku قبل النسخ.",
                 "عند رفض ADB للكتابة فقط، يثبت/يفتح Shizuku ومساعد CN PlayHub على ذلك الهاتف. المساعد الحالي لا يطلب اختيار مجلد عبر SAF؛ تفاعله هو طلب إذن Shizuku عندما لا يكون ممنوحاً مسبقاً.",
-                "إذا اكتمل نقل ADB ثم فشل فقط ضبط صلاحيات ما بعد النسخ، يعرض CN PlayHub هذا الخطأ منفصلًا ولا يثبت Shizuku؛ فالمساعد مخصص فقط لرفض الكتابة المباشر إلى Android/data.",
+                "لا يغيّر CN PlayHub صلاحيات ملفات الوجهة بعد النسخ؛ عند رفض ADB للكتابة فقط يستخدم Shizuku كمسار احتياطي إذا كان مفوضًا من Android.",
             ])
 
         if "kafianet_shizuku_android16_userservice_incompatible" in raw_error.lower():
@@ -2306,10 +2306,6 @@ class AppController(QObject):
         # ADB may print either "secure_mkdirs failed" or "secure_mkdirs() failed".
         # Normalize the empty call suffix so both forms activate the same safe fallback.
         lowered = lowered.replace("secure_mkdirs()", "secure_mkdirs")
-        # A post-copy chmod failure means ADB already transferred the files;
-        # it must never trigger installation or startup of Shizuku.
-        if "kafianet_post_copy_permission_error:" in lowered:
-            return False
         if any(marker in lowered for marker in (
             "kafianet_android_data_permission_denied:",
             "kafianet_android_data_access_unverified:",
