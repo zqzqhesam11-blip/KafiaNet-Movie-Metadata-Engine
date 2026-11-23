@@ -15,7 +15,7 @@ This is an isolated test helper. It does not replace or modify the current CN Pl
 
 ## Test steps
 
-1. Install `KafiaNet-EFootball-SAF-Test.apk` on the phone. Its package ID is separate from the existing helper.
+1. Install `KafiaNet-EFootball-SAF-Test.apk` on the phone. Its package ID is separate from the existing helper. From PowerShell, the optional install command is `& "C:\\Program Files (x86)\\platform-tools\\adb.exe" install -r .\\KafiaNet-EFootball-SAF-Test.apk`.
 2. Open **KafiaNet eFootball SAF Test**.
 3. Tap **اختيار مجلد data داخل مساحة eFootball**.
 4. In the picker, open the eFootball storage provider from the left sidebar, navigate to `data`, select that folder, and grant access.
