@@ -2150,11 +2150,6 @@ class AppController(QObject):
             "no devices/emulators found", "transport error"
         )):
             return "اتصال ADB بالهاتف غير جاهز. افحص كابل USB وموافقة تصحيح USB ثم أعد المحاولة."
-        if "kafianet_post_copy_permission_error:" in lowered:
-            return (
-                "اكتمل إرسال الملفات عبر ADB، لكن تعذر ضبط صلاحياتها بعد النسخ. "
-                "لم نثبت Shizuku لأن ADB لم يُرفض أثناء الكتابة إلى Android/data."
-            )
         if "kafianet_shizuku_oem_permission_limited" in lowered:
             return (
                 "إعدادات حماية الشركة المصنّعة منعت ADB من تشغيل خادم Shizuku. "
