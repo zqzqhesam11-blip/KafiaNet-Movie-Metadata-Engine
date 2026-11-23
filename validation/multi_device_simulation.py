@@ -2623,7 +2623,8 @@ def test_paths_and_ui():
     assert "def build_shizuku_helper_apk_path()" in current
     assert "engine.prepare_apps_before_copy(" not in current
     assert 'operation["phase"] = "preinstall_apps"' not in current
-    assert "KAFIANET_POST_COPY_PERMISSION_ERROR" in engine_source
+    assert "KAFIANET_POST_COPY_PERMISSION_ERROR" not in current
+    assert "KAFIANET_POST_COPY_PERMISSION_ERROR" not in engine_source
     assert "shizuku_permissions_only" not in current
     assert "shizuku_permissions" not in current
     assert "engine.prepare_game_permissions_via_shizuku(" not in current
