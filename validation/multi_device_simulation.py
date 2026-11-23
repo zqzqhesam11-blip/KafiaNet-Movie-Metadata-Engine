@@ -1108,6 +1108,11 @@ def test_saved_copy_never_changes_permissions_or_writes_probe_files():
     assert '"touch"' not in push_source
     assert '"rm"' not in push_source
     assert "if is_saved_destination and not self._remote_directory_exists(device, check_path):" in push_source
+    copy_start = app_source.index("    def copyGame(self, game_name):")
+    copy_end = app_source.index("    def _pull_destination_for_game(", copy_start)
+    copy_source = app_source[copy_start:copy_end]
+    assert "source.rglob(" not in copy_source
+    assert '"SOURCE FILE COUNT:"' not in copy_source
 
 
 
