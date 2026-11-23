@@ -1094,36 +1094,21 @@ def test_direct_stream_manifest_preserves_game_relative_paths():
 
 
 
-def test_post_copy_permission_failure_does_not_install_shizuku():
-    controller = make_controller()
-    with TemporaryDirectory() as directory:
-        destination = "/sdcard/Android/data/com.tencent.ig/files/Saved"
-        operation = dict(
-            rows(["SERIAL_POSTCOPY"])[0],
-            source="C:/games/PUBG/Saved",
-            destination=destination,
-            target_package="com.tencent.ig",
-            shizuku_fallback_attempted=False,
-            phase="adb_direct",
-        )
-        controller._start_operation(operation)
-        engine = operation["engine"]
-        engine.finish(
-            False,
-            "KAFIANET_POST_COPY_PERMISSION_ERROR: chmod failed: Operation not permitted",
-        )
+def test_saved_copy_never_changes_permissions_or_writes_probe_files():
+    adb_source = Path(ROOT / "engine/adb_engine.py").read_text(encoding="utf-8")
+    app_source = Path(ROOT / "app_qml.py").read_text(encoding="utf-8")
+    push_start = adb_source.index("    def _push_thread(")
+    push_end = adb_source.index("    @Slot(str, str, str)\n    def push(", push_start)
+    push_source = adb_source[push_start:push_end]
 
-        # ADB already transferred the payload; later chmod failure is not
-        # an Android/data write denial and must not install Shizuku or helper.
-        assert operation["phase"] == "final"
-        assert operation["completed"] is True
-        assert operation["result"]["success"] is False
-        assert "تعذر ضبط صلاحياتها بعد النسخ" in operation["result"]["message"]
-        assert operation["shizuku_fallback_attempted"] is False
-        assert not any(
-            call[0] in ("prepare_shizuku_bridge", "copy_via_shizuku_bridge")
-            for call in engine.calls
-        )
+    assert "chmod -R a+rwX" not in adb_source
+    assert "_set_remote_game_permissions" not in adb_source
+    assert "KAFIANET_POST_COPY_PERMISSION_ERROR" not in app_source
+    assert "write_test_" not in push_source
+    assert '"touch"' not in push_source
+    assert '"rm"' not in push_source
+    assert "if is_saved_destination and not self._remote_directory_exists(device, check_path):" in push_source
+
 
 
 
@@ -1735,11 +1720,6 @@ def test_shizuku_fallback_recognizes_android_data_remote_error_variants():
         "KAFIANET_SHIZUKU_DESTINATION_MISSING: Saved not found",
     ) is False
 
-    # A post-copy chmod error is deliberately not an ADB data-write denial.
-    assert app_qml.AppController._is_android_data_permission_denial(
-        destination,
-        "KAFIANET_POST_COPY_PERMISSION_ERROR: chmod failed: Operation not permitted",
-    ) is False
     assert app_qml.AppController._is_android_data_permission_denial(
         "/sdcard/Android/obb/com.tencent.ig/",
         "remote open failed: Permission denied",
