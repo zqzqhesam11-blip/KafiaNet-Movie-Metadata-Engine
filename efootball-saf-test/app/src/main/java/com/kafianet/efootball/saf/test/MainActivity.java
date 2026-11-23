@@ -168,7 +168,7 @@ public final class MainActivity extends Activity {
             probePassed = false;
             getPreferences(MODE_PRIVATE).edit().remove(PREF_TREE_URI).apply();
             showStatus(
-                    "المجلد المختار اسمه "" + queryDisplayName(selected) + "". "
+                    "المجلد المختار اسمه: " + queryDisplayName(selected) + ". "
                     + "ارجع إلى مساحة eFootball واختر المجلد data نفسه، وليس files."
             );
             return;
