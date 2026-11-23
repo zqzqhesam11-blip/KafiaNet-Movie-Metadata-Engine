@@ -1108,6 +1108,21 @@ def test_saved_copy_never_changes_permissions_or_writes_probe_files():
     assert '"touch"' not in push_source
     assert '"rm"' not in push_source
     assert "if is_saved_destination and not self._remote_directory_exists(device, check_path):" in push_source
+    for engine_path in (
+        "engine/efootball_saf_engine.py",
+        "engine/transfer_engine.py",
+    ):
+        engine_source = Path(ROOT / engine_path).read_text(encoding="utf-8")
+        assert "chmod" not in engine_source.lower()
+        assert "setreadable" not in engine_source.lower()
+        assert "setwritable" not in engine_source.lower()
+
+    helper_source = Path(
+        ROOT / "android-helper/app/src/main/java/com/kafianet/shizukubridge/TransferUserService.java"
+    ).read_text(encoding="utf-8")
+    assert "Os.chmod(" not in helper_source
+    assert "setReadable(" not in helper_source
+    assert "setWritable(" not in helper_source
     copy_start = app_source.index("    def copyGame(self, game_name):")
     copy_end = app_source.index("    def _pull_destination_for_game(", copy_start)
     copy_source = app_source[copy_start:copy_end]
