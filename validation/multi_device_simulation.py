@@ -2720,7 +2720,9 @@ def test_paths_and_ui():
     assert "def _verify_remote_manifest(" not in adb_source
     assert "toybox sha256sum" not in adb_source
     assert "sha256" not in adb_source.lower()
-    assert "chmod -R a+rwX" in adb_source
+    assert "chmod -R a+rwX" not in adb_source
+    assert "_set_remote_game_permissions" not in adb_source
+    assert "write_test_" not in adb_source
     assert '"/stream/finish"' in adb_source
     assert "def _build_direct_stream_manifest(source_path)" in adb_source
     assert "def _iter_file_chunks_exact(source, expected_size" in adb_source
