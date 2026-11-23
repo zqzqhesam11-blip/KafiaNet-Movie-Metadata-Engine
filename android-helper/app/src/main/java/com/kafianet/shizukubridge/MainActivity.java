@@ -178,7 +178,7 @@ public final class MainActivity extends Activity {
                     .daemon(false)
                     .processNameSuffix("transfer")
                     .debuggable(false)
-                    .version(11)
+                    .version(12)
                     .tag("kafianet-file-transfer");
 
     @Override
@@ -463,6 +463,13 @@ public final class MainActivity extends Activity {
                 if (userService != null) userService.cancelCopy(jobId);
                 directStreamDestinations.remove(jobId);
                 result = new JSONObject().put("accepted", true);
+            } else if ("POST".equals(method) && "/destination/check".equals(path)) {
+                JSONObject payload = new JSONObject(new String(body, 0, read, StandardCharsets.UTF_8));
+                String destination = payload.getString("destination");
+                if (userService == null || !state.startsWith("ready_")) {
+                    throw new IllegalStateException("Shizuku is not ready for destination inspection");
+                }
+                result = new JSONObject(userService.inspectDestination(destination));
             } else if ("POST".equals(method) && "/stream/start".equals(path)) {
                 JSONObject payload = new JSONObject(new String(body, 0, read, StandardCharsets.UTF_8));
                 String jobId = payload.getString("jobId");
@@ -606,24 +613,18 @@ public final class MainActivity extends Activity {
             output.flush();
         }
 
-        long deadline = System.currentTimeMillis() + 6L * 60L * 60L * 1000L;
-        while (System.currentTimeMillis() < deadline) {
-            JSONObject status = new JSONObject(userService.getDirectStreamFileStatus(fileId));
-            String fileState = status.optString("state");
-            if ("complete".equals(fileState)) {
-                return new JSONObject().put("accepted", true)
-                        .put("copiedBytes", expectedSize)
-                        .put("relativePath", relativePath);
-            }
-            if ("failed".equals(fileState) || "cancelled".equals(fileState)) {
-                return new JSONObject().put("accepted", false)
-                        .put("error", status.optString("error", "Shizuku file writer failed"))
-                        .put("relativePath", relativePath);
-            }
-            Thread.sleep(100L);
+        // getDirectStreamFileStatus waits on a completion latch in the UserService.
+        // This avoids a 100ms polling delay after every individual file.
+        JSONObject status = new JSONObject(userService.getDirectStreamFileStatus(fileId));
+        String fileState = status.optString("state");
+        if ("complete".equals(fileState)) {
+            return new JSONObject().put("accepted", true)
+                    .put("copiedBytes", expectedSize)
+                    .put("relativePath", relativePath);
         }
         return new JSONObject().put("accepted", false)
-                .put("error", "Timed out waiting for Shizuku to commit " + relativePath);
+                .put("error", status.optString("error", "Shizuku file writer failed"))
+                .put("relativePath", relativePath);
     }
 
     private JSONObject health() throws Exception {

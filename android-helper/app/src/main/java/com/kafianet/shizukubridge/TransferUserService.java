@@ -3,6 +3,9 @@ package com.kafianet.shizukubridge;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.system.Os;
+import android.system.OsConstants;
+import android.system.ErrnoException;
+import android.system.StructStat;
 
 import androidx.annotation.Keep;
 
@@ -13,6 +16,8 @@ import java.io.FileOutputStream;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 @Keep
 public final class TransferUserService extends ITransferUserService.Stub {
@@ -53,6 +58,7 @@ public final class TransferUserService extends ITransferUserService.Stub {
     private static final class StreamFileJob {
         volatile String state = "queued";
         volatile String error = "";
+        final CountDownLatch completed = new CountDownLatch(1);
 
         JSONObject toJson() {
             JSONObject json = new JSONObject();
@@ -66,6 +72,40 @@ public final class TransferUserService extends ITransferUserService.Stub {
     }
 
     public TransferUserService() {
+    }
+
+    @Override
+    public String inspectDestination(String destination) {
+        JSONObject result = new JSONObject();
+        try {
+            File root = checkedDestination(destination);
+            StructStat stat = Os.stat(root.getAbsolutePath());
+            boolean directory = OsConstants.S_ISDIR(stat.st_mode);
+            result.put("path", root.getAbsolutePath());
+            result.put("exists", true);
+            result.put("missing", false);
+            result.put("isDirectory", directory);
+            result.put("canWrite", directory && root.canWrite());
+        } catch (ErrnoException error) {
+            boolean missing = error.errno == OsConstants.ENOENT
+                    || error.errno == OsConstants.ENOTDIR;
+            try {
+                result.put("exists", false);
+                result.put("missing", missing);
+                result.put("isDirectory", false);
+                result.put("error", error.toString());
+            } catch (Exception ignored) {
+            }
+        } catch (Throwable error) {
+            try {
+                result.put("exists", false);
+                result.put("missing", false);
+                result.put("isDirectory", false);
+                result.put("error", error.toString());
+            } catch (Exception ignored) {
+            }
+        }
+        return result.toString();
     }
 
     @Override
@@ -233,10 +273,10 @@ public final class TransferUserService extends ITransferUserService.Stub {
                             }
                         }
                         output.flush();
-                        output.getFD().sync();
                     }
 
-                    if (written != expectedSize || temporary.length() != expectedSize) {
+                    // Count bytes while receiving; never re-read the destination file for size verification.
+                    if (written != expectedSize) {
                         throw new java.io.IOException(
                                 "Size verification failed: expected " + expectedSize
                                         + ", received " + written
@@ -276,6 +316,7 @@ public final class TransferUserService extends ITransferUserService.Stub {
                                 "Could not remove partial direct-stream file: " + temporary
                         );
                     }
+                    stream.completed.countDown();
                 }
             }, "KafiaNet-Direct-Stream-" + fileId);
             worker.setDaemon(true);
@@ -298,6 +339,15 @@ public final class TransferUserService extends ITransferUserService.Stub {
     public String getDirectStreamFileStatus(String fileId) {
         StreamFileJob stream = streamFiles.get(fileId);
         if (stream == null) return "{\"state\":\"missing\",\"error\":\"stream not found\"}";
+        try {
+            // Block until the writer commits this file; avoid polling delays for thousands of small files.
+            if (!stream.completed.await(6L, TimeUnit.HOURS)) {
+                return "{\"state\":\"failed\",\"error\":\"Timed out waiting for the destination writer\"}";
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return "{\"state\":\"failed\",\"error\":\"Interrupted while waiting for destination writer\"}";
+        }
         String result = stream.toJson().toString();
         if ("complete".equals(stream.state) || "failed".equals(stream.state)
                 || "cancelled".equals(stream.state)) {

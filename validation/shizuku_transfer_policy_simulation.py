@@ -47,7 +47,19 @@ check(
     ),
 )
 check(
-    "missing Saved directory does not activate Shizuku",
+    "ADB missing-path result on protected Saved activates authoritative Shizuku inspection",
+    AppController._is_android_data_permission_denial(
+        saved, "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED: ADB cannot inspect protected Saved"
+    ),
+)
+check(
+    "Shizuku-confirmed missing Saved directory does not loop into fallback",
+    not AppController._is_android_data_permission_denial(
+        saved, "KAFIANET_SHIZUKU_DESTINATION_MISSING: Saved not found"
+    ),
+)
+check(
+    "ordinary non-protected missing destination does not activate Shizuku",
     not AppController._is_android_data_permission_denial(
         saved, "KAFIANET_DESTINATION_MISSING: مجلد الوجهة غير موجود"
     ),
@@ -101,8 +113,8 @@ check(
     ADBEngine._version_key("14.0.1") > ADBEngine._version_key("13.6.0"),
 )
 check(
-    "KafiaNet helper 1.6.0 parses",
-    ADBEngine._version_key("1.6.0") == (1, 6, 0),
+    "CN PlayHub helper 1.6.6 parses",
+    ADBEngine._version_key("1.6.6") == (1, 6, 6),
 )
 
 helper_service = (
@@ -138,12 +150,29 @@ check(
     and 'String base = "/storage/emulated/0/Android/data/";' not in helper_service,
 )
 check(
-    "direct stream retains temporary-file write, sync, size verification, and atomic rename",
+    "direct stream avoids forced disk sync and destination re-read while keeping in-stream byte counting",
     ".kafianet-" in helper_service
     and "new FileOutputStream(temporary, false)" in helper_service
-    and "output.getFD().sync()" in helper_service
+    and "output.getFD().sync()" not in helper_service
+    and "temporary.length()" not in helper_service
     and "written != expectedSize" in helper_service
-    and "Os.rename(" in helper_service,
+    and "Os.rename(" in helper_service
+    and "CountDownLatch" in helper_service
+    and "stream.completed.await(" in helper_service
+    and "stream.completed.countDown()" in helper_service,
+)
+check(
+    "destination root is inspected by the Shizuku UID before transfer",
+    "inspectDestination(String destination)" in helper_service
+    and '"/destination/check"' in helper_activity
+    and '"/destination/check"' in engine_source
+    and "destination_check.get(\"exists\") is not True" in engine_source
+    and "destination_check.get(\"missing\") is True" in engine_source
+    and "KAFIANET_SHIZUKU_DESTINATION_ACCESS_DENIED" in engine_source
+    and "Os.stat(root.getAbsolutePath())" in helper_service
+    and "error.errno == OsConstants.ENOENT" in helper_service
+    and "destination_check.get(\"isDirectory\") is not True" in engine_source
+    and 'destination = str(destination_check.get("path") or destination)' in engine_source,
 )
 check(
     "Shizuku helper does not create an app-local staging copy",
@@ -175,7 +204,8 @@ check(
     and '"-p"' in non_saved_setup
     and '"touch"' in saved_write_probe
     and '"mkdir"' not in saved_write_probe
-    and "KAFIANET_DESTINATION_MISSING" in engine_source,
+    and "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" in engine_source
+    and "KAFIANET_SHIZUKU_DESTINATION_MISSING" in engine_source,
 )
 check(
     "first Shizuku permission grant is polled and resumes setup",
@@ -248,16 +278,15 @@ install_if_missing_source = (
     .split("# ---- Official Shizuku manager ----", 1)[0]
 )
 check(
-    "Shizuku and helper are reused by package presence only",
+    "Shizuku manager is reused while the bundled helper upgrades only when older",
     "def package_is_installed(package_id):" in prepare_source
     and '"pm", "path", package_id' in prepare_source
-    and "dumpsys" not in prepare_source
-    and "versionCode=" not in prepare_source
-    and "versionName=" not in prepare_source
-    and "verify_version" not in prepare_source
     and "install_if_missing" in prepare_source
-    and "if package_is_installed(package_id):" in install_if_missing_source
-    and "install_apk(apk_path, package_id, label)" in install_if_missing_source,
+    and "def install_helper_if_outdated():" in prepare_source
+    and '"dumpsys", "package", helper_package' in prepare_source
+    and "installed_code >= 13" in prepare_source
+    and "install_helper_if_outdated()" in prepare_source
+    and "install_if_missing(shizuku_apk, shizuku_package, \"Shizuku\")" in prepare_source,
 )
 signature_guard_position = install_apk_source.find("helper_signature_conflict")
 signature_uninstall_position = install_apk_source.find(
@@ -339,9 +368,10 @@ check(
     and '"rm"' not in retry_source,
 )
 check(
-    "ADB --sync is enabled only after a verified secure_mkdirs partial-directory retry",
-    'if secure_mkdir_retry_paths:' in engine_source
-    and 'command.append("--sync")' in engine_source
+    "ADB never invokes --sync or skip-existing mode",
+    'command.append("--sync")' not in engine_source
+    and '"--sync"' not in engine_source
+    and "ADB SECURE_MKDIRS FULL RETRY" in engine_source
 )
 
 cleanup_source = (

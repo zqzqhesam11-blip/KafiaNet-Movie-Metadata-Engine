@@ -2111,6 +2111,12 @@ class AppController(QObject):
 
         text = str(raw_message or "")
         lowered = text.lower()
+        if "kafianet_shizuku_destination_access_denied" in lowered:
+            return "استطاع Shizuku بدء الفحص لكنه لم يحصل على صلاحية قراءة مجلد Saved. راجع صلاحيات Shizuku وحماية الشركة المصنّعة؛ لم نعتبر المجلد مفقودًا."
+        if "kafianet_shizuku_destination_missing" in lowered:
+            return "تحقق Shizuku بصلاحيات النقل وأكد أن مجلد Saved غير موجود فعلًا في المسار المحدد؛ شغّل PUBG FLASH على الهاتف حتى تنشئه ثم أعد المحاولة."
+        if "kafianet_shizuku_destination_not_directory" in lowered:
+            return "تحقق Shizuku أكد أن مسار Saved موجود لكنه ليس مجلدًا صالحًا؛ راجع مسار PUBG FLASH على الهاتف."
         if "kafianet_destination_missing" in lowered:
             return "مجلد الوجهة غير موجود. شغّل اللعبة على الهاتف أولًا حتى تنشئ مجلد Saved ثم أعد المحاولة."
         if "kafianet_destination_not_directory" in lowered:
@@ -2284,7 +2290,10 @@ class AppController(QObject):
         # it must never trigger installation or startup of Shizuku.
         if "kafianet_post_copy_permission_error:" in lowered:
             return False
-        if "kafianet_android_data_permission_denied:" in lowered:
+        if any(marker in lowered for marker in (
+            "kafianet_android_data_permission_denied:",
+            "kafianet_android_data_access_unverified:",
+        )):
             return True
 
         # ADB/platform-tools versions vary in how they describe a remote

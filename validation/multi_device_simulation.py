@@ -1702,6 +1702,19 @@ def test_shizuku_fallback_recognizes_android_data_remote_error_variants():
             destination, message
         ) is True, message
 
+    # ADB may misreport a protected Android/data/Saved path as missing.
+    assert app_qml.AppController._is_android_data_permission_denial(
+        destination,
+        "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED: ADB could not inspect protected Saved",
+    ) is True
+
+    # A confirmed missing path from the Shizuku-identity preflight is final;
+    # it must not loop back into the same fallback.
+    assert app_qml.AppController._is_android_data_permission_denial(
+        destination,
+        "KAFIANET_SHIZUKU_DESTINATION_MISSING: Saved not found",
+    ) is False
+
     # A post-copy chmod error is deliberately not an ADB data-write denial.
     assert app_qml.AppController._is_android_data_permission_denial(
         destination,
@@ -2466,13 +2479,10 @@ def test_paths_and_ui():
     push_start = adb_source.index("def _push_thread(")
     push_end = adb_source.index("def push(", push_start)
     push_source = adb_source[push_start:push_end]
-    # Normal pushes stay unmodified; --sync is used only after verified
-    # secure_mkdirs partial-directory recovery.
-    sync_guard = push_source.index("if secure_mkdir_retry_paths:")
-    sync_append = push_source.index('command.append("--sync")', sync_guard)
-    sync_extend = push_source.index("command.extend([", sync_append)
-    assert sync_guard < sync_append < sync_extend
-    assert push_source.count('command.append("--sync")') == 1
+    # No ADB sync/skip-existing mode is ever passed, including recovery retries.
+    assert 'command.append("--sync")' not in push_source
+    assert '"--sync"' not in push_source
+    assert "ADB SECURE_MKDIRS FULL RETRY" in adb_source
     assert "def _secure_mkdirs_retry_parent(" in adb_source
     assert "def _remote_directory_exists(" in adb_source
     assert "if root_exists and partial_parent_exists and connected:" in adb_source
@@ -2605,9 +2615,11 @@ def test_paths_and_ui():
         "android-helper/app/src/main/aidl/com/kafianet/shizukubridge/ITransferUserService.aidl"
     ).read_text(encoding="utf-8")
     assert "beginDirectStreamJob" in helper_aidl
+    assert "inspectDestination(String destination)" in helper_aidl
     assert "prepareDestinationWritable" not in helper_aidl
     assert "startDirectStreamFile" in helper_aidl
     assert "getDirectStreamFileStatus" in helper_aidl
+    assert '"/destination/check"' in helper_activity_java
     assert "ParcelFileDescriptor.createPipe()" in helper_activity_java
     assert "ParcelFileDescriptor.AutoCloseOutputStream" in helper_activity_java
     assert '"/stream/file"' in helper_activity_java
@@ -2624,13 +2636,20 @@ def test_paths_and_ui():
     assert "اختر مجلد Android/data" not in engine_source
     assert "private File checkedRelativeDestination(" in transfer_user_java
     assert "beginDirectStreamJob(" in transfer_user_java
+    assert "inspectDestination(String destination)" in transfer_user_java
+    assert "stream.completed.await(" in transfer_user_java
+    assert "stream.completed.countDown()" in transfer_user_java
+    assert "temporary.length()" not in transfer_user_java
+    assert "output.getFD().sync()" not in transfer_user_java
+    assert "Thread.sleep(100L)" not in helper_activity_java
+    assert "Os.stat(root.getAbsolutePath())" in transfer_user_java
+    assert "error.errno == OsConstants.ENOENT" in transfer_user_java
     assert "prepareDestinationWritable(" not in transfer_user_java
     assert "makeDestinationWritableTree(" not in transfer_user_java
     assert "MessageDigest" not in transfer_user_java
     assert "Os.chmod(" not in transfer_user_java
     assert "startDirectStreamFile(" in transfer_user_java
     assert "new FileOutputStream(temporary, false)" in transfer_user_java
-    assert "output.getFD().sync()" in transfer_user_java
     assert "Os.rename(" in transfer_user_java
     assert ".kafianet-" in transfer_user_java and ".part" in transfer_user_java
     assert "KafiaNetTransfer" not in transfer_user_java
@@ -2656,9 +2675,11 @@ def test_paths_and_ui():
     assert "Source file was truncated during transfer" in adb_source
     assert "KafiaNetTransfer" not in adb_source
     helper_gradle = Path("android-helper/app/build.gradle").read_text(encoding="utf-8")
-    assert "versionCode 12" in helper_gradle
-    assert "versionName '1.6.5'" in helper_gradle
-    assert ".version(11)" in helper_activity_java
+    assert "versionCode 13" in helper_gradle
+    assert "versionName '1.6.6'" in helper_gradle
+    assert "install_helper_if_outdated()" in engine_source
+    assert "installed_code >= 13" in engine_source
+    assert ".version(12)" in helper_activity_java
     assert "Shizuku.addBinderDeadListener(binderDead);" in helper_activity_java
     assert "private volatile boolean bindingService" in helper_activity_java
     assert "private volatile boolean permissionRequestInFlight" in helper_activity_java
@@ -2697,11 +2718,13 @@ def test_paths_and_ui():
     assert "def _device_is_connected(self, device):" in engine_source
     assert "self._wait_for_device_reconnect(device)" in engine_source
     assert "انقطع اتصال الهاتف. الرجاء إعادة توصيله لاستمرار النسخ..." in engine_source
-    # --sync must be guarded by the verified secure_mkdirs retry state.
-    sync_guard = engine_source.index("if secure_mkdir_retry_paths:")
-    sync_append = engine_source.index('command.append("--sync")', sync_guard)
-    sync_extend = engine_source.index("command.extend([", sync_append)
-    assert sync_guard < sync_append < sync_extend
+    # The transfer engine never requests ADB sync or skips matching files.
+    assert 'command.append("--sync")' not in engine_source
+    assert '"--sync"' not in push_source
+    assert "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" in push_source
+    assert '"/destination/check"' in engine_source
+    assert "KAFIANET_SHIZUKU_DESTINATION_MISSING" in engine_source
+    assert "KAFIANET_SHIZUKU_DESTINATION_ACCESS_DENIED" in engine_source
     assert "def _secure_mkdirs_retry_parent(" in engine_source
     assert "def _remote_directory_exists(" in engine_source
     assert "تمت إعادة توصيل الهاتف" in engine_source

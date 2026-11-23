@@ -961,10 +961,19 @@ class ADBEngine(QObject):
                 ):
                     failure = "KAFIANET_ANDROID_DATA_PERMISSION_DENIED: " + check_error
                 elif any(marker in lowered for marker in missing_markers):
-                    failure = (
-                        "KAFIANET_DESTINATION_MISSING: مجلد الوجهة غير موجود: "
-                        + check_path
-                    )
+                    if is_saved_destination:
+                        # ADB may report protected Android/data paths as missing.
+                        # UID 2000 must inspect the actual Saved directory.
+                        failure = (
+                            "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED: "
+                            "تعذر على ADB التحقق من مجلد Saved المحمي؛ سيتم فحصه عبر Shizuku: "
+                            + check_path
+                        )
+                    else:
+                        failure = (
+                            "KAFIANET_DESTINATION_MISSING: مجلد الوجهة غير موجود: "
+                            + check_path
+                        )
                 elif any(marker in lowered for marker in ("not a directory", "is not a directory")):
                     failure = (
                         "KAFIANET_DESTINATION_NOT_DIRECTORY: مسار الوجهة ليس مجلدًا: "
@@ -1043,9 +1052,7 @@ class ADBEngine(QObject):
                 device,
                 "push",
             ]
-            if secure_mkdir_retry_paths:
-                # ADB --sync skips files whose remote size and mtime already match.
-                command.append("--sync")
+            # Always send every source file, including files already present.
             command.extend([
                 *adb_sources,
                 adb_destination
@@ -1471,10 +1478,9 @@ class ADBEngine(QObject):
 
             # secure_mkdirs may create a nested directory and then fail while
             # applying its metadata. Verify the Saved root and exact partial parent
-            # read-only, then repeat the Saved transfer with ADB --sync.
-            # Platform-Tools 37 aborts the current recursive directory copy after
-            # a failed file, so retrying that file alone could leave sibling files absent.
-            # --sync skips already-complete files when size and mtime match the source.
+            # read-only, then restart the complete transfer without skip-existing filtering.
+            # Re-sending existing files is intentional; no size/mtime comparison or
+            # skip-existing mode is permitted in this copy workflow.
             # Never create Saved or delete/rename phone files in this recovery path.
             retry_parent = self._secure_mkdirs_retry_parent(
                 requested_destination,
@@ -1496,29 +1502,18 @@ class ADBEngine(QObject):
                 connected = self._device_is_connected(device)
                 if root_exists and partial_parent_exists and connected:
                     secure_mkdir_retry_paths.add(retry_parent)
-                    retry_percent = max(
-                        0,
-                        min(int(progress_state.get("last_percent", 0)), 99),
-                    )
-                    self._progress_offset_percent = max(
-                        int(self._progress_offset_percent or 0),
-                        retry_percent,
-                    )
-                    self._progress_offset_bytes = max(
-                        int(self._progress_offset_bytes or 0),
-                        int(total_bytes * self._progress_offset_percent / 100),
-                    )
+                    self._progress_offset_percent = 0
+                    self._progress_offset_bytes = 0
                     self.statusChanged.emit(
                         "تم التحقق من وجود Saved والمجلد الجزئي؛ "
-                        "جاري استكمال النقل باستخدام ADB --sync لتجاوز الملفات المطابقة "
-                        "وإرسال الملفات الناقصة أو المختلفة."
+                        "جاري إعادة إرسال جميع الملفات دون مزامنة أو تخطي."
                     )
                     print(
-                        "ADB SECURE_MKDIRS SYNC RETRY:",
+                        "ADB SECURE_MKDIRS FULL RETRY:",
                         retry_parent,
                         "| attempt:",
                         len(secure_mkdir_retry_paths),
-                        "| mode: --sync",
+                        "| mode: full-resend",
                     )
                     retry_thread = threading.Thread(
                         target=self._push_thread,
@@ -1528,7 +1523,7 @@ class ADBEngine(QObject):
                             requested_destination,
                             secure_mkdir_retry_paths,
                         ),
-                        name=f"ADB-secure-mkdir-sync-retry-{device}",
+                        name=f"ADB-secure-mkdir-full-retry-{device}",
                         daemon=True,
                     )
                     self._thread = retry_thread
@@ -1536,7 +1531,7 @@ class ADBEngine(QObject):
                     return
 
                 print(
-                    "ADB SECURE_MKDIRS SYNC RETRY SKIPPED:",
+                    "ADB SECURE_MKDIRS FULL RETRY SKIPPED:",
                     "saved_root_exists=", root_exists,
                     "partial_parent_exists=", partial_parent_exists,
                     "connected=", connected,
@@ -2614,12 +2609,39 @@ exit 3
                         return
                     install_apk(apk_path, package_id, label)
 
+                def install_helper_if_outdated():
+                    # The companion contains the transfer protocol, so it must
+                    # be upgraded when a newer bridge API is bundled.
+                    if not package_is_installed(helper_package):
+                        install_apk(helper_apk, helper_package, "مساعد CN PlayHub")
+                        return
+                    version_result = self._run(
+                        ["-s", device, "shell", "dumpsys", "package", helper_package],
+                        timeout=25,
+                    )
+                    version_text = (
+                        str(version_result.stdout or "")
+                        + "\\n"
+                        + str(version_result.stderr or "")
+                    )
+                    match = re.search(r"\\bversionCode=(\\d+)", version_text)
+                    installed_code = int(match.group(1)) if match else 0
+                    if installed_code >= 13:
+                        self.logChanged.emit(
+                            "مساعد CN PlayHub محدث؛ سنستخدم النسخة المثبتة."
+                        )
+                        return
+                    self.logChanged.emit(
+                        "جاري تحديث مساعد CN PlayHub إلى محرك النقل الأسرع وفحص الوجهة عبر Shizuku..."
+                    )
+                    install_apk(helper_apk, helper_package, "مساعد CN PlayHub")
+
                 # ---- Official Shizuku manager ----
                 shizuku_package = "moe.shizuku.privileged.api"
                 install_if_missing(shizuku_apk, shizuku_package, "Shizuku")
 
                 # ---- KafiaNet companion ----
-                install_if_missing(helper_apk, helper_package, "مساعد KafiaNet")
+                install_helper_if_outdated()
 
                 self.logChanged.emit(
                     "تم تجهيز Shizuku والمساعد؛ جاري تشغيل خادم Shizuku..."
@@ -2893,6 +2915,38 @@ exit 3
                     with urllib.request.urlopen(request, timeout=timeout) as response:
                         raw = response.read().decode("utf-8", errors="replace")
                         return json.loads(raw) if raw else {}
+
+                destination_check = request_json(
+                    "/destination/check",
+                    method="POST",
+                    payload={"destination": destination},
+                    timeout=30
+                )
+                if destination_check.get("exists") is not True:
+                    detail = str(destination_check.get("error") or destination_check.get("path") or destination)
+                    if destination_check.get("missing") is True:
+                        raise RuntimeError(
+                            "KAFIANET_SHIZUKU_DESTINATION_MISSING: "
+                            + destination + " | " + detail
+                        )
+                    raise RuntimeError(
+                        "KAFIANET_SHIZUKU_DESTINATION_ACCESS_DENIED: "
+                        + destination + " | " + detail
+                    )
+                if destination_check.get("isDirectory") is not True:
+                    detail = str(destination_check.get("path") or destination)
+                    raise RuntimeError(
+                        "KAFIANET_SHIZUKU_DESTINATION_NOT_DIRECTORY: " + detail
+                    )
+                # Use the canonical path returned by the Shizuku UID check,
+                # not the ADB-visible alias which may be filtered by Android.
+                destination = str(destination_check.get("path") or destination)
+                print(
+                    "SHIZUKU DESTINATION VERIFIED:",
+                    destination_check.get("path") or destination,
+                    "| canWrite hint:",
+                    destination_check.get("canWrite"),
+                )
 
                 accepted = request_json(
                     "/stream/start",
