@@ -403,12 +403,17 @@ public final class MainActivity extends Activity {
                     writeResponse(client, 400, new JSONObject().put("error", "no matching active job"));
                     return;
                 }
+                boolean complete = jobError.isEmpty() && copiedFiles == expectedFiles;
+                String finishError = jobError;
+                if (finishError.isEmpty() && copiedFiles != expectedFiles) {
+                    finishError = "File count mismatch: " + copiedFiles + "/" + expectedFiles;
+                }
                 JSONObject result = new JSONObject()
-                        .put("success", jobError.isEmpty())
+                        .put("success", complete)
                         .put("copiedFiles", copiedFiles)
                         .put("expectedFiles", expectedFiles)
                         .put("copiedBytes", copiedBytes)
-                        .put("error", jobError);
+                        .put("error", finishError);
                 activeJob = "";
                 writeResponse(client, 200, result);
                 return;
