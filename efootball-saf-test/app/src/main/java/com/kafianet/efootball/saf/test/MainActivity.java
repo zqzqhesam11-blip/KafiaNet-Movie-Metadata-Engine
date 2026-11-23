@@ -431,7 +431,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private JSONObject receiveFile(InputStream input, String relativePath, long contentLength) {
+    private JSONObject receiveFile(InputStream input, String relativePath, long contentLength) throws Exception {
         Uri temporary = null;
         Uri backup = null;
         try {
