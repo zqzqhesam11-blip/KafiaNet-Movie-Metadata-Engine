@@ -33,6 +33,9 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Install Android 35 platform
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
       - name: Validate PC streaming script syntax
         run: python -m py_compile efootball-saf-test/test_copy_efootball_saf.py
 
