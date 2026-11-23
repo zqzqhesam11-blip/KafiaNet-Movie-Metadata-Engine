@@ -190,11 +190,11 @@ saved_path_guard = (
 )
 non_saved_setup = (
     engine_source.split("if not is_saved_destination:", 1)[1]
-    .split("write_result = subprocess.run(", 1)[0]
+    .split("# Saved must already exist.", 1)[0]
 )
-saved_write_probe = (
-    engine_source.split("write_result = subprocess.run(", 1)[1]
-    .split("if write_result.returncode != 0:", 1)[0]
+saved_read_only_check = (
+    engine_source.split("# Saved must already exist.", 1)[1]
+    .split("manifest, total_bytes", 1)[0]
 )
 check(
     "ADB Saved preflight never creates the Saved destination",
@@ -202,8 +202,10 @@ check(
     and 'endswith("/saved")' in saved_path_guard
     and '"mkdir"' in non_saved_setup
     and '"-p"' in non_saved_setup
-    and '"touch"' in saved_write_probe
-    and '"mkdir"' not in saved_write_probe
+    and "self._remote_directory_exists(device, check_path)" in saved_read_only_check
+    and '"touch"' not in saved_read_only_check
+    and '"rm"' not in saved_read_only_check
+    and '"mkdir"' not in saved_read_only_check
     and "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" in engine_source
     and "KAFIANET_SHIZUKU_DESTINATION_MISSING" in engine_source,
 )
@@ -250,11 +252,10 @@ check(
     and "scheduleShutdownAfterResponse()" in helper_activity,
 )
 check(
-    "post-copy chmod failure no longer activates Shizuku fallback",
-    "KAFIANET_POST_COPY_PERMISSION_ERROR:" not in app_source[
-        app_source.index('if phase == "adb_direct":'):
-        app_source.index('if phase == "shizuku_prepare":')
-    ],
+    "ADB copy never changes destination permissions after transfer",
+    "chmod -R a+rwX" not in engine_source
+    and "_set_remote_game_permissions" not in engine_source
+    and "KAFIANET_POST_COPY_PERMISSION_ERROR" not in app_source,
 )
 check(
     "Shizuku service failures are distinct from destination denial",
