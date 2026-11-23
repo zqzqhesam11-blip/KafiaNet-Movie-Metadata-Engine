@@ -1135,6 +1135,74 @@ def test_legacy_successful_phone_register_is_no_longer_used():
     assert "لا توجد هواتف ناجحة في هذه الفترة" in history_qml
 
 
+def test_launch_game_resolves_and_starts_installed_package():
+    controller = make_controller()
+    controller.selected_devices = ["SERIAL_A"]
+    controller.selected_device = "SERIAL_A"
+    controller._selected_game_package_id = lambda _name: "com.tencent.igfit"
+    messages = []
+    controller.messageChanged.connect(messages.append)
+    calls = []
+
+    def fake_run(args, timeout=None):
+        calls.append((list(args), timeout))
+        if args[2:5] == ["shell", "pm", "path"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="package:/data/app/com.tencent.igfit/base.apk\n",
+                stderr="",
+            )
+        if args[2:5] == ["shell", "cmd", "package"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="com.tencent.igfit/com.tencent.igfit.SplashActivity\n",
+                stderr="",
+            )
+        if args[2:5] == ["shell", "am", "start"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "Starting: Intent { act=android.intent.action.MAIN }\n"
+                    "Status: ok\n"
+                    "Activity: com.tencent.igfit/com.tencent.igfit.SplashActivity\n"
+                ),
+                stderr="",
+            )
+        raise AssertionError("Unexpected launch command: " + repr(args))
+
+    controller.adb_engine._run = fake_run
+    controller.launchGame("PUBG Mobile Flash")
+
+    assert [call[0][2:5] for call in calls] == [
+        ["shell", "pm", "path"],
+        ["shell", "cmd", "package"],
+        ["shell", "am", "start"],
+    ]
+    assert calls[-1][0][-1] == (
+        "com.tencent.igfit/com.tencent.igfit.SplashActivity"
+    )
+    assert "تم فتح PUBG Mobile Flash" in messages
+
+    calls.clear()
+    messages.clear()
+
+    def missing_package(args, timeout=None):
+        calls.append(list(args))
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="Unknown package: com.tencent.igfit",
+        )
+
+    controller.adb_engine._run = missing_package
+    controller.launchGame("PUBG Mobile Flash")
+    assert len(calls) == 1
+    assert any(
+        "غير مثبتة" in message and "com.tencent.igfit" in message
+        for message in messages
+    )
+
+
 def test_adb_game_close_is_silent_and_package_scoped():
     engine = ADBEngine()
     calls = []
@@ -2620,6 +2688,10 @@ def test_paths_and_ui():
     launch = current[launch_start:launch_end]
     assert "self.adb_engine.get_devices()" not in launch
     assert "يرجى تحديد هاتف واحد على الأقل قبل تشغيل اللعبة." in launch
+    assert '"pm", "path", package_id' in launch
+    assert '"resolve-activity", "--brief"' in launch
+    assert '"am", "start", "-W"' in launch
+    assert 'Status:\\s*ok' in launch
 
     # Disconnected phones wait for reconnection and restart the full replacement push.
     assert "def _device_is_connected(self, device):" in engine_source
@@ -2808,6 +2880,7 @@ def run_once():
     test_post_copy_permission_failure_does_not_install_shizuku()
     test_fullscreen_enters_even_when_native_guard_is_unavailable()
     test_legacy_successful_phone_register_is_no_longer_used()
+    test_launch_game_resolves_and_starts_installed_package()
     test_adb_game_close_is_silent_and_package_scoped()
     test_custom_source_keeps_game_specific_phone_destination(make_controller())
     test_busy_serial_and_idle_serial(make_controller())

@@ -3290,7 +3290,7 @@ class AppController(QObject):
         # Launching supports one explicitly selected target. For multi-select,
         # use the first selected serial consistently with selected_device.
         self.selected_device = target_devices[0]
-
+        device = self.selected_device
         package_id = self._selected_game_package_id(game_name)
 
         if not package_id:
@@ -3299,67 +3299,112 @@ class AppController(QObject):
             )
             return
 
-        print(
-            "DEVICE:",
-            self.selected_device
-        )
-
-        print(
-            "PACKAGE:",
-            package_id
-        )
-
-        try:
-
-            result = self.adb_engine._run(
-                [
-                    "-s",
-                    self.selected_device,
-                    "shell",
-                    "monkey",
-                    "-p",
-                    package_id,
-                    "1"
-                ],
-                timeout=30
-            )
-
-            output = (
-                result.stdout
-                + "\n"
-                + result.stderr
+        def output_text(result):
+            return "\n".join(
+                str(getattr(result, key, "") or "").strip()
+                for key in ("stdout", "stderr")
+                if str(getattr(result, key, "") or "").strip()
             ).strip()
 
-            print(
-                "ADB LAUNCH:",
-                output
+        try:
+            print("DEVICE:", device)
+            print("PACKAGE:", package_id)
+
+            # Verify the exact installed package before resolving its launcher.
+            package_result = self.adb_engine._run(
+                ["-s", device, "shell", "pm", "path", package_id],
+                timeout=20,
             )
-
-            if result.returncode == 0:
-
-                self.messageChanged.emit(
-                    f"تم فتح {game_name}"
+            package_output = output_text(package_result)
+            package_paths = [
+                line.strip()
+                for line in package_output.splitlines()
+                if line.strip().startswith("package:")
+            ]
+            if package_result.returncode != 0 or not package_paths:
+                detail = package_output or "لم يُرجع Android مسار APK للحزمة."
+                message = (
+                    f"{game_name} غير مثبتة على الهاتف المحدد أو غير متاحة لهذا المستخدم. "
+                    f"Package ID: {package_id}. التفاصيل: {detail}"
                 )
+                print("ADB LAUNCH PACKAGE CHECK FAILED:", message)
+                self.messageChanged.emit(message)
+                return
 
-            else:
-
-                self.messageChanged.emit(
-                    f"فشل فتح {game_name}: "
-                    + (
-                        output
-                        or "تأكد من تثبيت اللعبة"
-                    )
-                )
-
-        except Exception as e:
-
-            print(
-                "ADB LAUNCH ERROR:",
-                e
+            # Resolve the current launcher activity from the installed APK.
+            resolve_result = self.adb_engine._run(
+                [
+                    "-s", device, "shell", "cmd", "package",
+                    "resolve-activity", "--brief",
+                    "-a", "android.intent.action.MAIN",
+                    "-c", "android.intent.category.LAUNCHER",
+                    "-p", package_id,
+                ],
+                timeout=20,
             )
+            resolve_output = output_text(resolve_result)
+            component = ""
+            for line in resolve_output.splitlines():
+                candidate = line.strip()
+                if (
+                    "/" in candidate
+                    and candidate.startswith(package_id + "/")
+                    and not candidate.startswith("Warning:")
+                ):
+                    component = candidate
+                    break
 
+            if resolve_result.returncode != 0 or not component:
+                detail = resolve_output or "لم يجد Android نشاط تشغيل رئيسيًا للحزمة."
+                message = (
+                    f"اللعبة مثبتة، لكن Android لم يجد شاشة تشغيل لها. "
+                    f"Package ID: {package_id}. التفاصيل: {detail}"
+                )
+                print("ADB LAUNCH ACTIVITY RESOLUTION FAILED:", message)
+                self.messageChanged.emit(message)
+                return
+
+            print("ADB LAUNCHER ACTIVITY:", component)
+            launch_result = self.adb_engine._run(
+                [
+                    "-s", device, "shell", "am", "start", "-W",
+                    "-a", "android.intent.action.MAIN",
+                    "-c", "android.intent.category.LAUNCHER",
+                    "-n", component,
+                ],
+                timeout=45,
+            )
+            launch_output = output_text(launch_result)
+            status_ok = bool(
+                re.search(r"(?im)^\s*Status:\s*ok\s*$", launch_output)
+            )
+            has_error = bool(
+                re.search(
+                    r"(?im)^\s*(?:Error:|Error type \d+|Exception|"
+                    r"Activity class .* does not exist|Permission Denial)",
+                    launch_output,
+                )
+            )
+            if launch_result.returncode == 0 and status_ok and not has_error:
+                print("ADB LAUNCH RESULT: PASS")
+                self.messageChanged.emit(f"تم فتح {game_name}")
+                return
+
+            detail = launch_output or (
+                f"am start returned exit code {launch_result.returncode} "
+                "without Android confirming Status: ok."
+            )
+            message = (
+                f"تعذر تشغيل {game_name} رغم وجود الحزمة. "
+                f"النشاط: {component}. التفاصيل: {detail}"
+            )
+            print("ADB LAUNCH FAILED:", message)
+            self.messageChanged.emit(message)
+
+        except Exception as exc:
+            print("ADB LAUNCH ERROR:", device, package_id, exc)
             self.messageChanged.emit(
-                f"خطأ في فتح اللعبة: {e}"
+                f"خطأ أثناء تشغيل {game_name} على الهاتف {device}: {exc}"
             )
 
     @Slot(str)
