@@ -2983,26 +2983,7 @@ class AppController(QObject):
         print("ADB DEVICES:", target_devices)
         print("ADB DESTINATION:", adb_destination)
 
-        if source.is_dir():
-
-            try:
-                files = [
-                    p
-                    for p in source.rglob("*")
-                    if p.is_file()
-                ]
-
-                print(
-                    "SOURCE FILE COUNT:",
-                    len(files)
-                )
-
-            except Exception as e:
-
-                print(
-                    "SOURCE SCAN ERROR:",
-                    e
-                )
+        # The transfer engine performs the single source enumeration it needs for progress.
 
         self.currentGame = game_name
 
