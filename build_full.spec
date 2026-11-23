@@ -47,7 +47,8 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="KAFIA_NET_CONTROL_PRO",
+    icon="assets/app_icon.ico",
+    name="CN_PLAYHUB",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -62,5 +63,5 @@ bundle = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="KAFIA_NET_CONTROL_PRO",
+    name="CN_PLAYHUB",
 )

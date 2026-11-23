@@ -4,7 +4,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="KafiaNet Shizuku Bridge"
+        android:label="CN PlayHub Shizuku Bridge"
         android:supportsRtl="true"
         android:requestLegacyExternalStorage="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">

@@ -1,4 +1,4 @@
-name: KafiaNet Control Pro - Final Windows Build
+name: CN PlayHub - Final Windows Build
 
 on:
   push:
@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: kafianet-control-pro-windows-latest-release
+  group: cn-playhub-windows-latest-release
   cancel-in-progress: false
 
 permissions:
@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   build:
-    name: Build, smoke-test and compress optimized bundled app
+    name: Build, smoke-test and compress CN PlayHub
     runs-on: windows-latest
     permissions:
       contents: write
@@ -86,11 +86,11 @@ jobs:
 
           $supportDir = 'build\android_support'
           New-Item -ItemType Directory -Force -Path $supportDir | Out-Null
-          Copy-Item -LiteralPath $helperApk -Destination (Join-Path $supportDir 'KafiaNetShizukuBridge.apk') -Force
+          Copy-Item -LiteralPath $helperApk -Destination (Join-Path $supportDir 'CNPlayHubShizukuBridge.apk') -Force
 
           $shizukuUrl = 'https://github.com/RikkaApps/Shizuku/releases/download/v13.6.0/shizuku-v13.6.0.r1086.2650830c-release.apk'
           $shizukuApk = Join-Path $supportDir 'Shizuku.apk'
-          Invoke-WebRequest -Uri $shizukuUrl -OutFile $shizukuApk -TimeoutSec 180 -Headers @{ 'User-Agent' = 'KafiaNetControlPro' }
+          Invoke-WebRequest -Uri $shizukuUrl -OutFile $shizukuApk -TimeoutSec 180 -Headers @{ 'User-Agent' = 'CNPlayHub' }
           if ((Get-Item -LiteralPath $shizukuApk).Length -lt 1000000) {
             throw 'Official Shizuku APK download is incomplete or invalid.'
           }
@@ -103,7 +103,7 @@ jobs:
           $url = 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip'
           $archive = Join-Path $env:RUNNER_TEMP 'platform-tools-latest-windows.zip'
           $extractRoot = Join-Path $env:RUNNER_TEMP 'google-platform-tools'
-          Invoke-WebRequest -Uri $url -OutFile $archive -TimeoutSec 180 -Headers @{ 'User-Agent' = 'KafiaNetControlPro CI' }
+          Invoke-WebRequest -Uri $url -OutFile $archive -TimeoutSec 180 -Headers @{ 'User-Agent' = 'CNPlayHub CI' }
           if ((Get-Item -LiteralPath $archive).Length -lt 5MB) {
             throw 'Google Platform-Tools archive is incomplete.'
           }
@@ -242,7 +242,7 @@ jobs:
           Write-Host ("Official PUBG FLASH icon embedded: {0:N1} KB" -f ($imageBytes.Length / 1KB))
 
       - name: Commit downloaded official PUBG MOBILE FLASH icon to project
-        if: github.event_name == 'push' && github.repository == 'zqzqhesam10-netizen/KafiaNetControlPro2' && github.ref == 'refs/heads/feature/transfer-history-pubg-size-20261114'
+        if: github.event_name == 'push' && github.repository == 'zqzqhesam10-netizen/CNPlayHub2' && github.ref == 'refs/heads/feature/transfer-history-pubg-size-20261114'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -305,8 +305,8 @@ jobs:
           python -m PyInstaller --clean --noconfirm build_full.spec
           if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
 
-          $bundleDir = Join-Path $PWD 'dist\KAFIA_NET_CONTROL_PRO'
-          $exe = Join-Path $bundleDir 'KAFIA_NET_CONTROL_PRO.exe'
+          $bundleDir = Join-Path $PWD 'dist\CN_PLAYHUB'
+          $exe = Join-Path $bundleDir 'CN_PLAYHUB.exe'
           if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
             throw "Self-contained app was not produced: $exe"
           }
@@ -324,8 +324,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $bundleDir = Join-Path $PWD 'dist\KAFIA_NET_CONTROL_PRO'
-          $exe = Join-Path $bundleDir 'KAFIA_NET_CONTROL_PRO.exe'
+          $bundleDir = Join-Path $PWD 'dist\CN_PLAYHUB'
+          $exe = Join-Path $bundleDir 'CN_PLAYHUB.exe'
 
           if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
             throw "Self-contained EXE is missing: $exe"
@@ -378,7 +378,7 @@ jobs:
           Write-Host 'NO EXTERNAL PYTHON RUNTIME PATH REQUIRED' -ForegroundColor Green
           Write-Host ("EXE SHA256: {0}" -f (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)
           $androidSupport = Join-Path $bundleDir '_internal\android_support'
-          foreach ($supportFile in @('Shizuku.apk', 'KafiaNetShizukuBridge.apk')) {
+          foreach ($supportFile in @('Shizuku.apk', 'CNPlayHubShizukuBridge.apk')) {
             $supportPath = Join-Path $androidSupport $supportFile
             if (-not (Test-Path -LiteralPath $supportPath -PathType Leaf)) {
               throw "Bundled Android support file is missing: $supportFile"
@@ -398,7 +398,7 @@ jobs:
           QT_QUICK_BACKEND: software
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = Join-Path $PWD 'dist\KAFIA_NET_CONTROL_PRO\KAFIA_NET_CONTROL_PRO.exe'
+          $exe = Join-Path $PWD 'dist\CN_PLAYHUB\CN_PLAYHUB.exe'
 
           $psi = New-Object System.Diagnostics.ProcessStartInfo
           $psi.FileName = $exe
@@ -425,7 +425,7 @@ jobs:
           QT_QUICK_BACKEND: software
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = Join-Path $PWD 'dist\KAFIA_NET_CONTROL_PRO\KAFIA_NET_CONTROL_PRO.exe'
+          $exe = Join-Path $PWD 'dist\CN_PLAYHUB\CN_PLAYHUB.exe'
           $psi = New-Object System.Diagnostics.ProcessStartInfo
           $psi.FileName = $exe
           $psi.Arguments = '--protected-build-smoke-test'
@@ -460,9 +460,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $bundleDir = Join-Path $PWD 'dist\KAFIA_NET_CONTROL_PRO'
-          $zip = Join-Path $PWD 'KAFIA_NET_CONTROL_PRO_SelfContained_Portable.zip'
-          if (-not (Test-Path -LiteralPath (Join-Path $bundleDir 'KAFIA_NET_CONTROL_PRO.exe') -PathType Leaf)) {
+          $bundleDir = Join-Path $PWD 'dist\CN_PLAYHUB'
+          $zip = Join-Path $PWD 'CN_PLAYHUB_Portable.zip'
+          if (-not (Test-Path -LiteralPath (Join-Path $bundleDir 'CN_PLAYHUB.exe') -PathType Leaf)) {
             throw 'Self-contained application is missing before portable packaging.'
           }
           if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
@@ -478,7 +478,7 @@ jobs:
               throw "Portable archive looks incomplete: only $($archive.Entries.Count) entries."
             }
             $requiredEntries = @(
-              'KAFIA_NET_CONTROL_PRO.exe',
+              'CN_PLAYHUB.exe',
               '_internal/python314.dll',
               '_internal/PySide6/Qt6Core.dll',
               '_internal/platform-tools/adb.exe'
@@ -498,8 +498,8 @@ jobs:
             throw "Portable ZIP is unexpectedly small: $($zipItem.Length) bytes."
           }
           $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-          "SHA256  KAFIA_NET_CONTROL_PRO_SelfContained_Portable.zip  $hash" |
-            Set-Content -LiteralPath 'KAFIA_NET_CONTROL_PRO_SelfContained_Portable_SHA256.txt' -Encoding ascii
+          "SHA256  CN_PLAYHUB_Portable.zip  $hash" |
+            Set-Content -LiteralPath 'CN_PLAYHUB_Portable_SHA256.txt' -Encoding ascii
           Write-Host ("Portable package size: {0:N2} MB" -f ((Get-Item -LiteralPath $zip).Length / 1MB))
           Write-Host ("Portable package SHA256: {0}" -f $hash)
 
@@ -507,8 +507,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $portable = 'KAFIA_NET_CONTROL_PRO_SelfContained_Portable.zip'
-          $checksum = 'KAFIA_NET_CONTROL_PRO_SelfContained_Portable_SHA256.txt'
+          $portable = 'CN_PLAYHUB_Portable.zip'
+          $checksum = 'CN_PLAYHUB_Portable_SHA256.txt'
           foreach ($file in @($portable, $checksum)) {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
               throw "Portable release file is missing: $file"
@@ -536,13 +536,15 @@ jobs:
           @'
           [Setup]
           AppId={{DCE1D2AB-50A0-49A0-9ED1-8DA445E54C91}
-          AppName=KAFIA NET CONTROL PRO
+          AppName=CN PlayHub
           AppVersion=1.4.0
-          AppPublisher=KAFIA NET CONTROL PRO
-          DefaultDirName={autopf}\KAFIA NET CONTROL PRO
-          DefaultGroupName=KAFIA NET CONTROL PRO
+          AppPublisher=CN PlayHub
+          SetupIconFile=assets\app_icon.ico
+          UninstallDisplayIcon={app}\CN_PLAYHUB.exe
+          DefaultDirName={autopf}\CN PlayHub
+          DefaultGroupName=CN PlayHub
           OutputDir=installer
-          OutputBaseFilename=KAFIA_NET_CONTROL_PRO_SelfContained_Setup
+          OutputBaseFilename=CN_PLAYHUB_Setup
           Compression=lzma2
           SolidCompression=yes
           ArchitecturesInstallIn64BitMode=x64compatible
@@ -551,14 +553,14 @@ jobs:
           WizardStyle=modern
 
           [Files]
-          Source: "dist\KAFIA_NET_CONTROL_PRO\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+          Source: "dist\CN_PLAYHUB\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
           [Icons]
-          Name: "{autodesktop}\KAFIA NET CONTROL PRO"; Filename: "{app}\KAFIA_NET_CONTROL_PRO.exe"
-          Name: "{group}\KAFIA NET CONTROL PRO"; Filename: "{app}\KAFIA_NET_CONTROL_PRO.exe"
+          Name: "{autodesktop}\CN PlayHub"; Filename: "{app}\CN_PLAYHUB.exe"
+          Name: "{group}\CN PlayHub"; Filename: "{app}\CN_PLAYHUB.exe"
 
           [Run]
-          Filename: "{app}\KAFIA_NET_CONTROL_PRO.exe"; Description: "تشغيل KAFIA NET CONTROL PRO"; Flags: nowait postinstall skipifsilent
+          Filename: "{app}\CN_PLAYHUB.exe"; Description: "تشغيل CN PlayHub"; Flags: nowait postinstall skipifsilent
           '@ | Set-Content -LiteralPath 'installer.iss' -Encoding utf8
 
           $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
@@ -566,7 +568,7 @@ jobs:
           & $iscc 'installer.iss'
           if ($LASTEXITCODE -ne 0) { throw 'Compressed installer build failed.' }
 
-          $installer = Join-Path $PWD 'installer\KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe'
+          $installer = Join-Path $PWD 'installer\CN_PLAYHUB_Setup.exe'
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
             throw 'Self-contained installer was not produced.'
           }
@@ -577,9 +579,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $installer = 'installer\KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe'
+          $installer = 'installer\CN_PLAYHUB_Setup.exe'
           $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
-          "SHA256  KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe  $hash" |
+          "SHA256  CN_PLAYHUB_Setup.exe  $hash" |
             Set-Content -LiteralPath 'installer\SHA256SUMS.txt' -Encoding ascii
 
       - name: Publish Windows downloads to GitHub Release
@@ -590,14 +592,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          $tag = 'kafianet-control-pro-windows-latest'
-          $releaseTitle = 'KAFIA NET CONTROL PRO - Final Windows (Latest)'
+          $tag = 'cn-playhub-windows-latest'
+          $releaseTitle = 'CN PlayHub - Final Windows (Latest)'
 
           $assets = @(
-            'installer/KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe',
+            'installer/CN_PLAYHUB_Setup.exe',
             'installer/SHA256SUMS.txt',
-            'KAFIA_NET_CONTROL_PRO_SelfContained_Portable.zip',
-            'KAFIA_NET_CONTROL_PRO_SelfContained_Portable_SHA256.txt'
+            'CN_PLAYHUB_Portable.zip',
+            'CN_PLAYHUB_Portable_SHA256.txt'
           )
           foreach ($asset in $assets) {
             if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
@@ -613,7 +615,7 @@ jobs:
           $releaseExists = @($releaseList | Where-Object { $_.tagName -eq $tag }).Count -gt 0
 
           if (-not $releaseExists) {
-            gh release create $tag --target $env:GITHUB_SHA --title $releaseTitle --notes 'KAFIA NET CONTROL PRO self-contained Windows installer and portable package. Android Shizuku helper APK is bundled in the Windows package. Built and smoke-tested by GitHub Actions.' --prerelease
+            gh release create $tag --target $env:GITHUB_SHA --title $releaseTitle --notes 'CN PlayHub self-contained Windows installer and portable package. Android Shizuku helper APK is bundled in the Windows package. Built and smoke-tested by GitHub Actions.' --prerelease
             if ($LASTEXITCODE -ne 0) { throw 'Could not create the Windows latest release.' }
           } else {
             # Move only the dedicated Windows latest tag to this tested commit.
@@ -630,9 +632,9 @@ jobs:
           $releaseBeforePublish = $releaseBeforePublishRaw | ConvertFrom-Json
           $existingAssetNames = @($releaseBeforePublish.assets | ForEach-Object { $_.name })
           foreach ($retiredAsset in @(
-            'KAFIA_NET_CONTROL_PRO_Bundle_Manifest.json',
-            'KAFIA_NET_CONTROL_PRO_Update.zip',
-            'KAFIA_NET_CONTROL_PRO_Update_SHA256.txt'
+            'CN_PLAYHUB_Bundle_Manifest.json',
+            'CN_PLAYHUB_Update.zip',
+            'CN_PLAYHUB_Update_SHA256.txt'
           )) {
             if ($existingAssetNames -contains $retiredAsset) {
               gh release delete-asset $tag $retiredAsset --yes
@@ -648,19 +650,19 @@ jobs:
           $published = $publishedRaw | ConvertFrom-Json
           $publishedNames = @($published.assets | ForEach-Object { $_.name })
           foreach ($asset in @(
-            'KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe',
+            'CN_PLAYHUB_Setup.exe',
             'SHA256SUMS.txt',
-            'KAFIA_NET_CONTROL_PRO_SelfContained_Portable.zip',
-            'KAFIA_NET_CONTROL_PRO_SelfContained_Portable_SHA256.txt'
+            'CN_PLAYHUB_Portable.zip',
+            'CN_PLAYHUB_Portable_SHA256.txt'
           )) {
             if ($publishedNames -notcontains $asset) {
               throw "Windows release is missing uploaded asset: $asset"
             }
           }
           foreach ($retiredAsset in @(
-            'KAFIA_NET_CONTROL_PRO_Bundle_Manifest.json',
-            'KAFIA_NET_CONTROL_PRO_Update.zip',
-            'KAFIA_NET_CONTROL_PRO_Update_SHA256.txt'
+            'CN_PLAYHUB_Bundle_Manifest.json',
+            'CN_PLAYHUB_Update.zip',
+            'CN_PLAYHUB_Update_SHA256.txt'
           )) {
             if ($publishedNames -contains $retiredAsset) {
               throw "Obsolete update-only asset remains in the Windows release: $retiredAsset"

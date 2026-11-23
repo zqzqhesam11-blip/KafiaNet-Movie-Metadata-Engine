@@ -1,4 +1,4 @@
-name: KafiaNet Control Pro - Build and Validate Bundled Shizuku Helper
+name: CN PlayHub - Build and Validate Bundled Shizuku Helper
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: kafianet-control-pro-shizuku-helper-validation
+  group: cn-playhub-shizuku-helper-validation
   cancel-in-progress: false
 
 jobs:

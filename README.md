@@ -1,8 +1,8 @@
-# KAFIA NET CONTROL PRO — self-contained Windows build
+# CN PlayHub — self-contained Windows build
 
 The released installer is built from the current branch using PyInstaller. Python, PySide6, Qt DLLs, Qt Quick/QML runtime modules, ADB, application logic, QML screens, game images and game metadata are bundled or embedded; the installed application does not need an external Python runtime under D:\games\py.
 
-The Android fallback is bundled into the Windows build. Direct ADB is tried first for every phone; only a phone that rejects writes to Android/data receives the Shizuku APK and KafiaNet companion when they are missing. Android may require approval for Shizuku and a user-selected folder grant. Shizuku without Root runs as ADB Shell and cannot override every Android/OEM storage restriction.
+The Android fallback is bundled into the Windows build. Direct ADB is tried first for every phone; only a phone that rejects writes to Android/data receives the Shizuku APK and CN PlayHub companion when they are missing. Android may require approval for Shizuku and a user-selected folder grant. Shizuku without Root runs as ADB Shell and cannot override every Android/OEM storage restriction.
 
 ## UI and build verification
 
@@ -16,7 +16,7 @@ The installer is self-contained, but no locally distributed executable can be gu
 
 ## OEM compatibility diagnostics
 
-The Settings page provides an optional, persisted, read-only ADB compatibility check. It reads the connected phone's manufacturer, model, Android version, ADB shell identity, Shizuku package presence, server process visibility, and KafiaNet helper presence. It does not write to the phone, change developer settings, inject permission denials, or emulate MIUI/ColorOS/OxygenOS. Manufacturer-specific security toggles cannot be verified reliably from a different OEM's Android build; the page identifies the documented setting where applicable and asks the user to verify its actual state on that phone.
+The Settings page provides an optional, persisted, read-only ADB compatibility check. It reads the connected phone's manufacturer, model, Android version, ADB shell identity, Shizuku package presence, server process visibility, and CN PlayHub helper presence. It does not write to the phone, change developer settings, inject permission denials, or emulate MIUI/ColorOS/OxygenOS. Manufacturer-specific security toggles cannot be verified reliably from a different OEM's Android build; the page identifies the documented setting where applicable and asks the user to verify its actual state on that phone.
 
 ## Official Android Platform-Tools
 

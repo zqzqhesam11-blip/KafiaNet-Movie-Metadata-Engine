@@ -25,7 +25,7 @@ android {
     }
 
     lint {
-        // This helper is sideloaded by KafiaNet, not distributed through Google Play.
+        // This helper is sideloaded by CN PlayHub, not distributed through Google Play.
         // Target 29 intentionally preserves the legacy SAF picker behavior for Android/data.
         disable 'ExpiredTargetSdkVersion'
     }

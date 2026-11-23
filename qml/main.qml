@@ -15,7 +15,7 @@ ApplicationWindow {
     minimumWidth: 1100
     minimumHeight: 700
 
-    title: "كافيه نت هشام الريمي"
+    title: "CN PlayHub"
 
     color: "#070910"
 

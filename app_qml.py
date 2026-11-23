@@ -25,7 +25,7 @@ for _stream in (sys.stdout, sys.stderr):
 os.environ["QT_QUICK_CONTROLS_STYLE"] = "Fusion"
 
 from PySide6.QtCore import QObject, Signal, Slot, Property, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import QApplication, QFileDialog
 from PySide6.QtQml import QQmlApplicationEngine
 
@@ -151,7 +151,7 @@ def build_shizuku_apk_path():
 
 
 def build_shizuku_helper_apk_path():
-    return BASE_DIR / "android_support" / "KafiaNetShizukuBridge.apk"
+    return BASE_DIR / "android_support" / "CNPlayHubShizukuBridge.apk"
 
 
 def _read_axml_package_name(manifest_bytes):
@@ -1047,7 +1047,7 @@ class AppController(QObject):
                         "المصدر والفلاشة على نفس وحدة التخزين؛ اختر مصدرًا من قرص آخر."
                     )
                     continue
-                destination = target_root / "KAFIA NET CONTROL PRO" / name
+                destination = target_root / "CN PlayHub" / name
             else:
                 destination = remote_destination
 
@@ -2232,9 +2232,9 @@ class AppController(QObject):
             lines.extend([
                 "",
                 "مهم بخصوص Android/data:",
-                "يبدأ KafiaNet بمحاولة ADB مباشرة، ولا يثبت MT Manager أو Shizuku قبل النسخ.",
-                "عند رفض ADB للكتابة فقط، يثبت/يفتح Shizuku ومساعد KafiaNet على ذلك الهاتف. المساعد الحالي لا يطلب اختيار مجلد عبر SAF؛ تفاعله هو طلب إذن Shizuku عندما لا يكون ممنوحاً مسبقاً.",
-                "إذا اكتمل نقل ADB ثم فشل فقط ضبط صلاحيات ما بعد النسخ، يعرض KafiaNet هذا الخطأ منفصلًا ولا يثبت Shizuku؛ فالمساعد مخصص فقط لرفض الكتابة المباشر إلى Android/data.",
+                "يبدأ CN PlayHub بمحاولة ADB مباشرة، ولا يثبت MT Manager أو Shizuku قبل النسخ.",
+                "عند رفض ADB للكتابة فقط، يثبت/يفتح Shizuku ومساعد CN PlayHub على ذلك الهاتف. المساعد الحالي لا يطلب اختيار مجلد عبر SAF؛ تفاعله هو طلب إذن Shizuku عندما لا يكون ممنوحاً مسبقاً.",
+                "إذا اكتمل نقل ADB ثم فشل فقط ضبط صلاحيات ما بعد النسخ، يعرض CN PlayHub هذا الخطأ منفصلًا ولا يثبت Shizuku؛ فالمساعد مخصص فقط لرفض الكتابة المباشر إلى Android/data.",
             ])
 
         if "kafianet_shizuku_android16_userservice_incompatible" in raw_error.lower():
@@ -2242,7 +2242,7 @@ class AppController(QObject):
                 "",
                 "توافق خدمة Shizuku:",
                 "• بعض تقارير المطورين وصفت فشل UserService مع Shizuku 13.6.0 على Android 16/HyperOS. هذا لا يعني أن كل أجهزة Xiaomi متأثرة.",
-                "• لم يغيّر KafiaNet إصدار Shizuku الموجود ولم يحذفه تلقائيًا؛ افحص إصدار Shizuku وسجل الخطأ قبل أي تحديث أو تخفيض.",
+                "• لم يغيّر CN PlayHub إصدار Shizuku الموجود ولم يحذفه تلقائيًا؛ افحص إصدار Shizuku وسجل الخطأ قبل أي تحديث أو تخفيض.",
             ])
         if any(marker in raw_error.lower() for marker in (
             "kafianet_shizuku_destination_write_denied",
@@ -3027,7 +3027,7 @@ class AppController(QObject):
                     )
                     continue
 
-                local_destination = target_root / "KAFIA NET CONTROL PRO" / game_name
+                local_destination = target_root / "CN PlayHub" / game_name
                 if selected_game_version:
                     local_destination = local_destination / selected_game_version
                 operation = {
@@ -3966,16 +3966,25 @@ class AppController(QObject):
 
 
 def main():
-    print("STARTING KAFIA NET CONTROL PRO")
+    print("STARTING CN PLAYHUB")
 
     app = QApplication(sys.argv)
+    app.setApplicationName("CN PlayHub")
+    app.setApplicationDisplayName("CN PlayHub")
+    app.setOrganizationName("CN PlayHub")
     engine = QQmlApplicationEngine()
 
     try:
         import ui_resources_rc
+        app_icon = QIcon(":/assets/app_icon.png")
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
         qml_entry = QUrl("qrc:/qml/main.qml")
         print("LOADING EMBEDDED QML:", qml_entry.toString())
     except ImportError:
+        app_icon_path = BASE_DIR / "assets" / "app_icon.png"
+        if app_icon_path.is_file():
+            app.setWindowIcon(QIcon(str(app_icon_path)))
         qml_entry = QUrl.fromLocalFile(str(BASE_DIR / "qml" / "main.qml"))
         print("LOADING SOURCE QML:", qml_entry.toString())
 
