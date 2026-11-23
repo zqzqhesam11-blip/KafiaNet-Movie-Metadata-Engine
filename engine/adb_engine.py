@@ -850,7 +850,7 @@ class ADBEngine(QObject):
             destination = destination.rstrip("/")
 
             # --------------------------------------------------------
-            # PRE-FLIGHT DESTINATION WRITE CHECK
+            # PRE-FLIGHT DESTINATION DIRECTORY CHECK
             # PUBG Saved must already exist. Never create Saved or its parents.
             # --------------------------------------------------------
             check_path = destination.rstrip("/") or destination
@@ -876,7 +876,7 @@ class ADBEngine(QObject):
                 "not enough space",
             )
 
-            print("ADB DESTINATION WRITE CHECK:", check_path)
+            print("ADB DESTINATION DIRECTORY CHECK:", check_path)
 
             if not is_saved_destination:
                 # Existing non-Saved game destinations retain their current setup behavior.
@@ -912,7 +912,7 @@ class ADBEngine(QObject):
                     self.finished.emit(False, failure)
                     return
 
-            # Saved must already exist. Do not create, write, chmod, or remove anything in that root.
+            # Saved must already exist. Leave its existing contents untouched until the actual copy starts.
             # ADB may be unable to inspect a protected Android/data path; route that case to
             # Shizuku, which performs its own read-only destination check before copying.
             if is_saved_destination and not self._remote_directory_exists(device, check_path):
