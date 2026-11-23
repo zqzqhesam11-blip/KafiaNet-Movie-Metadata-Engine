@@ -271,7 +271,7 @@ def test_usb_copy_target_routes_to_local_drive_with_one_unit():
         assert operation["units"] == 1
         assert Path(operation["source"]) == payload
         assert Path(operation["destination"]) == (
-            usb_root / "KAFIA NET CONTROL PRO" / "PUBG Mobile"
+            usb_root / "CN PlayHub" / "PUBG Mobile"
         )
         assert operation["phase"] == "local_usb_copy"
 
@@ -285,7 +285,7 @@ def test_local_usb_transfer_engine_copies_files_and_checks_free_space():
         source = root / "source"
         (source / "Paks").mkdir(parents=True)
         (source / "Paks" / "data.pak").write_bytes(b"usb-copy-payload")
-        destination = root / "USB" / "KAFIA NET CONTROL PRO" / "PUBG Mobile"
+        destination = root / "USB" / "CN PlayHub" / "PUBG Mobile"
 
         engine = app_qml.TransferEngine()
         completed = []
@@ -2526,7 +2526,7 @@ def test_paths_and_ui():
     assert '["-s", device, "uninstall", helper_package]' in engine_source
     assert '"signature mismatch" in detail' in engine_source
     assert '"signatures do not match" in detail' in engine_source
-    assert "KafiaNetShizukuBridge.apk" in Path(".github/workflows/build-self-contained-installer.yml").read_text(encoding="utf-8")
+    assert "CNPlayHubShizukuBridge.apk" in Path(".github/workflows/build-self-contained-installer.yml").read_text(encoding="utf-8")
     transfer_user_java = Path(
         "android-helper/app/src/main/java/com/kafianet/shizukubridge/TransferUserService.java"
     ).read_text(encoding="utf-8")
@@ -2735,12 +2735,17 @@ def test_paths_and_ui():
 
     # Only the self-contained installer workflow publishes a release build.
     assert "PyInstaller" in workflow
+    assert "CN_PLAYHUB_Setup.exe" in workflow
+    assert "SetupIconFile=assets\\app_icon.ico" in workflow
+    assert 'title: "CN PlayHub"' in qml
+    assert 'QIcon(":/assets/app_icon.png")' in current
+    assert 'icon="assets/app_icon.ico"' in spec
     assert "pyside6-rcc" in workflow
     assert "ui_resources_rc" in workflow
     assert "python314.dll" in workflow
     assert "Qt6Core.dll" in workflow
     assert "--protected-build-smoke-test" in workflow
-    assert "KAFIA_NET_CONTROL_PRO_SelfContained_Setup.exe" in workflow
+    assert "CN_PLAYHUB_Setup.exe" in workflow
     assert "Download official PUBG MOBILE FLASH icon" in workflow
     assert "Commit downloaded official PUBG MOBILE FLASH icon to project" in workflow
     assert "play-lh.googleusercontent.com" in workflow
