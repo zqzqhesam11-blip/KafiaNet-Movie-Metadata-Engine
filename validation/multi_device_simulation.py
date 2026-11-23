@@ -1732,7 +1732,7 @@ def test_shizuku_fallback_only_after_android_data_denial():
 
         engine.finish(False, "remote secure_mkdirs failed: Permission denied")
         assert any(
-            "جاري استخدام Shizuku والمساعد إن كانا مثبتين" in message
+            "جاري نسخ الملفات عبر شيزوكو" in message
             for message in messages
         )
         assert operation["phase"] == "shizuku_prepare"
