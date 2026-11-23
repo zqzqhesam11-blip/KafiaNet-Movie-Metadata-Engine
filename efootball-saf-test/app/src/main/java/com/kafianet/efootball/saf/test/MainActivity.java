@@ -615,8 +615,8 @@ public final class MainActivity extends Activity {
             int value = input.read();
             if (value < 0) throw new EOFException("connection closed before HTTP headers");
             output.write(value);
-            if ((state == 0 || state == 2) && value == '\\r') state++;
-            else if ((state == 1 || state == 3) && value == '\\n') state++;
+            if ((state == 0 || state == 2) && value == '\r') state++;
+            else if ((state == 1 || state == 3) && value == '\n') state++;
             else state = value == '\\r' ? 1 : 0;
             if (state == 4) return output.toString("ISO-8859-1");
         }
