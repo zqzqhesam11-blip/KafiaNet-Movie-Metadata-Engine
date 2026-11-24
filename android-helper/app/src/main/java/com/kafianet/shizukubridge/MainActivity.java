@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.provider.DocumentsContract;
+import android.content.UriPermission;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -42,6 +44,12 @@ import rikka.shizuku.Shizuku;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_SHIZUKU = 7301;
+    private static final int REQUEST_PUBG_TREE = 7302;
+    private static final String EXTRA_KAFIANET_ACTION = "kafianet_action";
+    private static final String ACTION_REQUEST_PUBG_TREE = "request_pubg_tree";
+    private static final String PUBG_PACKAGE = "com.tencent.ig";
+    private static final String PUBG_TREE_PREFS = "kafianet_storage_permissions";
+    private static final String PUBG_TREE_URI_KEY = "pubg_tree_uri";
     private static final int SERVER_PORT = 18765;
     private static final long SHIZUKU_PERMISSION_WAIT_TIMEOUT_MS = 15L * 60L * 1000L;
 
@@ -62,6 +70,9 @@ public final class MainActivity extends Activity {
     private volatile boolean serviceBound = false;
     private volatile boolean permissionRequestInFlight = false;
     private volatile long permissionRequestStartedAt = 0L;
+    private volatile boolean bridgeModeActive = false;
+    private boolean shizukuListenersRegistered = false;
+    private boolean httpServerStarted = false;
 
     // Poll permission state if the first-run Shizuku result callback is delayed.
     // This resumes the current transfer as soon as the user grants permission.
@@ -187,12 +198,11 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(createContent());
         readSession(getIntent());
-        startHttpServer();
-        // Register result/death callbacks before the sticky listener: the sticky
-        // callback can run synchronously when Shizuku is already connected.
-        Shizuku.addRequestPermissionResultListener(permissionResult);
-        Shizuku.addBinderDeadListener(binderDead);
-        Shizuku.addBinderReceivedListenerSticky(binderReceived);
+        if (isPubgTreeRequest(getIntent())) {
+            requestPubgTreeAccess();
+        } else {
+            activateBridgeMode();
+        }
     }
 
     @Override
@@ -200,11 +210,151 @@ public final class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         readSession(intent);
+        if (isPubgTreeRequest(intent)) {
+            requestPubgTreeAccess();
+            return;
+        }
+        activateBridgeMode();
         if (userService != null && Shizuku.pingBinder()) {
             prepareDestinationAccess();
         } else {
             initializeShizuku();
         }
+    }
+
+    private boolean isPubgTreeRequest(Intent intent) {
+        return intent != null
+                && ACTION_REQUEST_PUBG_TREE.equals(
+                        intent.getStringExtra(EXTRA_KAFIANET_ACTION)
+                );
+    }
+
+    private void activateBridgeMode() {
+        bridgeModeActive = true;
+        if (!httpServerStarted) {
+            httpServerStarted = true;
+            startHttpServer();
+        }
+        if (!shizukuListenersRegistered) {
+            shizukuListenersRegistered = true;
+            // Register the result/death callbacks before the sticky binder listener:
+            // the sticky callback may run synchronously when Shizuku is already connected.
+            Shizuku.addRequestPermissionResultListener(permissionResult);
+            Shizuku.addBinderDeadListener(binderDead);
+            Shizuku.addBinderReceivedListenerSticky(binderReceived);
+        }
+    }
+
+    private void requestPubgTreeAccess() {
+        if (!PUBG_PACKAGE.equals(targetPackage)) {
+            showMessage("طلب الإذن مخصص لمجلد PUBG Mobile: " + PUBG_PACKAGE);
+            return;
+        }
+
+        try {
+            Uri initialUri = DocumentsContract.buildDocumentUri(
+                    "com.android.externalstorage.documents",
+                    "primary:Android/data/" + PUBG_PACKAGE
+            );
+            Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            picker.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
+            picker.addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                            | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+            );
+            showMessage("اختر مجلد com.tencent.ig ثم اضغط «استخدام هذا المجلد» لمنح KafiaNet الإذن.");
+            startActivityForResult(picker, REQUEST_PUBG_TREE);
+        } catch (Throwable failure) {
+            android.util.Log.e("KafiaNetBridge", "Could not open PUBG SAF tree picker", failure);
+            showMessage("تعذر فتح نافذة اختيار مجلد PUBG: " + failure.getMessage());
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_PUBG_TREE) return;
+
+        if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+            showMessage("تم إلغاء طلب الإذن. لم يتم تغيير أي ملفات أو حذف نسخة الجذر.");
+            return;
+        }
+
+        Uri selectedTree = data.getData();
+        try {
+            if (!DocumentsContract.isTreeUri(selectedTree)) {
+                showMessage("الاختيار غير صالح: لم يُرجع النظام صلاحية مجلد كاملة.");
+                return;
+            }
+
+            String selectedDocumentId = DocumentsContract.getTreeDocumentId(selectedTree);
+            String expectedDocumentId = "primary:Android/data/" + PUBG_PACKAGE;
+            if (!"com.android.externalstorage.documents".equals(selectedTree.getAuthority())
+                    || !expectedDocumentId.equals(selectedDocumentId)) {
+                showMessage(
+                        "لم يتم حفظ الإذن. اختر مجلد com.tencent.ig نفسه، وليس Android/data أو مجلداً آخر."
+                );
+                return;
+            }
+
+            int grantFlags = data.getFlags() & (
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            );
+            if ((grantFlags & Intent.FLAG_GRANT_READ_URI_PERMISSION) == 0
+                    || (grantFlags & Intent.FLAG_GRANT_WRITE_URI_PERMISSION) == 0) {
+                showMessage("النظام لم يمنح صلاحية القراءة والكتابة معاً؛ لم يتم اعتماد هذا الاختيار.");
+                return;
+            }
+
+            getContentResolver().takePersistableUriPermission(selectedTree, grantFlags);
+
+            boolean persisted = false;
+            for (UriPermission permission : getContentResolver().getPersistedUriPermissions()) {
+                if (selectedTree.equals(permission.getUri())
+                        && permission.isReadPermission()
+                        && permission.isWritePermission()) {
+                    persisted = true;
+                    break;
+                }
+            }
+            if (!persisted) {
+                showMessage("لم يستطع النظام حفظ صلاحية مجلد PUBG بشكل دائم. أعد المحاولة.");
+                return;
+            }
+
+            getSharedPreferences(PUBG_TREE_PREFS, MODE_PRIVATE)
+                    .edit()
+                    .putString(PUBG_TREE_URI_KEY, selectedTree.toString())
+                    .putString("pubg_package", PUBG_PACKAGE)
+                    .apply();
+
+            showMessage(
+                    "تم منح وحفظ إذن القراءة والكتابة لمجلد PUBG Mobile بنجاح.\n"
+                            + "يمكن الآن استخدام هذه الصلاحية في خطوة النقل التالية."
+            );
+            android.util.Log.i("KafiaNetBridge", "Persisted PUBG SAF tree grant: " + selectedTree);
+        } catch (Throwable failure) {
+            android.util.Log.e("KafiaNetBridge", "Could not persist PUBG SAF tree grant", failure);
+            showMessage("تعذر حفظ إذن مجلد PUBG: " + failure.getMessage());
+        }
+    }
+
+    private boolean hasPersistedPubgTreePermission() {
+        String stored = getSharedPreferences(PUBG_TREE_PREFS, MODE_PRIVATE)
+                .getString(PUBG_TREE_URI_KEY, "");
+        if (stored == null || stored.isEmpty()) return false;
+        Uri expectedUri = Uri.parse(stored);
+        for (UriPermission permission : getContentResolver().getPersistedUriPermissions()) {
+            if (expectedUri.equals(permission.getUri())
+                    && permission.isReadPermission()
+                    && permission.isWritePermission()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void readSession(Intent intent) {
@@ -661,6 +811,7 @@ public final class MainActivity extends Activity {
         result.put("model", android.os.Build.MODEL);
         result.put("sdk", android.os.Build.VERSION.SDK_INT);
         result.put("ready", state.startsWith("ready_") && serviceReady);
+        result.put("pubgTreePermission", hasPersistedPubgTreePermission());
         return result;
     }
 
@@ -732,9 +883,11 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        Shizuku.removeBinderReceivedListener(binderReceived);
-        Shizuku.removeBinderDeadListener(binderDead);
-        Shizuku.removeRequestPermissionResultListener(permissionResult);
+        if (shizukuListenersRegistered) {
+            Shizuku.removeBinderReceivedListener(binderReceived);
+            Shizuku.removeBinderDeadListener(binderDead);
+            Shizuku.removeRequestPermissionResultListener(permissionResult);
+        }
         main.removeCallbacks(permissionGrantMonitor);
         try {
             if (serverSocket != null) serverSocket.close();
