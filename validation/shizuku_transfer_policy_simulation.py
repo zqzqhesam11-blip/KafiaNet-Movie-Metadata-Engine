@@ -20,7 +20,7 @@ saved = (
 )
 
 check(
-    "remote secure_mkdirs permission denial activates Shizuku",
+    "remote secure_mkdirs permission denial requests the legacy root dialog",
     AppController._is_android_data_permission_denial(
         saved,
         "KAFIANET_ANDROID_DATA_PERMISSION_DENIED: remote secure_mkdirs failed: Permission denied",
@@ -34,7 +34,7 @@ check(
     ),
 )
 check(
-    "remote open permission denial activates Shizuku",
+    "remote open permission denial requests the legacy root dialog",
     AppController._is_android_data_permission_denial(
         saved,
         "adb: error: failed to copy 'x' to 'y': remote open failed: Permission denied",
@@ -47,49 +47,49 @@ check(
     ),
 )
 check(
-    "Shizuku-confirmed missing Saved directory does not loop into fallback",
+    "Shizuku-confirmed missing Saved directory does not loop into the root dialog",
     not AppController._is_android_data_permission_denial(
         saved, "KAFIANET_SHIZUKU_DESTINATION_MISSING: Saved not found"
     ),
 )
 check(
-    "ordinary non-protected missing destination does not activate Shizuku",
+    "ordinary non-protected missing destination does not request the root dialog",
     not AppController._is_android_data_permission_denial(
         saved, "KAFIANET_DESTINATION_MISSING: مجلد الوجهة غير موجود"
     ),
 )
 check(
-    "no-space failure does not activate Shizuku",
+    "no-space failure does not request the root dialog",
     not AppController._is_android_data_permission_denial(
         saved, "KAFIANET_NO_SPACE: No space left on device"
     ),
 )
 check(
-    "generic permission denied without remote ADB marker does not activate Shizuku",
+    "generic permission denied without remote ADB marker does not request the root dialog",
     not AppController._is_android_data_permission_denial(
         saved, "Permission denied"
     ),
 )
 check(
-    "read-only filesystem does not activate Shizuku",
+    "read-only filesystem does not request the root dialog",
     not AppController._is_android_data_permission_denial(
         saved, "Read-only file system"
     ),
 )
 check(
-    "offline/unauthorized ADB does not activate Shizuku",
+    "offline/unauthorized ADB does not request the root dialog",
     not AppController._is_android_data_permission_denial(
         saved, "error: device offline"
     ),
 )
 check(
-    "permission denial outside Android/data does not activate Shizuku",
+    "permission denial outside Android/data does not request the root dialog",
     not AppController._is_android_data_permission_denial(
         "/storage/emulated/0/Download/Saved", "remote open failed: Permission denied"
     ),
 )
 check(
-    "read-only filesystem does not activate Shizuku",
+    "read-only filesystem does not request the root dialog",
     not AppController._is_android_data_permission_denial(
         saved, "Read-only file system"
     ),
