@@ -1796,111 +1796,98 @@ def test_secure_mkdirs_partial_directory_retry_is_scoped_to_saved():
     ) is None
 
 
-def test_shizuku_fallback_only_after_android_data_denial():
+def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     controller = make_controller()
-    original_shizuku = app_qml.build_shizuku_apk_path
-    original_helper = app_qml.build_shizuku_helper_apk_path
+    fallback_requests = []
+    controller.androidDataFallbackRequested.connect(
+        lambda *values: fallback_requests.append(values)
+    )
+    destination = "/sdcard/Android/data/com.tencent.ig/files/UE4Game/"
+    operation = dict(
+        rows(["SERIAL_A"])[0],
+        source="source-folder",
+        destination=destination,
+        target_package="com.tencent.ig",
+        shizuku_fallback_attempted=False,
+        phase="adb_direct",
+        source_label="اختبار",
+        source_root="source-root",
+    )
 
-    with TemporaryDirectory() as directory:
-        root = Path(directory)
-        shizuku_apk = root / "Shizuku.apk"
-        helper_apk = root / "KafiaNetShizukuBridge.apk"
-        shizuku_apk.write_bytes(b"shizuku-apk")
-        helper_apk.write_bytes(b"helper-apk")
-        app_qml.build_shizuku_apk_path = lambda: shizuku_apk
-        app_qml.build_shizuku_helper_apk_path = lambda: helper_apk
+    controller._start_operation(operation)
+    direct_engine = operation["engine"]
+    assert direct_engine.calls == [
+        ("push", "SERIAL_A", "source-folder", destination)
+    ]
 
-        messages = []
-        controller.messageChanged.connect(messages.append)
-        destination = "/sdcard/Android/data/com.tencent.ig/files/UE4Game/"
-        operation = dict(
-            rows(["SERIAL_A"])[0],
-            source="source-folder",
-            destination=destination,
-            target_package="com.tencent.ig",
-            shizuku_fallback_attempted=False,
-            phase="adb_direct",
-            source_label="اختبار",
-            source_root="source-root"
-        )
+    direct_engine.finish(False, "remote secure_mkdirs failed: Permission denied")
+    assert len(fallback_requests) == 1
+    serial, game_name, root_destination, reason = fallback_requests[0]
+    assert serial == "SERIAL_A"
+    assert game_name == "PUBG Mobile"
+    assert root_destination == "/sdcard/PUBG_Mobile/"
+    assert "Android/data" in reason
+    assert operation["phase"] == "awaiting_root_fallback"
+    assert operation["awaiting_root_fallback"] is True
+    assert operation["completed"] is True
+    assert next(
+        row for row in controller._operation_rows()
+        if row["serial"] == "SERIAL_A"
+    )["awaitingFallback"] is True
+    assert direct_engine.calls == [
+        ("push", "SERIAL_A", "source-folder", destination)
+    ]
 
-        controller._start_operation(operation)
-        engine = operation["engine"]
-        assert engine.calls == [
-            ("push", "SERIAL_A", "source-folder", destination)
-        ]
+    # The legacy dialog's affirmative action retries the same source at the
+    # game-specific public-storage root, without invoking Shizuku.
+    assert controller.copyToDeviceRoot("SERIAL_A") is True
+    root_engine = operation["engine"]
+    assert root_engine is not direct_engine
+    assert root_engine.calls == [
+        ("push", "SERIAL_A", "source-folder", "/sdcard/PUBG_Mobile/")
+    ]
+    assert operation["destination"] == "/sdcard/PUBG_Mobile/"
+    assert operation["original_destination"] == destination
+    assert operation["root_fallback_attempted"] is True
+    assert operation["awaiting_root_fallback"] is False
+    assert operation["completed"] is False
 
-        engine.finish(False, "remote secure_mkdirs failed: Permission denied")
-        assert any(
-            "جاري نسخ الملفات عبر شيزوكو" in message
-            for message in messages
-        )
-        assert operation["phase"] == "shizuku_prepare"
-        assert operation["shizuku_fallback_attempted"] is True
-        prepare = engine.calls[-1]
-        assert prepare[0] == "prepare_shizuku_bridge"
-        assert prepare[1] == "SERIAL_A"
-        assert prepare[2] == str(shizuku_apk)
-        assert prepare[3] == str(helper_apk)
-        assert prepare[5] == "com.tencent.ig"
-        assert prepare[6] == destination
+    root_engine.finish(True, "root copy complete")
+    assert operation["completed"] is True
+    assert operation["status"] == "اكتمل"
+    assert len(controller.getTransferHistory()) == 1
+    assert controller.getTransferHistory()[0]["status"] == "اكتمل"
 
-        import json
-        engine.finish(True, json.dumps({"port": 12345, "token": "session-token"}))
-        assert operation["phase"] == "shizuku_copy"
-        assert "staging_root" not in operation
-        assert engine.calls[-1] == (
-            "copy_via_shizuku_bridge",
-            "SERIAL_A",
-            "12345",
-            "session-token",
-            operation["shizuku_job_id"],
-            "source-folder",
-            destination,
-            "files/UE4Game"
-        )
+    # Direct ADB success and failures outside Android/data never show the prompt.
+    direct = dict(
+        rows(["SERIAL_B"])[0],
+        source="source-folder",
+        destination=destination,
+        target_package="com.tencent.ig",
+        phase="adb_direct",
+    )
+    controller._start_operation(direct)
+    direct_engine = direct["engine"]
+    direct_engine.finish(True, "direct complete")
+    assert len(fallback_requests) == 1
 
-        engine.finish(True, "Shizuku direct stream complete")
-        assert operation["completed"] is True
-        assert operation["status"] == "اكتمل"
-        assert len(controller.getTransferHistory()) == 1
-        assert controller.getTransferHistory()[0]["status"] == "اكتمل"
-
-        # Devices that accept direct ADB do not install or launch the fallback.
-        direct = dict(
-            rows(["SERIAL_B"])[0],
-            source="source-folder",
-            destination=destination,
-            target_package="com.tencent.ig",
-            shizuku_fallback_attempted=False,
-            phase="adb_direct"
-        )
-        controller._start_operation(direct)
-        direct_engine = direct["engine"]
-        assert direct_engine.calls == [
-            ("push", "SERIAL_B", "source-folder", destination)
-        ]
-        direct_engine.finish(True, "direct complete")
-        assert not any(call[0] == "prepare_shizuku_bridge" for call in direct_engine.calls)
-
-        # Errors outside Android/data do not activate Shizuku.
-        unrelated = dict(
-            rows(["SERIAL_C"])[0],
-            source="source-folder",
-            destination="/sdcard/GameData/",
-            target_package="",
-            shizuku_fallback_attempted=False,
-            phase="adb_direct"
-        )
-        controller._start_operation(unrelated)
-        unrelated_engine = unrelated["engine"]
-        unrelated_engine.finish(False, "Permission denied")
-        assert unrelated["completed"] is True
-        assert not any(call[0] == "prepare_shizuku_bridge" for call in unrelated_engine.calls)
-
-    app_qml.build_shizuku_apk_path = original_shizuku
-    app_qml.build_shizuku_helper_apk_path = original_helper
-
+    unrelated = dict(
+        rows(["SERIAL_C"])[0],
+        source="source-folder",
+        destination="/sdcard/GameData/",
+        target_package="",
+        phase="adb_direct",
+    )
+    controller._start_operation(unrelated)
+    unrelated_engine = unrelated["engine"]
+    unrelated_engine.finish(False, "Permission denied")
+    assert unrelated["completed"] is True
+    assert len(fallback_requests) == 1
+    assert not any(
+        call[0] == "prepare_shizuku_bridge"
+        for engine in FakeOperationEngine.instances
+        for call in engine.calls
+    )
 
 
 
@@ -2670,8 +2657,11 @@ def test_paths_and_ui():
     assert "def prepare_apps_before_copy(" not in engine_source
     assert '"bin.mt.plus"' not in engine_source
     assert "uid=2000" in engine_source
-    assert "androidDataFallback" not in qml
-    assert "نسخ إلى الجذر" not in qml
+    assert "function queueAndroidDataFallback" in qml
+    assert "function onAndroidDataFallbackRequested" in qml
+    assert "نسخ إلى الجذر" in qml
+    assert "def copyToDeviceRoot(" in current
+    assert "def declineRootFallback(" in current
     assert "build/android_support" in Path("build_full.spec").read_text(encoding="utf-8")
     assert '["-s", device, "install", "-r", apk_path]' in engine_source
     assert "install_failed_update_incompatible" in engine_source
@@ -3008,7 +2998,7 @@ def run_once():
     test_gta_copy_refuses_to_guess_unverified_package_id()
     test_copy_parts_are_one_sequential_device_operation()
     test_secure_mkdirs_partial_directory_retry_is_scoped_to_saved()
-    test_shizuku_fallback_only_after_android_data_denial()
+    test_legacy_root_fallback_prompt_only_after_android_data_denial()
     test_duplicate_completion(make_controller())
     test_process_ownership()
     test_windows_task_manager_policy_is_scoped_and_restored()
