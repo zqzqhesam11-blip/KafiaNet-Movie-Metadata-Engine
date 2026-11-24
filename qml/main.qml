@@ -309,6 +309,62 @@ ApplicationWindow {
     property string deviceCopyHelpTitle: "إرشادات إصلاح النسخ"
     property string deviceCopyHelpText: ""
 
+    property var androidDataFallbackQueue: []
+    property bool androidDataFallbackDialogActive: false
+    property string androidDataFallbackSerial: ""
+    property string androidDataFallbackGame: ""
+    property string androidDataFallbackDestination: ""
+    property string androidDataFallbackReason: ""
+
+    function queueAndroidDataFallback(serial, gameName, destination, reason) {
+        const queue = window.androidDataFallbackQueue.slice()
+        queue.push({
+            serial: String(serial || ""),
+            gameName: String(gameName || "اللعبة"),
+            destination: String(destination || "/sdcard/"),
+            reason: String(reason || "")
+        })
+        window.androidDataFallbackQueue = queue
+        window.openNextAndroidDataFallback()
+    }
+
+    function openNextAndroidDataFallback() {
+        if (window.androidDataFallbackDialogActive
+                || window.androidDataFallbackQueue.length === 0)
+            return
+
+        const queue = window.androidDataFallbackQueue.slice()
+        const next = queue.shift()
+        window.androidDataFallbackQueue = queue
+        window.androidDataFallbackSerial = next.serial
+        window.androidDataFallbackGame = next.gameName
+        window.androidDataFallbackDestination = next.destination
+        window.androidDataFallbackReason = next.reason
+        window.androidDataFallbackDialogActive = true
+        androidDataFallbackDialog.open()
+    }
+
+    function finishAndroidDataFallback(useRoot) {
+        const serial = window.androidDataFallbackSerial
+        if (!serial)
+            return
+
+        if (useRoot) {
+            if (!appController.copyToDeviceRoot(serial))
+                appController.declineRootFallback(serial)
+        } else {
+            appController.declineRootFallback(serial)
+        }
+
+        window.androidDataFallbackDialogActive = false
+        androidDataFallbackDialog.close()
+        window.androidDataFallbackSerial = ""
+        window.androidDataFallbackGame = ""
+        window.androidDataFallbackDestination = ""
+        window.androidDataFallbackReason = ""
+        Qt.callLater(window.openNextAndroidDataFallback)
+    }
+
     // =============================================================
     // MAIN
     // =============================================================
