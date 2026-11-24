@@ -20,7 +20,7 @@ saved = (
 )
 
 check(
-    "remote secure_mkdirs permission denial requests the legacy root dialog",
+    "remote secure_mkdirs permission denial qualifies for Shizuku fallback",
     AppController._is_android_data_permission_denial(
         saved,
         "KAFIANET_ANDROID_DATA_PERMISSION_DENIED: remote secure_mkdirs failed: Permission denied",
@@ -34,7 +34,7 @@ check(
     ),
 )
 check(
-    "remote open permission denial requests the legacy root dialog",
+    "remote open permission denial qualifies for Shizuku fallback",
     AppController._is_android_data_permission_denial(
         saved,
         "adb: error: failed to copy 'x' to 'y': remote open failed: Permission denied",
@@ -488,4 +488,16 @@ check(
     and "describeWriteFailure(error)" in helper_service,
 )
 
+check(
+    "remote read-only filesystem is not treated as a protected write permission denial",
+    not AppController._is_android_data_permission_denial(
+        saved, "adb: error: failed to copy 'x' to 'y': remote open failed: Read-only file system"
+    ),
+)
+check(
+    "Shizuku metadata EACCES/EPERM is not fatal and the actual writer decides",
+    "error.errno != OsConstants.EACCES" in helper_service
+    and "error.errno != OsConstants.EPERM" in helper_service
+    and "Let the actual writer report a precise EACCES/EPERM" in helper_service,
+)
 print("SHIZUKU TRANSFER POLICY SIMULATION: PASS")

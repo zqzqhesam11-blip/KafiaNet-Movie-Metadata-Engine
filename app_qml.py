@@ -2434,7 +2434,7 @@ class AppController(QObject):
 
         lowered = str(raw_message or "").lower()
         # ADB may print either "secure_mkdirs failed" or "secure_mkdirs() failed".
-        # Normalize the empty call suffix so both forms activate the same safe fallback.
+        # Normalize the empty call suffix so both forms activate the Shizuku fallback.
         lowered = lowered.replace("secure_mkdirs()", "secure_mkdirs")
         if "kafianet_android_data_permission_denied:" in lowered:
             return True
@@ -2457,7 +2457,6 @@ class AppController(QObject):
         permission_markers = (
             "permission denied",
             "access denied",
-            "read-only file system",
             "operation not permitted",
             "eacces",
             "errno 13",
@@ -2494,7 +2493,14 @@ class AppController(QObject):
 
         if not success and operation.get("kind") == "copy":
             operation["raw_error"] = str(message or "")
-            if operation.get("shizuku_fallback_attempted"):
+            if operation.get("root_fallback_attempted"):
+                original = str(operation.get("shizuku_original_error") or "")
+                message = (
+                    "فشل النسخ إلى جذر الذاكرة حتى بعد رفض ADB وShizuku.\\n"
+                    + str(message or "")
+                    + (("\\nخطأ ADB الأصلي: " + original) if original else "")
+                )
+            elif operation.get("shizuku_fallback_attempted"):
                 original = str(operation.get("shizuku_original_error") or "")
                 message = (
                     "فشل النسخ بعد رفض ADB وتجربة Shizuku.\\n"
