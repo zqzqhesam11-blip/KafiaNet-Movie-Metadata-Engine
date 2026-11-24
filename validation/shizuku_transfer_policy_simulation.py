@@ -524,4 +524,14 @@ check(
     and r'.replace("\\", "/")' in reconnect_source
     and r'.replace("\\\\", "/")' not in reconnect_source,
 )
+handoff_source = engine_source.split("SHIZUKU RESUME MODE:", 1)[1].split(
+    "if looks_like_transport_loss and resume_attempts >= 10", 1
+)[0]
+check(
+    "Shizuku resume transfers cleanup ownership before starting the replacement worker",
+    handoff_source.index("resume_handoff = True") < handoff_source.index(
+        "self.copy_via_shizuku_bridge("
+    )
+    and "except Exception:\\n                            resume_handoff = False" in handoff_source,
+)
 print("SHIZUKU TRANSFER POLICY SIMULATION: PASS")

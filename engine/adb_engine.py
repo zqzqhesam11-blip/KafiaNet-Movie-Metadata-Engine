@@ -3438,16 +3438,22 @@ exit 3
                         # Reuse the same helper session but create a fresh job.
                         # Its next batched size+mtime pass will skip every file
                         # already committed and resend only incomplete/changed files.
-                        self.copy_via_shizuku_bridge(
-                            device,
-                            str(resumed_port),
-                            session_token,
-                            secrets.token_hex(12),
-                            source_path,
-                            destination,
-                            target_relative,
-                        )
+                        # Transfer cleanup ownership before starting the new worker,
+                        # so a very fast all-files-skipped resume cannot race this flag.
                         resume_handoff = True
+                        try:
+                            self.copy_via_shizuku_bridge(
+                                device,
+                                str(resumed_port),
+                                session_token,
+                                secrets.token_hex(12),
+                                source_path,
+                                destination,
+                                target_relative,
+                            )
+                        except Exception:
+                            resume_handoff = False
+                            raise
                         return
                     except Exception as resume_error:
                         exc = RuntimeError(
