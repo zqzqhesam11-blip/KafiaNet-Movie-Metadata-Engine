@@ -1977,7 +1977,7 @@ class AppController(QObject):
     @staticmethod
     def _root_fallback_destination(game_name):
         folder = str(game_name or "GameData").strip()
-        for character in ('\\\\', '/', ':', '*', '?', '"', '<', '>', '|'):
+        for character in ('\\', '/', ':', '*', '?', '"', '<', '>', '|'):
             folder = folder.replace(character, "_")
         folder = folder.replace(" ", "_").strip("._")
         if not folder:
@@ -2010,7 +2010,7 @@ class AppController(QObject):
 
         reason = (
             str(message)
-            + "\\n\\nرسالة ADB الأصلية:\\n"
+            + "\n\nرسالة ADB الأصلية:\n"
             + raw_error
         )
         self.androidDataFallbackRequested.emit(
