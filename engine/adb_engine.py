@@ -5,6 +5,7 @@ import threading
 import time
 import ctypes
 import json
+import secrets
 import urllib.request
 import urllib.error
 import http.client
@@ -2988,17 +2989,151 @@ exit 3
             total_bytes += size
         return manifest, total_bytes
 
+    def _resume_shizuku_bridge_after_reconnect(
+        self, device, previous_port, session_token, destination
+    ):
+        """Re-establish Shizuku and its forwarded channel after the same device reconnects."""
+        if not self._device_is_connected(device):
+            if not self._wait_for_device_reconnect(device):
+                raise RuntimeError("تعذر استعادة اتصال الهاتف لاستكمال النقل عبر Shizuku.")
+
+        if self._cancel_event.is_set():
+            raise RuntimeError("تم إلغاء النقل أثناء انتظار إعادة توصيل الهاتف.")
+
+        start_result = self._run(
+            ["-s", device, "shell", self._build_shizuku_start_command()],
+            timeout=45,
+        )
+        start_output = (
+            str(start_result.stdout or "").strip()
+            + "\\n"
+            + str(start_result.stderr or "").strip()
+        ).strip()
+        if start_result.returncode != 0:
+            raise RuntimeError(
+                "KAFIANET_SHIZUKU_RECONNECT_SERVER_FAILED: "
+                + (start_output or "تعذر إعادة تشغيل خادم Shizuku.")
+            )
+
+        package_match = re.search(
+            r"/android/data/([^/]+)",
+            str(destination or "").replace("\\\\", "/"),
+            re.IGNORECASE,
+        )
+        if not package_match:
+            raise RuntimeError(
+                "KAFIANET_SHIZUKU_RECONNECT_PACKAGE_UNKNOWN: "
+                "تعذر استخراج Package ID من مسار Android/data."
+            )
+        package_name = package_match.group(1)
+
+        launch = self._run(
+            [
+                "-s", device, "shell", "am", "start",
+                "-n", "com.kafianet.shizukubridge/.MainActivity",
+                "--es", "token", session_token,
+                "--es", "package", package_name,
+                "--es", "destination", destination,
+            ],
+            timeout=30,
+        )
+        launch_output = (
+            str(launch.stdout or "").strip()
+            + "\\n"
+            + str(launch.stderr or "").strip()
+        ).strip()
+        if launch.returncode != 0 or "Error" in launch_output:
+            raise RuntimeError(
+                "KAFIANET_SHIZUKU_RECONNECT_HELPER_FAILED: "
+                + (launch_output or "تعذر إعادة فتح مساعد KafiaNet.")
+            )
+
+        try:
+            self._run(
+                ["-s", device, "forward", "--remove", f"tcp:{int(previous_port)}"],
+                timeout=15,
+            )
+        except Exception as exc:
+            print("SHIZUKU OLD FORWARD REMOVE WARNING:", device, exc)
+
+        forward = self._run(
+            ["-s", device, "forward", "tcp:0", "tcp:18765"],
+            timeout=20,
+        )
+        forward_output = str(forward.stdout or "").strip()
+        port_match = re.search(r"\\b(\\d{4,5})\\b", forward_output)
+        if forward.returncode != 0 or not port_match:
+            raise RuntimeError(
+                "KAFIANET_SHIZUKU_RECONNECT_FORWARD_FAILED: "
+                + str(forward.stderr or forward.stdout or "").strip()
+            )
+        local_port = int(port_match.group(1))
+        health_url = f"http://127.0.0.1:{local_port}/health"
+        deadline = time.monotonic() + 16 * 60
+        last_state = ""
+        while time.monotonic() < deadline:
+            if self._cancel_event.is_set():
+                raise RuntimeError("تم إلغاء النقل أثناء إعادة تشغيل مساعد Shizuku.")
+            try:
+                request = urllib.request.Request(
+                    health_url,
+                    headers={"X-Kafia-Token": session_token},
+                    method="GET",
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    health = json.loads(
+                        response.read().decode("utf-8", errors="replace")
+                    )
+                state = str(health.get("state") or "")
+                if state != last_state:
+                    last_state = state
+                    self.logChanged.emit(
+                        "استعادة مساعد Shizuku: "
+                        + {
+                            "permission_required": "بانتظار موافقة Shizuku على الهاتف...",
+                            "waiting_shizuku": "بانتظار خادم Shizuku...",
+                            "binding_service": "إعادة ربط خدمة النقل...",
+                            "ready_direct": "تمت استعادة خدمة النقل...",
+                            "failed": "فشلت تهيئة خدمة النقل...",
+                        }.get(state, state or "جاري التحقق...")
+                    )
+                if health.get("ready") is True:
+                    identity = str(health.get("uid") or "")
+                    if "uid=2000" not in identity and "uid=0" not in identity:
+                        raise RuntimeError(
+                            "هوية Shizuku بعد إعادة الاتصال غير متوقعة: " + identity
+                        )
+                    cleanup_state = self._shizuku_cleanup_state.get(device)
+                    if cleanup_state is not None:
+                        cleanup_state["local_port"] = local_port
+                    return local_port
+                if state == "failed":
+                    raise RuntimeError(
+                        "KAFIANET_SHIZUKU_RECONNECT_HELPER_FAILED: "
+                        + str(health.get("error") or "فشل مساعد Shizuku بعد إعادة الاتصال.")
+                    )
+            except urllib.error.URLError:
+                pass
+            time.sleep(1.0)
+
+        raise RuntimeError(
+            "انتهت مهلة استعادة مساعد Shizuku أو انتظار موافقته بعد إعادة توصيل الهاتف."
+        )
+
     @Slot(str, str, str, str, str, str, str)
     def copy_via_shizuku_bridge(
         self, device, local_port, session_token, job_id,
         source_path, destination, target_relative
     ):
         """Stream files once from the PC straight into the final Android/data folder."""
-        self._cancel_event.clear()
+        if not self._bridge_transfer_active:
+            self._cancel_event.clear()
         source_root = Path(source_path)
 
         def worker():
             self._bridge_transfer_active = True
+            resume_handoff = False
+            cleanup_done = False
             base_url = "http://127.0.0.1:" + str(local_port)
             forwarded_port = int(local_port)
             try:
@@ -3243,11 +3378,97 @@ exit 3
                     )
                 except Exception:
                     pass
+
+                transport_text = str(exc).lower()
+                transport_markers = (
+                    "device offline",
+                    "device not found",
+                    "no devices/emulators found",
+                    "device disconnected",
+                    "transport error",
+                    "connection reset",
+                    "connection aborted",
+                    "connection refused",
+                    "broken pipe",
+                    "remote end closed",
+                    "forcibly closed",
+                    "timed out",
+                    "socket",
+                )
+                disconnected = False
+                if not self._cancel_event.is_set():
+                    disconnected = not self._device_is_connected(device)
+                looks_like_transport_loss = (
+                    disconnected
+                    or any(marker in transport_text for marker in transport_markers)
+                )
+
+                cleanup_state = self._shizuku_cleanup_state.get(device)
+                resume_attempts = int(
+                    (cleanup_state or {}).get("resume_attempts", 0)
+                )
+                if (
+                    looks_like_transport_loss
+                    and not self._cancel_event.is_set()
+                    and resume_attempts < 10
+                ):
+                    try:
+                        if cleanup_state is not None:
+                            cleanup_state["resume_attempts"] = resume_attempts + 1
+                        self.statusChanged.emit(
+                            "انقطع اتصال الهاتف أثناء Shizuku. "
+                            "سيُعاد الاتصال ثم تُستأنف الملفات غير المكتملة..."
+                        )
+                        print(
+                            "SHIZUKU RESUME MODE:",
+                            device,
+                            "| attempt:",
+                            resume_attempts + 1,
+                            "| previous job:",
+                            job_id,
+                        )
+                        resumed_port = self._resume_shizuku_bridge_after_reconnect(
+                            device,
+                            forwarded_port,
+                            session_token,
+                            destination,
+                        )
+                        if cleanup_state is not None:
+                            cleanup_state["local_port"] = resumed_port
+                        # Reuse the same helper session but create a fresh job.
+                        # Its next batched size+mtime pass will skip every file
+                        # already committed and resend only incomplete/changed files.
+                        self.copy_via_shizuku_bridge(
+                            device,
+                            str(resumed_port),
+                            session_token,
+                            secrets.token_hex(12),
+                            source_path,
+                            destination,
+                            target_relative,
+                        )
+                        resume_handoff = True
+                        return
+                    except Exception as resume_error:
+                        exc = RuntimeError(
+                            str(exc)
+                            + "\\nتعذرت استعادة نقل Shizuku تلقائيًا: "
+                            + str(resume_error)
+                        )
+
+                if looks_like_transport_loss and resume_attempts >= 10:
+                    exc = RuntimeError(
+                        str(exc)
+                        + "\\nتكرر انقطاع اتصال الهاتف 10 مرات؛ أعد المحاولة يدويًا."
+                    )
                 self._cleanup_shizuku_bridge(device, forwarded_port, session_token)
+                cleanup_done = True
                 self.finished.emit(False, str(exc))
             finally:
-                self._cleanup_shizuku_bridge(device, forwarded_port, session_token)
-                self._bridge_transfer_active = False
+                if not resume_handoff:
+                    if not cleanup_done:
+                        self._cleanup_shizuku_bridge(device, forwarded_port, session_token)
+                    self._bridge_transfer_active = False
 
         threading.Thread(
             target=worker,

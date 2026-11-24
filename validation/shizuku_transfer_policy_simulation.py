@@ -500,4 +500,18 @@ check(
     and "error.errno != OsConstants.EPERM" in helper_service
     and "Let the actual writer report a precise EACCES/EPERM" in helper_service,
 )
+check(
+    "Shizuku transport loss waits for the same device and restarts from a fresh size+mtime sync pass",
+    "def _resume_shizuku_bridge_after_reconnect(" in engine_source
+    and "self._wait_for_device_reconnect(device)" in engine_source
+    and "resume_attempts < 10" in engine_source
+    and "secrets.token_hex(12)" in engine_source
+    and "only incomplete/changed files" in engine_source,
+)
+check(
+    "Shizuku resume handoff keeps the helper alive until the resumed worker owns cleanup",
+    "resume_handoff = True" in engine_source
+    and "if not resume_handoff:" in engine_source
+    and "cleanup_state[\"local_port\"] = resumed_port" in engine_source,
+)
 print("SHIZUKU TRANSFER POLICY SIMULATION: PASS")
