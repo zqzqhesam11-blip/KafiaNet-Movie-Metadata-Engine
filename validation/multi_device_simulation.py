@@ -2301,6 +2301,12 @@ def test_efootball_uses_saf_engine_and_never_starts_shizuku_fallback():
             (_ for _ in ()).throw(AssertionError("eFootball SAF must not fall back to Shizuku"))
         )
         controller._start_operation(operation)
+        assert operation["percent"] == 0
+        assert operation["status"]
+        assert operation["operation"]
+        assert operation["speed"] == "0 B/s"
+        assert operation["eta"] == "--"
+        assert operation["error"] == ""
         engine = operation["engine"]
         assert isinstance(engine, FakeEFootballSAFEngine)
         assert engine.calls == [(
