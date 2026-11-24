@@ -71,6 +71,12 @@ check(
     ),
 )
 check(
+    "unverified destination probe does not request the root dialog",
+    not AppController._is_android_data_permission_denial(
+        saved, "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED: could not inspect path"
+    ),
+)
+check(
     "read-only filesystem does not request the root dialog",
     not AppController._is_android_data_permission_denial(
         saved, "Read-only file system"
