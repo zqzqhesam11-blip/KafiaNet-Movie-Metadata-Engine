@@ -1827,6 +1827,14 @@ class AppController(QObject):
         )
         operation.setdefault("target_type", "usb_storage" if is_usb_target else "android")
         operation.setdefault("units", 1)
+        # Every transfer backend emits a consistent initial row, including SAF
+        # operations built by callers that do not pre-populate UI progress fields.
+        operation.setdefault("percent", 0)
+        operation.setdefault("status", "")
+        operation.setdefault("operation", "")
+        operation.setdefault("speed", "0 B/s")
+        operation.setdefault("eta", "--")
+        operation.setdefault("error", "")
         self._active_operations[serial] = operation
 
         engine.progressChanged.connect(
