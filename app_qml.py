@@ -1571,8 +1571,13 @@ class AppController(QObject):
                 return True
 
             if not self._windows_fullscreen_protection.enable():
+                detail = str(
+                    getattr(self._windows_fullscreen_protection, "last_error", "") or ""
+                ).strip()
+                suffix = (" التفاصيل: " + detail) if detail else ""
                 self.messageChanged.emit(
-                    "تعذر تفعيل حماية لوحة المفاتيح أو شريط المهام أو إدارة المهام؛ سيعمل ملء الشاشة دون طبقة الحماية الإضافية."
+                    "تعذر تفعيل حماية لوحة المفاتيح أو شريط المهام أو إدارة المهام؛ "
+                    "لم يتم تفعيل قفل ملء الشاشة." + suffix
                 )
                 return False
 

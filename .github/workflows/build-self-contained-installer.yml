@@ -162,6 +162,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           python -m compileall -q app_qml.py engine validation
           if ($LASTEXITCODE -ne 0) { throw 'Python source syntax validation failed.' }
+          python validation\fullscreen_protection_simulation.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows fullscreen protection simulation failed.' }
           python validation\multi_device_simulation.py
           if ($LASTEXITCODE -ne 0) { throw 'Branch regression simulation failed.' }
           python validation\transfer_modes_simulation.py

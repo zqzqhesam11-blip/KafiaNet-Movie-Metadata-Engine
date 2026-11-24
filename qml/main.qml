@@ -129,9 +129,14 @@ ApplicationWindow {
 
         // Fullscreen is the primary UI action. Native Windows protections
         // are an additional layer and must not block the fullscreen transition.
-        fullscreenGuardEnabled = Boolean(
+        var guardReady = Boolean(
             appController && appController.setFullscreenProtection(true)
         )
+        if (!guardReady) {
+            fullscreenGuardEnabled = false
+            return
+        }
+        fullscreenGuardEnabled = true
 
         wasMaximizedBeforeLock = visibility === Window.Maximized
         savedWindowX = x
@@ -235,8 +240,24 @@ ApplicationWindow {
     }
 
     onVisibilityChanged: {
-        if (fullscreenLocked && visibility === Window.Minimized) {
-            Qt.callLater(function() { window.showFullScreen() })
+        if (fullscreenLocked && visibility !== Window.FullScreen) {
+            Qt.callLater(function() {
+                if (window.fullscreenLocked
+                        && window.visibility !== Window.FullScreen)
+                    window.showFullScreen()
+            })
+        }
+    }
+
+    onActiveChanged: {
+        if (fullscreenLocked && active) {
+            Qt.callLater(function() {
+                if (!window.fullscreenLocked)
+                    return
+                window.showFullScreen()
+                if (appController && window.fullscreenGuardEnabled)
+                    appController.setFullscreenProtection(true)
+            })
         }
     }
 

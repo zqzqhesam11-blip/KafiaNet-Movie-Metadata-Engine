@@ -22,6 +22,7 @@ class WindowsFullscreenProtection:
     VK_RETURN = 0x0D
     VK_ESCAPE = 0x1B
     VK_SPACE = 0x20
+    VK_F4 = 0x73
     VK_LWIN = 0x5B
     VK_RWIN = 0x5C
     VK_APPS = 0x5D
@@ -61,6 +62,7 @@ class WindowsFullscreenProtection:
 
     def __init__(self):
         self._enabled = False
+        self.last_error = ""
         self._user32 = None
         self._kernel32 = None
         self._hook = None
@@ -175,6 +177,19 @@ class WindowsFullscreenProtection:
         except Exception as exc:
             print("WINDOWS POLICY NOTIFICATION WARNING:", exc)
 
+    def _write_task_manager_disabled_policy(self, winreg, policy_key):
+        """Write and read back the per-user Task Manager restriction."""
+        winreg.SetValueEx(
+            policy_key, self.TASK_MANAGER_VALUE, 0, winreg.REG_DWORD, 1
+        )
+        actual_value, actual_type = winreg.QueryValueEx(
+            policy_key, self.TASK_MANAGER_VALUE
+        )
+        if actual_type != winreg.REG_DWORD or int(actual_value or 0) != 1:
+            raise RuntimeError(
+                "Windows did not retain the per-user DisableTaskMgr policy."
+            )
+
     def _set_task_manager_disabled(self, winreg_module=None):
         """Temporarily disable Task Manager for this Windows user only."""
         winreg = self._registry_api(winreg_module)
@@ -208,12 +223,9 @@ class WindowsFullscreenProtection:
                         winreg.HKEY_CURRENT_USER,
                         self.TASK_MANAGER_POLICY_KEY,
                         0,
-                        winreg.KEY_SET_VALUE,
+                        winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
                     )
-                    winreg.SetValueEx(
-                        policy_key, self.TASK_MANAGER_VALUE, 0,
-                        winreg.REG_DWORD, 1
-                    )
+                    self._write_task_manager_disabled_policy(winreg, policy_key)
                     self._notify_policy_change()
                     return True
             self._close_registry_key(winreg, state_key)
@@ -248,7 +260,7 @@ class WindowsFullscreenProtection:
                 winreg.HKEY_CURRENT_USER,
                 self.TASK_MANAGER_RECOVERY_KEY,
                 0,
-                winreg.KEY_SET_VALUE,
+                winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
             )
             winreg.SetValueEx(
                 state_key, self.RECOVERY_PREVIOUS_EXISTS_VALUE, 0,
@@ -270,15 +282,13 @@ class WindowsFullscreenProtection:
                 winreg.HKEY_CURRENT_USER,
                 self.TASK_MANAGER_POLICY_KEY,
                 0,
-                winreg.KEY_SET_VALUE,
+                winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
             )
-            winreg.SetValueEx(
-                policy_key, self.TASK_MANAGER_VALUE, 0,
-                winreg.REG_DWORD, 1
-            )
+            self._write_task_manager_disabled_policy(winreg, policy_key)
             self._notify_policy_change()
             return True
         except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
             print("WINDOWS TASK MANAGER DISABLE FAILED:", exc)
             self._restore_task_manager_policy(winreg)
             return False
@@ -335,7 +345,7 @@ class WindowsFullscreenProtection:
                     winreg.HKEY_CURRENT_USER,
                     self.TASK_MANAGER_POLICY_KEY,
                     0,
-                    winreg.KEY_SET_VALUE,
+                    winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
                 )
                 winreg.SetValueEx(
                     policy_key,
@@ -350,7 +360,7 @@ class WindowsFullscreenProtection:
                         winreg.HKEY_CURRENT_USER,
                         self.TASK_MANAGER_POLICY_KEY,
                         0,
-                        winreg.KEY_SET_VALUE,
+                        winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
                     )
                     try:
                         winreg.DeleteValue(policy_key, self.TASK_MANAGER_VALUE)
@@ -369,7 +379,7 @@ class WindowsFullscreenProtection:
                     winreg.HKEY_CURRENT_USER,
                     self.TASK_MANAGER_RECOVERY_KEY,
                     0,
-                    winreg.KEY_SET_VALUE,
+                    winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
                 )
                 for value_name in (
                     self.RECOVERY_ACTIVE_VALUE,
@@ -412,7 +422,9 @@ class WindowsFullscreenProtection:
 
     def enable(self):
         if os.name != "nt":
+            self.last_error = "Windows-only fullscreen protection."
             return False
+        self.last_error = ""
         if self._enabled:
             if not self._set_task_manager_disabled():
                 self.disable()
@@ -424,7 +436,8 @@ class WindowsFullscreenProtection:
             self._initialize_apis()
             if not self._set_task_manager_disabled():
                 raise RuntimeError(
-                    "The current Windows user's Task Manager policy could not be disabled."
+                    self.last_error
+                    or "The current Windows user's Task Manager policy could not be disabled."
                 )
             self._pressed_modifiers.clear()
             self._hook_callback = self._hook_callback_type(
@@ -448,6 +461,8 @@ class WindowsFullscreenProtection:
                 )
             return True
         except Exception as exc:
+            if not self.last_error:
+                self.last_error = f"{type(exc).__name__}: {exc}"
             print("WINDOWS FULLSCREEN PROTECTION ENABLE FAILED:", exc)
             self.disable()
             return False
@@ -535,6 +550,29 @@ class WindowsFullscreenProtection:
         self._user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
         return process_id.value == os.getpid()
 
+    def _should_block_keyboard_event(self, key, is_down):
+        """Suppress kiosk escape shortcuts only while this app is foreground."""
+        if not self._application_is_foreground():
+            return False
+
+        if key in self.BLOCKED_KEYS:
+            return True
+
+        control_down = bool(self._pressed_modifiers & self.CONTROL_KEYS)
+        alt_down = bool(self._pressed_modifiers & self.ALT_KEYS)
+
+        # Block Start / Task Manager shortcuts, app switching, system menu,
+        # and Alt+F4 while the password-protected fullscreen lock is active.
+        if is_down and key == self.VK_ESCAPE and (control_down or alt_down):
+            return True
+        if is_down and key == self.VK_TAB and alt_down:
+            return True
+        if is_down and key == self.VK_SPACE and alt_down:
+            return True
+        if is_down and key == self.VK_F4 and alt_down:
+            return True
+        return False
+
     def _keyboard_hook_proc(self, code, message, data_pointer):
         try:
             if code >= self.HC_ACTION and self._enabled and data_pointer:
@@ -552,25 +590,8 @@ class WindowsFullscreenProtection:
                 elif is_up:
                     self._pressed_modifiers.discard(key)
 
-                if self._application_is_foreground():
-                    if key in self.BLOCKED_KEYS:
-                        return 1
-
-                    control_down = bool(
-                        self._pressed_modifiers & self.CONTROL_KEYS
-                    )
-                    alt_down = bool(self._pressed_modifiers & self.ALT_KEYS)
-
-                    # Stop Ctrl+Esc / Ctrl+Shift+Esc (Start / Task Manager),
-                    # Alt+Tab / Alt+Esc (app switching), and Alt+Space.
-                    if is_down and key == self.VK_ESCAPE and (
-                        control_down or alt_down
-                    ):
-                        return 1
-                    if is_down and key == self.VK_TAB and alt_down:
-                        return 1
-                    if is_down and key == self.VK_SPACE and alt_down:
-                        return 1
+                if self._should_block_keyboard_event(key, is_down):
+                    return 1
         except Exception as exc:
             # A hook must never crash the GUI because a key event was malformed.
             print("WINDOWS KEYBOARD FILTER WARNING:", exc)
