@@ -2555,12 +2555,17 @@ def test_paths_and_ui():
     assert "if root_exists and partial_parent_exists and connected:" in adb_source
 
     preflight_start = push_source.index("is_saved_destination =")
-    preflight_end = push_source.index("cleanup_result = subprocess.run(", preflight_start)
+    preflight_end = push_source.index(
+        "manifest, total_bytes = self._build_direct_stream_manifest(source_path)",
+        preflight_start,
+    )
     preflight_source = push_source[preflight_start:preflight_end]
     assert "if not is_saved_destination:" in preflight_source
     assert "Never create Saved or its parents." in push_source
     assert '"mkdir", "-p", check_path' in preflight_source
-    assert "KAFIANET_DESTINATION_MISSING" in preflight_source
+    # Saved is only inspected read-only; ADB inability to inspect it routes to Shizuku.
+    assert "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" in preflight_source
+    assert "if is_saved_destination and not self._remote_directory_exists(device, check_path):" in preflight_source
     assert '"push"' in push_source
     assert "self._preexisting_sync_plan" not in push_source
     assert "self._stream_pending_files" not in push_source
