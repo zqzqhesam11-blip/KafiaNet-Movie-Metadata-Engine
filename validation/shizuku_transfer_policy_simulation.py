@@ -213,7 +213,7 @@ check(
     and '"rm"' not in saved_copy_stage
     and '"mkdir"' not in saved_copy_stage
     and '"push"' in push_source
-    and '"--sync"' not in push_source
+    and '"--sync"' in push_source
     and "KAFIANET_ANDROID_DATA_PERMISSION_DENIED" in push_source
     and "KAFIANET_SHIZUKU_DESTINATION_MISSING" in engine_source,
 )
@@ -377,10 +377,11 @@ check(
     and '"rm"' not in retry_source,
 )
 check(
-    "ADB never invokes --sync or skip-existing mode",
-    'command.append("--sync")' not in engine_source
-    and '"--sync"' not in engine_source
-    and "ADB SECURE_MKDIRS FULL RETRY" in engine_source
+    "ADB uses fast timestamp sync and resumes the interrupted file before the remaining tree",
+    '"push", "--sync"' in engine_source
+    and "ADB RESUME MODE: retry only the interrupted file" in engine_source
+    and "ADB RESUME CHECKPOINT:" in engine_source
+    and "ADB SECURE_MKDIRS FULL RETRY" in engine_source,
 )
 
 cleanup_source = (

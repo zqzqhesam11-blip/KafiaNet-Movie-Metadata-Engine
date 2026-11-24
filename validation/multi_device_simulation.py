@@ -1439,6 +1439,21 @@ def test_adb_source_arguments_and_progress_offset():
         assert file_args == [str(asset)]
         assert file_target == "/sdcard/ShadowTrackerExtra/Saved"
 
+        synced_command = ADBEngine._synced_push_command(
+            "adb", "SERIAL_A", [str(asset)], "/sdcard/ShadowTrackerExtra/Saved"
+        )
+        assert synced_command == [
+            "adb", "-s", "SERIAL_A", "push", "--sync",
+            str(asset), "/sdcard/ShadowTrackerExtra/Saved",
+        ]
+        assert ADBEngine._relative_source_file(source, asset) == "asset.pak"
+        assert ADBEngine._remote_file_target_for_source_file(
+            source, asset, "/sdcard/ShadowTrackerExtra/Saved"
+        ) == "/sdcard/ShadowTrackerExtra/Saved/asset.pak"
+        assert ADBEngine._interrupted_source_file(source, str(asset), 48) == asset
+        assert ADBEngine._interrupted_source_file(source, str(asset), 100) is None
+        assert ADBEngine._interrupted_source_file(source, str(asset), None) is None
+
         # A directory with a different name is pushed as its direct children.
         different = source.parent / "different"
         different.mkdir()
@@ -2559,12 +2574,12 @@ def test_paths_and_ui():
     push_start = adb_source.index("def _push_thread(")
     push_end = adb_source.index("def push(", push_start)
     push_source = adb_source[push_start:push_end]
-    # No ADB sync/skip-existing mode is ever passed, including recovery retries.
-    assert 'command.append("--sync")' not in push_source
-    assert '"--sync"' not in push_source
-    assert "ADB SECURE_MKDIRS FULL RETRY" in adb_source
-    assert "def _secure_mkdirs_retry_parent(" in adb_source
-    assert "def _remote_directory_exists(" in adb_source
+    # Bulk copies use --sync; only a detected incomplete file is forced through a normal push.
+    assert "self._synced_push_command(" in push_source
+    assert '"push", "--sync"' in adb_source
+    assert "ADB RESUMING INTERRUPTED FILE:" in adb_source
+    assert "ADB RESUME CHECKPOINT:" in adb_source
+    assert "if retry_file_path is not None" in push_source
     assert "if root_exists and partial_parent_exists and connected:" in adb_source
 
     preflight_start = push_source.index("is_saved_destination =")
@@ -2819,13 +2834,22 @@ def test_paths_and_ui():
     assert '"am", "start", "-W"' in launch
     assert 'Status:\\s*ok' in launch
 
-    # Disconnected phones wait for reconnection and restart the full replacement push.
+    # Disconnected phones resume from the interrupted file; bulk pushes use ADB sync.
     assert "def _device_is_connected(self, device):" in engine_source
     assert "self._wait_for_device_reconnect(device)" in engine_source
     assert "انقطع اتصال الهاتف. الرجاء إعادة توصيله لاستمرار النسخ..." in engine_source
-    # The transfer engine never requests ADB sync or skips matching files.
-    assert 'command.append("--sync")' not in engine_source
-    assert '"--sync"' not in push_source
+    assert "ADB RESUME MODE: retry only the interrupted file" in engine_source
+    assert "def _interrupted_source_file(" in engine_source
+    assert "def _synced_push_command(" in engine_source
+    assert '"push", "--sync"' in engine_source
+    disconnect_start = engine_source.index("if not device_connected or looks_disconnected:")
+    reconnect_branch = engine_source[
+        disconnect_start:engine_source.index(
+            "if self._wait_for_device_reconnect(device):",
+            disconnect_start,
+        )
+    ]
+    assert "self._progress_offset_bytes = 0" not in reconnect_branch
     assert "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" not in push_source
     assert "KAFIANET_ANDROID_DATA_PERMISSION_DENIED" in push_source
     assert '"/destination/check"' in engine_source

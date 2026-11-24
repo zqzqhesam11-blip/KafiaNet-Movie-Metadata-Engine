@@ -813,12 +813,68 @@ class ADBEngine(QObject):
         transferred = min(max(offset_bytes + attempt_bytes, 0), total_bytes)
         return max(0, min(int(transferred * 100 / total_bytes), 99))
 
+    @staticmethod
+    def _relative_source_file(source_root, file_path):
+        """Return a validated source-relative path for one interrupted file."""
+        root = Path(source_root)
+        candidate = Path(file_path)
+        try:
+            root_resolved = root.resolve(strict=True)
+            candidate_resolved = candidate.resolve(strict=True)
+            if root.is_dir():
+                relative = candidate_resolved.relative_to(root_resolved)
+                if not relative.parts:
+                    return None
+            elif candidate_resolved == root_resolved:
+                relative = Path(root.name)
+            else:
+                return None
+            if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                return None
+            return relative.as_posix()
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    @classmethod
+    def _interrupted_source_file(cls, source_root, current_file_path, current_file_percent):
+        """Select only the file that was still being written when ADB disconnected."""
+        if not current_file_path or current_file_percent is None:
+            return None
+        try:
+            if int(current_file_percent) >= 100:
+                return None
+        except (TypeError, ValueError):
+            return None
+        candidate = Path(current_file_path)
+        if cls._relative_source_file(source_root, candidate) is None:
+            return None
+        return candidate if candidate.is_file() else None
+
+    @classmethod
+    def _remote_file_target_for_source_file(cls, source_root, file_path, destination):
+        """Map one validated source file to its exact destination filename."""
+        relative = cls._relative_source_file(source_root, file_path)
+        if relative is None:
+            raise ValueError("Interrupted source file is outside the transfer root.")
+        base = str(destination or "").rstrip("/") or "/"
+        return (base + "/" + relative) if base != "/" else ("/" + relative)
+
+    @staticmethod
+    def _synced_push_command(adb, device, sources, destination):
+        """Use ADB sync to skip destination files that are not older than their source."""
+        return [
+            str(adb), "-s", str(device), "push", "--sync",
+            *[str(source) for source in sources],
+            str(destination),
+        ]
+
     def _push_thread(
         self,
         device,
         source,
         destination,
         secure_mkdir_retry_paths=None,
+        retry_file=None,
     ):
 
         process = None
@@ -937,6 +993,27 @@ class ADBEngine(QObject):
                 source_path,
                 destination
             )
+            retry_file_path = None
+            retry_file_size = 0
+            retry_remote_file = ""
+            if retry_file:
+                retry_relative = self._relative_source_file(source_path, retry_file)
+                if retry_relative:
+                    retry_file_path = Path(retry_file)
+                    retry_file_size = int(retry_file_path.stat().st_size)
+                    retry_remote_file = self._remote_file_target_for_source_file(
+                        source_path,
+                        retry_file_path,
+                        destination,
+                    )
+                    print(
+                        "ADB RESUMING INTERRUPTED FILE:",
+                        retry_relative,
+                        "| bytes:",
+                        retry_file_size,
+                    )
+                else:
+                    print("ADB INTERRUPTED FILE RETRY SKIPPED: source path is outside the transfer root")
             if not adb_sources:
                 self.progressChanged.emit(100, "0 B/s", "00:00")
                 self.statusChanged.emit("اكتمل النسخ")
@@ -956,17 +1033,24 @@ class ADBEngine(QObject):
 
             self._pause_event.set()
 
-            command = [
-                self.adb,
-                "-s",
-                device,
-                "push",
-            ]
-            # Always send every source file, including files already present.
-            command.extend([
-                *adb_sources,
-                adb_destination
-            ])
+            if retry_file_path is not None:
+                # Force only the interrupted file. The normal --sync pass that
+                # follows will skip files that were already completed.
+                command = [
+                    self.adb,
+                    "-s",
+                    device,
+                    "push",
+                    str(retry_file_path),
+                    retry_remote_file,
+                ]
+            else:
+                command = self._synced_push_command(
+                    self.adb,
+                    device,
+                    adb_sources,
+                    adb_destination,
+                )
 
             print(
                 "ADB FAST PUSH:",
@@ -1018,6 +1102,7 @@ class ADBEngine(QObject):
                 "native_seen": False,
                 "native_percent": 0,
                 "native_display_percent": progress_offset_percent,
+                "native_transferred_bytes": progress_offset_bytes,
                 "native_speed_seen": False,
                 "current_file_path": "",
                 "current_file_percent": 0,
@@ -1029,7 +1114,13 @@ class ADBEngine(QObject):
                 if progress_state["native_seen"]:
                     # Native ADB percent describes the active full-copy attempt.
                     percent = progress_state["native_display_percent"]
-                    transferred_bytes = int(total_bytes * percent / 100)
+                    transferred_bytes = min(
+                        total_bytes,
+                        max(
+                            progress_offset_bytes,
+                            int(progress_state["native_transferred_bytes"]),
+                        ),
+                    )
                 else:
                     transferred_bytes = min(
                         progress_offset_bytes + progress_state["bytes"],
@@ -1085,6 +1176,52 @@ class ADBEngine(QObject):
                     eta
                 )
 
+            def save_resume_progress(interrupted_file=None):
+                with progress_lock:
+                    _, _, _, observed_bytes = progress_snapshot_locked()
+
+                if interrupted_file is not None:
+                    if retry_file_path is not None:
+                        # This is a forced single-file retry. None of its attempt
+                        # bytes are committed to the resume checkpoint until success.
+                        observed_bytes = progress_offset_bytes
+                    else:
+                        try:
+                            interrupted_size = int(Path(interrupted_file).stat().st_size)
+                            interrupted_percent = max(
+                                0,
+                                min(int(progress_state["current_file_percent"]), 99),
+                            )
+                            partial_bytes = int(
+                                interrupted_size * interrupted_percent / 100
+                            )
+                            observed_bytes = max(
+                                progress_offset_bytes,
+                                observed_bytes - partial_bytes,
+                            )
+                        except (OSError, TypeError, ValueError):
+                            observed_bytes = max(progress_offset_bytes, observed_bytes)
+
+                checkpoint = min(
+                    total_bytes,
+                    max(progress_offset_bytes, int(observed_bytes)),
+                )
+                self._progress_offset_bytes = checkpoint
+                self._progress_offset_percent = (
+                    0 if total_bytes <= 0
+                    else min(99, int(checkpoint * 100 / total_bytes))
+                )
+                print(
+                    "ADB RESUME CHECKPOINT:",
+                    self._progress_offset_percent,
+                    "%",
+                    "|",
+                    self._format_size(checkpoint),
+                    "/",
+                    self._format_size(total_bytes),
+                )
+                return checkpoint
+
             def report_adb_output_line(line):
                 overall_percent, file_path, file_percent = (
                     self._parse_adb_progress_details(line)
@@ -1101,10 +1238,28 @@ class ADBEngine(QObject):
                         progress_state["native_percent"] = max(
                             progress_state["native_percent"], overall_percent
                         )
-                        combined_percent = self._combined_native_progress_percent(
-                            progress_offset_percent,
-                            progress_state["native_percent"]
-                        )
+                        if retry_file_path is not None:
+                            retry_bytes = int(
+                                retry_file_size * progress_state["native_percent"] / 100
+                            )
+                            native_bytes = min(
+                                total_bytes,
+                                progress_offset_bytes + retry_bytes,
+                            )
+                            combined_percent = (
+                                0 if total_bytes <= 0
+                                else min(99, int(native_bytes * 100 / total_bytes))
+                            )
+                            progress_state["native_transferred_bytes"] = native_bytes
+                        else:
+                            combined_percent = self._combined_native_progress_percent(
+                                progress_offset_percent,
+                                progress_state["native_percent"]
+                            )
+                            progress_state["native_transferred_bytes"] = min(
+                                total_bytes,
+                                int(total_bytes * combined_percent / 100),
+                            )
                         if was_native_seen:
                             progress_state["native_display_percent"] = max(
                                 progress_state["native_display_percent"],
@@ -1270,6 +1425,28 @@ class ADBEngine(QObject):
                 )
                 return
 
+            if return_code == 0 and retry_file_path is not None:
+                resumed_bytes = min(
+                    total_bytes,
+                    progress_offset_bytes + retry_file_size,
+                )
+                self._progress_offset_bytes = resumed_bytes
+                self._progress_offset_percent = (
+                    0 if total_bytes <= 0
+                    else min(99, int(resumed_bytes * 100 / total_bytes))
+                )
+                self.statusChanged.emit(
+                    "تم استكمال الملف الذي انقطع أثناء نقله؛ جارٍ متابعة بقية الملفات..."
+                )
+                self._push_thread(
+                    device,
+                    requested_source,
+                    requested_destination,
+                    secure_mkdir_retry_paths,
+                    None,
+                )
+                return
+
             if return_code == 0:
 
                 elapsed = max(
@@ -1386,9 +1563,8 @@ class ADBEngine(QObject):
 
             # secure_mkdirs may create a nested directory and then fail while
             # applying its metadata. Verify the Saved root and exact partial parent
-            # read-only, then restart the complete transfer without skip-existing filtering.
-            # Re-sending existing files is intentional; no size/mtime comparison or
-            # skip-existing mode is permitted in this copy workflow.
+            # read-only, then retry the incomplete file/tree. The following bulk
+            # pass uses ADB --sync to avoid retransferring completed files.
             # Never create Saved or delete/rename phone files in this recovery path.
             retry_parent = self._secure_mkdirs_retry_parent(
                 requested_destination,
@@ -1410,18 +1586,24 @@ class ADBEngine(QObject):
                 connected = self._device_is_connected(device)
                 if root_exists and partial_parent_exists and connected:
                     secure_mkdir_retry_paths.add(retry_parent)
-                    self._progress_offset_percent = 0
-                    self._progress_offset_bytes = 0
+                    secure_retry_file = retry_file_path
+                    if secure_retry_file is None:
+                        secure_retry_file = self._interrupted_source_file(
+                            source_path,
+                            progress_state["current_file_path"],
+                            progress_state["current_file_percent"],
+                        )
+                    save_resume_progress(secure_retry_file)
                     self.statusChanged.emit(
                         "تم التحقق من وجود Saved والمجلد الجزئي؛ "
-                        "جاري إعادة إرسال جميع الملفات دون مزامنة أو تخطي."
+                        "جاري متابعة الملفات غير المكتملة مع تخطي الملفات المنسوخة."
                     )
                     print(
                         "ADB SECURE_MKDIRS FULL RETRY:",
                         retry_parent,
                         "| attempt:",
                         len(secure_mkdir_retry_paths),
-                        "| mode: full-resend",
+                        "| mode: sync-resume",
                     )
                     retry_thread = threading.Thread(
                         target=self._push_thread,
@@ -1430,6 +1612,7 @@ class ADBEngine(QObject):
                             requested_source,
                             requested_destination,
                             secure_mkdir_retry_paths,
+                            secure_retry_file,
                         ),
                         name=f"ADB-secure-mkdir-full-retry-{device}",
                         daemon=True,
@@ -1446,8 +1629,8 @@ class ADBEngine(QObject):
                 )
 
             # A disconnected handset often makes adb push exit with a transport error.
-            # Wait for the same serial to return, then restart the full push so every
-            # existing destination file is overwritten regardless of its timestamp.
+            # Wait for the same serial to return. Re-send only the interrupted file,
+            # then let ADB --sync skip files already completed on the device.
             stderr_lower = (combined_output or stderr_text or "").lower()
             disconnect_markers = (
                 "device offline",
@@ -1464,12 +1647,25 @@ class ADBEngine(QObject):
             )
             device_connected = self._device_is_connected(device)
             if not device_connected or looks_disconnected:
-                # This retry sends the complete source tree again, so
-                # progress restarts from zero instead of counting the
-                # interrupted attempt a second time.
-                self._progress_offset_bytes = 0
-                self._progress_offset_percent = 0
-                print("ADB FULL-REPLACEMENT RETRY: progress reset to 0%.")
+                interrupted_file = retry_file_path
+                if interrupted_file is None:
+                    interrupted_file = self._interrupted_source_file(
+                        source_path,
+                        progress_state["current_file_path"],
+                        progress_state["current_file_percent"],
+                    )
+                save_resume_progress(interrupted_file)
+                if interrupted_file is not None:
+                    print(
+                        "ADB RESUME MODE: retry only the interrupted file, "
+                        "then continue remaining files with --sync:",
+                        interrupted_file,
+                    )
+                else:
+                    print(
+                        "ADB RESUME MODE: no incomplete current file identified; "
+                        "continue remaining files with --sync."
+                    )
 
                 self.statusChanged.emit(
                     "انقطع اتصال الهاتف. الرجاء إعادة توصيله لاستمرار النسخ..."
@@ -1499,6 +1695,7 @@ class ADBEngine(QObject):
                             requested_source,
                             requested_destination,
                             secure_mkdir_retry_paths,
+                            interrupted_file,
                         ),
                         name=f"ADB-push-resume-{device}",
                         daemon=True
