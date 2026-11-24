@@ -213,7 +213,7 @@ check(
     and '"rm"' not in saved_copy_stage
     and '"mkdir"' not in saved_copy_stage
     and '"push"' in push_source
-    and '"--sync"' in push_source
+    and "self._synced_push_command(" in push_source
     and "KAFIANET_ANDROID_DATA_PERMISSION_DENIED" in push_source
     and "KAFIANET_SHIZUKU_DESTINATION_MISSING" in engine_source,
 )
