@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/kafianet-control-pro-shizuku-final-20261123
+      - feature/kafianet-control-pro-fullscreen-guard-20261124
     paths:
       - '.github/workflows/build-self-contained-installer.yml'
       - 'app_qml.py'
