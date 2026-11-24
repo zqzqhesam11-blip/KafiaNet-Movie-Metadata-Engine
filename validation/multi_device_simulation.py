@@ -2840,7 +2840,7 @@ def test_paths_and_ui():
     assert "self._combined_native_progress_percent(" in engine_source
     assert 'progress_state["native_display_percent"]' in engine_source
     assert 'progress_state["native_bytes"]' not in engine_source
-    assert "time.time_ns()" in engine_source
+    assert 'start_time = time.monotonic()' in push_source
     assert engine_source.index(
         'local_adb = BASE_DIR / "platform-tools" / "adb.exe"'
     ) < engine_source.index('external_adb = Path(')
