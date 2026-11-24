@@ -1984,6 +1984,7 @@ class AppController(QObject):
             folder = "GameData"
         return f"/sdcard/{folder}/"
 
+# Preserve the legacy user-confirmed retry to the internal-storage root after an actual ADB write denial.
     def _request_android_data_root_fallback(self, serial, operation, raw_message):
         raw_error = str(raw_message or "")
         operation["raw_error"] = raw_error
