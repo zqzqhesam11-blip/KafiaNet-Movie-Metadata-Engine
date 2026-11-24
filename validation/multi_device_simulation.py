@@ -2020,6 +2020,7 @@ def test_windows_task_manager_policy_is_scoped_and_restored():
     class FakeWinreg:
         HKEY_CURRENT_USER = "HKCU"
         KEY_READ = 0x20019
+        KEY_QUERY_VALUE = 0x0001
         KEY_SET_VALUE = 0x0002
         REG_DWORD = 4
         REG_SZ = 1
