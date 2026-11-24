@@ -1134,19 +1134,45 @@ def test_saved_copy_never_changes_permissions_or_writes_probe_files():
 
 
 
-def test_fullscreen_enters_even_when_native_guard_is_unavailable():
+def test_fullscreen_button_requires_native_guard_and_restores_it():
     qml = Path("qml/main.qml").read_text(encoding="utf-8")
+
+    # The in-app ⛶ control is the entry point under repair, not the title-bar
+    # maximize button. Keep its click path tied to the password-protected lock.
+    button_start = qml.index("id: fullscreenLockButton")
+    button_end = qml.index("// REFRESH", button_start)
+    button = qml[button_start:button_end]
+    assert 'text: window.fullscreenLocked ? "↙" : "⛶"' in button
+    assert "window.enterFullscreenLock()" in button
+    assert "window.askWindowUnlock()" in button
+
     start = qml.index("    function enterFullscreenLock()")
     end = qml.index("    function openFullscreenPasswordDialog", start)
     enter = qml[start:end]
-    assert "fullscreenGuardEnabled = Boolean(" in enter
-    assert "window.showFullScreen()" in enter
-    assert "if (!appController || !appController.setFullscreenProtection(true))" not in enter
+    guard_ready = enter.index("var guardReady = Boolean(")
+    guard_failure = enter.index("if (!guardReady)", guard_ready)
+    failure_return = enter.index("return", guard_failure)
+    lock_transition = enter.index("fullscreenLocked = true")
+    fullscreen_transition = enter.index("window.showFullScreen()")
+    assert guard_ready < guard_failure < failure_return < lock_transition
+    assert lock_transition < fullscreen_transition
+    assert "fullscreenGuardEnabled = false" in enter
+    assert "fullscreenGuardEnabled = true" in enter
+
     leave_start = qml.index("    function leaveFullscreenLock(")
     leave_end = qml.index("    onClosing:", leave_start)
     leave = qml[leave_start:leave_end]
     assert "if (appController && fullscreenGuardEnabled)" in leave
+    assert "appController.setFullscreenProtection(false)" in leave
     assert "fullscreenGuardEnabled = false" in leave
+    assert "window.showNormal()" in leave
+
+    # Losing visibility/focus must not leave the in-app lock unprotected.
+    handlers_start = qml.index("    onVisibilityChanged:")
+    handlers_end = qml.index("    // Stable model:", handlers_start)
+    handlers = qml[handlers_start:handlers_end]
+    assert "window.showFullScreen()" in handlers
+    assert "appController.setFullscreenProtection(true)" in handlers
 
 def test_legacy_successful_phone_register_is_no_longer_used():
     controller_source = Path("app_qml.py").read_text(encoding="utf-8")
