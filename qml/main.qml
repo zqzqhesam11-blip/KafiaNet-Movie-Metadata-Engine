@@ -1385,6 +1385,10 @@ ApplicationWindow {
 
         target: appController
 
+        function onAndroidDataFallbackRequested(serial, gameName, destination, reason) {
+            window.queueAndroidDataFallback(serial, gameName, destination, reason)
+        }
+
         function onTransferPercentChanged(percent) {
 
             window.transferPercent = percent
@@ -1907,6 +1911,95 @@ ApplicationWindow {
 
                     }
                 }
+            }
+        }
+    }
+
+    Dialog {
+        id: androidDataFallbackDialog
+        modal: true
+        focus: true
+        closePolicy: Popup.NoAutoClose
+        title: "تعذر النسخ إلى Android/data"
+        width: Math.min(640, window.width - 40)
+        height: Math.min(460, window.height - 40)
+        x: Math.max(20, (window.width - width) / 2)
+        y: Math.max(20, (window.height - height) / 2)
+
+        background: Rectangle {
+            color: "#111722"
+            radius: 14
+            border.width: 1
+            border.color: "#C18A39"
+        }
+
+        contentItem: ScrollView {
+            clip: true
+            Column {
+                width: androidDataFallbackDialog.width - 48
+                spacing: 12
+
+                Text {
+                    width: parent.width
+                    text: "رفض الهاتف " + window.androidDataFallbackSerial
+                          + " الكتابة إلى Android/data أثناء نسخ "
+                          + window.androidDataFallbackGame + "."
+                    color: "#DCE4F0"
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 14
+                }
+
+                Text {
+                    width: parent.width
+                    text: "هل تريد إعادة النسخ إلى مجلد مستقل في جذر الذاكرة الداخلية بدلًا من ذلك؟"
+                    color: "#DCE4F0"
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 13
+                }
+
+                Rectangle {
+                    width: parent.width
+                    height: 48
+                    radius: 8
+                    color: "#1A2533"
+                    border.width: 1
+                    border.color: "#5B6E86"
+
+                    Text {
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        verticalAlignment: Text.AlignVCenter
+                        text: window.androidDataFallbackDestination
+                        color: "#9CEBFA"
+                        font.pixelSize: 13
+                        elide: Text.ElideMiddle
+                    }
+                }
+
+                Text {
+                    width: parent.width
+                    text: window.androidDataFallbackReason
+                    color: "#AAB6C8"
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 11
+                    textFormat: Text.PlainText
+                }
+            }
+        }
+
+        footer: RowLayout {
+            width: androidDataFallbackDialog.width - 24
+            spacing: 12
+
+            Button {
+                text: "نسخ إلى الجذر"
+                Layout.alignment: Qt.AlignRight
+                onClicked: window.finishAndroidDataFallback(true)
+            }
+
+            Button {
+                text: "إلغاء"
+                onClicked: window.finishAndroidDataFallback(false)
             }
         }
     }
