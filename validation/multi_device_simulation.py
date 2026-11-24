@@ -2663,7 +2663,7 @@ def test_paths_and_ui():
     assert "def _begin_shizuku_fallback(" in current
     assert "engine.prepare_shizuku_bridge(" in current
     assert "engine.copy_via_shizuku_bridge(" in current
-    assert '"phase": "adb_direct"' in current
+    assert '"phase": "local_usb_copy" if target_type == "usb_storage" else "adb_direct"' in current
     assert "def prepare_shizuku_bridge(" in engine_source
     assert "def copy_via_shizuku_bridge(" in engine_source
     assert "def prepare_apps_before_copy(" not in engine_source
