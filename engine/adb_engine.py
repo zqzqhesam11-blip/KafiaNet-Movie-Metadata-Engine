@@ -3006,7 +3006,7 @@ exit 3
         )
         start_output = (
             str(start_result.stdout or "").strip()
-            + "\\n"
+            + "\n"
             + str(start_result.stderr or "").strip()
         ).strip()
         if start_result.returncode != 0:
@@ -3017,7 +3017,7 @@ exit 3
 
         package_match = re.search(
             r"/android/data/([^/]+)",
-            str(destination or "").replace("\\\\", "/"),
+            str(destination or "").replace("\\", "/"),
             re.IGNORECASE,
         )
         if not package_match:
@@ -3039,7 +3039,7 @@ exit 3
         )
         launch_output = (
             str(launch.stdout or "").strip()
-            + "\\n"
+            + "\n"
             + str(launch.stderr or "").strip()
         ).strip()
         if launch.returncode != 0 or "Error" in launch_output:
@@ -3061,7 +3061,7 @@ exit 3
             timeout=20,
         )
         forward_output = str(forward.stdout or "").strip()
-        port_match = re.search(r"\\b(\\d{4,5})\\b", forward_output)
+        port_match = re.search(r"\b(\d{4,5})\b", forward_output)
         if forward.returncode != 0 or not port_match:
             raise RuntimeError(
                 "KAFIANET_SHIZUKU_RECONNECT_FORWARD_FAILED: "
