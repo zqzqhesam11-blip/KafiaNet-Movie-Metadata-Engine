@@ -2361,8 +2361,9 @@ class AppController(QObject):
                 "",
                 "مهم بخصوص Android/data:",
                 "يبدأ CN PlayHub بمحاولة ADB مباشرة، ولا يثبت MT Manager أو Shizuku قبل النسخ.",
-                "عند رفض ADB للكتابة فقط، يثبت/يفتح Shizuku ومساعد CN PlayHub على ذلك الهاتف. المساعد الحالي لا يطلب اختيار مجلد عبر SAF؛ تفاعله هو طلب إذن Shizuku عندما لا يكون ممنوحاً مسبقاً.",
-                "لا يغيّر CN PlayHub صلاحيات ملفات الوجهة بعد النسخ؛ عند رفض ADB للكتابة فقط يستخدم Shizuku كمسار احتياطي إذا كان مفوضًا من Android.",
+                "إذا رفض الهاتف فعليًا الكتابة داخل Android/data، يعرض CN PlayHub خيار إعادة النسخ إلى مجلد مستقل في جذر الذاكرة الداخلية.",
+                "عند اختيار «نسخ إلى الجذر» يعيد التطبيق إرسال مصدر النسخ إلى /sdcard/<اسم اللعبة>/؛ ولا يبدأ تحويلًا تلقائيًا إلى Shizuku في هذا المسار.",
+                "لا يغيّر CN PlayHub صلاحيات الملفات أو يحذف بيانات المصدر عند إعادة النسخ إلى الجذر.",
             ])
 
         if "kafianet_shizuku_android16_userservice_incompatible" in raw_error.lower():
@@ -2408,15 +2409,12 @@ class AppController(QObject):
         # ADB may print either "secure_mkdirs failed" or "secure_mkdirs() failed".
         # Normalize the empty call suffix so both forms activate the same safe fallback.
         lowered = lowered.replace("secure_mkdirs()", "secure_mkdirs")
-        if any(marker in lowered for marker in (
-            "kafianet_android_data_permission_denied:",
-            "kafianet_android_data_access_unverified:",
-        )):
+        if "kafianet_android_data_permission_denied:" in lowered:
             return True
 
         # ADB/platform-tools versions vary in how they describe a remote
         # create/write denial. Require both a remote-side operation and an
-        # access-denied reason so local source errors do not start Shizuku.
+        # access-denied reason so local source errors do not open the root dialog.
         remote_write_markers = (
             "remote secure_mkdirs failed",
             "remote open failed",
@@ -2432,6 +2430,7 @@ class AppController(QObject):
         permission_markers = (
             "permission denied",
             "access denied",
+            "read-only file system",
             "operation not permitted",
             "eacces",
             "errno 13",
