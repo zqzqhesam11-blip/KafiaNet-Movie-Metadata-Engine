@@ -1964,7 +1964,7 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
         lambda *values: unrelated_fallbacks.append(values)
     )
     unrelated_operation = dict(
-        rows(["SERIAL_D"])[0],
+        rows(["SERIAL_A"])[0],
         source="source-folder",
         destination="/sdcard/GameData/",
         target_package="",

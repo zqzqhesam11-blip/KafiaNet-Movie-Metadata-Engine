@@ -514,12 +514,14 @@ check(
     and "if not resume_handoff:" in engine_source
     and "cleanup_state[\"local_port\"] = resumed_port" in engine_source,
 )
+reconnect_source = (
+    engine_source.split("def _resume_shizuku_bridge_after_reconnect(", 1)[1]
+    .split("@Slot(str, str, str, str, str, str, str)", 1)[0]
+)
 check(
     "Shizuku reconnect parses the newly forwarded localhost TCP port",
     'port_match = re.search(r"\\b(\\d{4,5})\\b", forward_output)' in engine_source
-    and 'replace("\\\\", "/")' not in (
-        engine_source.split("def _resume_shizuku_bridge_after_reconnect(", 1)[1]
-        .split("@Slot(str, str, str, str, str, str, str)", 1)[0]
-    ),
+    and r'.replace("\\", "/")' in reconnect_source
+    and r'.replace("\\\\", "/")' not in reconnect_source,
 )
 print("SHIZUKU TRANSFER POLICY SIMULATION: PASS")
