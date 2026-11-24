@@ -47,12 +47,6 @@ check(
     ),
 )
 check(
-    "ADB missing-path result on protected Saved activates authoritative Shizuku inspection",
-    AppController._is_android_data_permission_denial(
-        saved, "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED: ADB cannot inspect protected Saved"
-    ),
-)
-check(
     "Shizuku-confirmed missing Saved directory does not loop into fallback",
     not AppController._is_android_data_permission_denial(
         saved, "KAFIANET_SHIZUKU_DESTINATION_MISSING: Saved not found"
@@ -188,25 +182,33 @@ saved_path_guard = (
     engine_source.split("is_saved_destination = (", 1)[1]
     .split("permission_markers =", 1)[0]
 )
+push_source = (
+    engine_source.split("def _push_thread", 1)[1]
+    .split("    @Slot(str, str, str)\n    def push(", 1)[0]
+)
 non_saved_setup = (
-    engine_source.split("if not is_saved_destination:", 1)[1]
-    .split("# Saved must already exist.", 1)[0]
+    push_source.split("if not is_saved_destination:", 1)[1]
+    .split("# Never create Saved or its parents.", 1)[0]
 )
-saved_read_only_check = (
-    engine_source.split("# Saved must already exist.", 1)[1]
-    .split("manifest, total_bytes", 1)[0]
+saved_preflight = (
+    push_source.split("is_saved_destination =", 1)[1]
+    .split("manifest, total_bytes = self._build_direct_stream_manifest(source_path)", 1)[0]
 )
+saved_copy_stage = saved_preflight.split("# Never create Saved or its parents.", 1)[1]
 check(
-    "ADB Saved preflight never creates the Saved destination",
+    "ADB attempts the real push to Saved without a preliminary read/write probe",
     '"/android/data/" in normalized_check_path' in saved_path_guard
     and 'endswith("/saved")' in saved_path_guard
     and '"mkdir"' in non_saved_setup
     and '"-p"' in non_saved_setup
-    and "self._remote_directory_exists(device, check_path)" in saved_read_only_check
-    and '"touch"' not in saved_read_only_check
-    and '"rm"' not in saved_read_only_check
-    and '"mkdir"' not in saved_read_only_check
-    and "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" in engine_source
+    and "self._remote_directory_exists(device, check_path)" not in saved_copy_stage
+    and "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" not in saved_copy_stage
+    and '"touch"' not in saved_copy_stage
+    and '"rm"' not in saved_copy_stage
+    and '"mkdir"' not in saved_copy_stage
+    and '"push"' in push_source
+    and '"--sync"' not in push_source
+    and "KAFIANET_ANDROID_DATA_PERMISSION_DENIED" in push_source
     and "KAFIANET_SHIZUKU_DESTINATION_MISSING" in engine_source,
 )
 check(
