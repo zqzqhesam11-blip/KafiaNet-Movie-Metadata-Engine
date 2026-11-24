@@ -1838,12 +1838,16 @@ def test_secure_mkdirs_partial_directory_retry_is_scoped_to_saved():
 
 
 def test_legacy_root_fallback_prompt_only_after_android_data_denial():
+    destination = "/sdcard/Android/data/com.tencent.ig/files/UE4Game/"
+    reason = "remote secure_mkdirs failed: Permission denied"
+
+    # ADB permission denial must launch Shizuku preparation, not show the
+    # independent-root dialog immediately.
     controller = make_controller()
     fallback_requests = []
     controller.androidDataFallbackRequested.connect(
         lambda *values: fallback_requests.append(values)
     )
-    destination = "/sdcard/Android/data/com.tencent.ig/files/UE4Game/"
     operation = dict(
         rows(["SERIAL_A"])[0],
         source="source-folder",
@@ -1856,18 +1860,37 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     )
 
     controller._start_operation(operation)
-    direct_engine = operation["engine"]
-    assert direct_engine.calls == [
+    adb_engine = operation["engine"]
+    assert adb_engine.calls == [
         ("push", "SERIAL_A", "source-folder", destination)
     ]
 
-    direct_engine.finish(False, "remote secure_mkdirs failed: Permission denied")
+    adb_engine.finish(False, reason)
+    assert fallback_requests == []
+    assert operation["phase"] == "shizuku_prepare"
+    assert operation["shizuku_fallback_attempted"] is True
+    assert operation["shizuku_original_error"] == reason
+    assert any(call[0] == "prepare_shizuku_bridge" for call in adb_engine.calls)
+
+    # A successful Shizuku setup starts the same direct-stream engine.
+    adb_engine.finish(True, json.dumps({"port": 18765, "token": "session-token"}))
+    assert operation["phase"] == "shizuku_copy"
+    assert any(call[0] == "copy_via_shizuku_bridge" for call in adb_engine.calls)
+    assert fallback_requests == []
+
+    # Only a concrete writer-side EACCES/EPERM marker opens the legacy root dialog.
+    writer_denial = (
+        "KAFIANET_SHIZUKU_DESTINATION_WRITE_DENIED: "
+        "open failed: EACCES (Permission denied)"
+    )
+    adb_engine.finish(False, writer_denial)
     assert len(fallback_requests) == 1
-    serial, game_name, root_destination, reason = fallback_requests[0]
+    serial, game_name, root_destination, combined_reason = fallback_requests[0]
     assert serial == "SERIAL_A"
     assert game_name == "PUBG Mobile"
     assert root_destination == "/sdcard/PUBG_Mobile/"
-    assert "Android/data" in reason
+    assert "Android/data" in combined_reason
+    assert writer_denial in combined_reason
     assert operation["phase"] == "awaiting_root_fallback"
     assert operation["awaiting_root_fallback"] is True
     assert operation["completed"] is True
@@ -1875,15 +1898,11 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
         row for row in controller._operation_rows()
         if row["serial"] == "SERIAL_A"
     )["awaitingFallback"] is True
-    assert direct_engine.calls == [
-        ("push", "SERIAL_A", "source-folder", destination)
-    ]
 
-    # The legacy dialog's affirmative action retries the same source at the
-    # game-specific public-storage root, without invoking Shizuku.
+    # The dialog's affirmative action retains the old user-confirmed root retry.
     assert controller.copyToDeviceRoot("SERIAL_A") is True
     root_engine = operation["engine"]
-    assert root_engine is not direct_engine
+    assert root_engine is not adb_engine
     assert root_engine.calls == [
         ("push", "SERIAL_A", "source-folder", "/sdcard/PUBG_Mobile/")
     ]
@@ -1899,31 +1918,63 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     assert len(controller.getTransferHistory()) == 1
     assert controller.getTransferHistory()[0]["status"] == "اكتمل"
 
-    # Direct ADB success and failures outside Android/data never show the prompt.
-    direct = dict(
+    # Shizuku setup or permission-prompt failure must never unlock the root fallback.
+    setup_controller = make_controller()
+    setup_fallbacks = []
+    setup_controller.androidDataFallbackRequested.connect(
+        lambda *values: setup_fallbacks.append(values)
+    )
+    setup_operation = dict(
         rows(["SERIAL_B"])[0],
         source="source-folder",
         destination=destination,
         target_package="com.tencent.ig",
         phase="adb_direct",
     )
-    controller._start_operation(direct)
-    direct_engine = direct["engine"]
-    direct_engine.finish(True, "direct complete")
-    assert len(fallback_requests) == 1
+    setup_controller._start_operation(setup_operation)
+    setup_engine = setup_operation["engine"]
+    setup_engine.finish(False, reason)
+    assert setup_operation["phase"] == "shizuku_prepare"
+    setup_engine.finish(False, "لم يمنح الهاتف تطبيق KafiaNet إذن Shizuku.")
+    assert setup_operation["completed"] is True
+    assert setup_fallbacks == []
 
-    unrelated = dict(
+    # ADB success and failures outside Android/data do not invoke Shizuku or root.
+    success_controller = make_controller()
+    success_fallbacks = []
+    success_controller.androidDataFallbackRequested.connect(
+        lambda *values: success_fallbacks.append(values)
+    )
+    success_operation = dict(
         rows(["SERIAL_C"])[0],
+        source="source-folder",
+        destination=destination,
+        target_package="com.tencent.ig",
+        phase="adb_direct",
+    )
+    success_controller._start_operation(success_operation)
+    success_engine = success_operation["engine"]
+    success_engine.finish(True, "direct complete")
+    assert success_fallbacks == []
+    assert not any(call[0] == "prepare_shizuku_bridge" for call in success_engine.calls)
+
+    unrelated_controller = make_controller()
+    unrelated_fallbacks = []
+    unrelated_controller.androidDataFallbackRequested.connect(
+        lambda *values: unrelated_fallbacks.append(values)
+    )
+    unrelated_operation = dict(
+        rows(["SERIAL_D"])[0],
         source="source-folder",
         destination="/sdcard/GameData/",
         target_package="",
         phase="adb_direct",
     )
-    controller._start_operation(unrelated)
-    unrelated_engine = unrelated["engine"]
+    unrelated_controller._start_operation(unrelated_operation)
+    unrelated_engine = unrelated_operation["engine"]
     unrelated_engine.finish(False, "Permission denied")
-    assert unrelated["completed"] is True
-    assert len(fallback_requests) == 1
+    assert unrelated_operation["completed"] is True
+    assert unrelated_fallbacks == []
     assert not any(
         call[0] == "prepare_shizuku_bridge"
         for engine in FakeOperationEngine.instances
@@ -2796,10 +2847,10 @@ def test_paths_and_ui():
     assert "KafiaNetTransfer" not in adb_source
     helper_gradle = Path("android-helper/app/build.gradle").read_text(encoding="utf-8")
     assert "versionCode 13" in helper_gradle
-    assert "versionName '1.6.6'" in helper_gradle
+    assert "versionName '1.6.7'" in helper_gradle
     assert "install_helper_if_outdated()" in engine_source
-    assert "installed_code >= 13" in engine_source
-    assert ".version(12)" in helper_activity_java
+    assert "installed_code >= 14" in engine_source
+    assert ".version(13)" in helper_activity_java
     assert "Shizuku.addBinderDeadListener(binderDead);" in helper_activity_java
     assert "private volatile boolean bindingService" in helper_activity_java
     assert "private volatile boolean permissionRequestInFlight" in helper_activity_java
