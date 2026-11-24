@@ -9,11 +9,13 @@ import android.system.StructStat;
 
 import androidx.annotation.Keep;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CountDownLatch;
@@ -23,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 public final class TransferUserService extends ITransferUserService.Stub {
     private final Map<String, CopyJob> jobs = new ConcurrentHashMap<>();
     private final Map<String, StreamFileJob> streamFiles = new ConcurrentHashMap<>();
+    private volatile String lastStartError = "";
 
     private static final class CopyJob {
         final AtomicBoolean cancelled = new AtomicBoolean(false);
@@ -32,6 +35,9 @@ public final class TransferUserService extends ITransferUserService.Stub {
         volatile long copiedBytes = 0;
         volatile int totalFiles = 0;
         volatile int copiedFiles = 0;
+        volatile int skippedFiles = 0;
+        volatile long skippedBytes = 0;
+        final Set<String> completedPaths = ConcurrentHashMap.newKeySet();
         volatile long startedAt = System.currentTimeMillis();
 
         JSONObject toJson() {
@@ -44,6 +50,8 @@ public final class TransferUserService extends ITransferUserService.Stub {
                 json.put("copiedBytes", copiedBytes);
                 json.put("totalFiles", totalFiles);
                 json.put("copiedFiles", copiedFiles);
+                json.put("skippedFiles", skippedFiles);
+                json.put("skippedBytes", skippedBytes);
                 json.put("percent", totalBytes > 0
                         ? Math.min(100, (int) (copiedBytes * 100L / totalBytes))
                         : ("complete".equals(state) ? 100 : 0));
@@ -145,36 +153,144 @@ public final class TransferUserService extends ITransferUserService.Stub {
     private File checkedRelativeDestination(String destination, String relativePath)
             throws Exception {
         File root = checkedDestination(destination);
-        String relative = relativePath == null ? "" : relativePath.replace('\\', '/');
-        if (relative.isEmpty() || relative.startsWith("/") || relative.contains(":")) {
-            throw new SecurityException("Invalid relative destination path");
-        }
-
-        String[] segments = relative.split("/", -1);
-        for (String segment : segments) {
-            if (segment.isEmpty() || ".".equals(segment) || "..".equals(segment)) {
-                throw new SecurityException("Unsafe relative destination path");
-            }
-        }
-
-        // Use the destination supplied for this job. Do not compare it with a
-        // fixed Android/data or PUBG path, and do not resolve/deny child paths
-        // based on canonical containment. Create only the requested parents.
+        String[] segments = validatedRelativeSegments(relativePath);
         File current = root;
         for (int i = 0; i < segments.length - 1; i++) {
             File next = new File(current, segments[i]);
-            if (!next.exists() && !next.mkdir() && !next.isDirectory()) {
-                throw new java.io.IOException("Cannot create destination parent: " + next);
+            if (!next.exists()) {
+                try {
+                    Os.mkdir(next.getAbsolutePath(), 0775);
+                } catch (ErrnoException error) {
+                    if (error.errno != OsConstants.EEXIST) throw error;
+                }
             }
             if (!next.isDirectory()) {
                 throw new java.io.IOException("Destination parent is not a directory: " + next);
             }
             current = next;
         }
-
         return new File(current, segments[segments.length - 1]).getAbsoluteFile();
     }
 
+    private String[] validatedRelativeSegments(String relativePath) {
+        String relative = relativePath == null ? "" : relativePath.replace('\\', '/');
+        if (relative.isEmpty() || relative.startsWith("/") || relative.contains(":")
+                || relative.indexOf('\0') >= 0) {
+            throw new SecurityException("Invalid relative destination path");
+        }
+        String[] segments = relative.split("/", -1);
+        for (String segment : segments) {
+            if (segment.isEmpty() || ".".equals(segment) || "..".equals(segment)) {
+                throw new SecurityException("Unsafe relative destination path");
+            }
+        }
+        return segments;
+    }
+
+    private File resolveRelativeDestination(String destination, String relativePath)
+            throws Exception {
+        File root = checkedDestination(destination);
+        String[] segments = validatedRelativeSegments(relativePath);
+        File current = root;
+        for (String segment : segments) current = new File(current, segment);
+        return current.getAbsoluteFile();
+    }
+
+    private static boolean isExplicitPermissionFailure(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof ErrnoException) {
+                int errno = ((ErrnoException) current).errno;
+                if (errno == OsConstants.EACCES || errno == OsConstants.EPERM) return true;
+            }
+            String message = String.valueOf(current.getMessage()).toLowerCase(java.util.Locale.ROOT);
+            if (message.contains("permission denied") || message.contains("operation not permitted")
+                    || message.contains("eacces") || message.contains("errno 13")
+                    || message.contains("eperm") || message.contains("errno 1")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static String describeWriteFailure(Throwable error) {
+        String detail = String.valueOf(error);
+        if (isExplicitPermissionFailure(error)) {
+            return "KAFIANET_SHIZUKU_DESTINATION_WRITE_DENIED: " + detail;
+        }
+        return detail;
+    }
+
+    @Override
+    public String checkDirectStreamFiles(String jobId, String destination, String filesJson) {
+        JSONObject result = new JSONObject();
+        JSONArray skipped = new JSONArray();
+        long skippedBytes = 0L;
+        int skippedCount = 0;
+        try {
+            CopyJob job = jobs.get(jobId);
+            if (job == null || !"running".equals(job.state) || job.cancelled.get()) {
+                throw new IllegalStateException("Direct stream job is not running");
+            }
+            JSONArray files = new JSONArray(filesJson == null ? "[]" : filesJson);
+            for (int index = 0; index < files.length(); index++) {
+                JSONObject item = files.getJSONObject(index);
+                String relativePath = item.getString("path");
+                long expectedSize = item.getLong("size");
+                long modifiedTimeMs = item.getLong("modifiedMs");
+                if (expectedSize < 0 || modifiedTimeMs < 0) {
+                    throw new IllegalArgumentException("Invalid source file metadata");
+                }
+
+                File target = resolveRelativeDestination(destination, relativePath);
+                boolean matches = false;
+                try {
+                    StructStat stat = Os.lstat(target.getAbsolutePath());
+                    matches = OsConstants.S_ISREG(stat.st_mode)
+                            && stat.st_size == expectedSize
+                            && stat.st_mtime == (modifiedTimeMs / 1000L);
+                } catch (ErrnoException error) {
+                    if (error.errno != OsConstants.ENOENT
+                            && error.errno != OsConstants.ENOTDIR) {
+                        throw error;
+                    }
+                }
+
+                if (matches) {
+                    synchronized (job) {
+                        if (job.completedPaths.add(relativePath)) {
+                            job.copiedFiles++;
+                            job.copiedBytes += expectedSize;
+                            job.skippedFiles++;
+                            job.skippedBytes += expectedSize;
+                            skippedCount++;
+                            skippedBytes += expectedSize;
+                            skipped.put(relativePath);
+                        }
+                    }
+                }
+            }
+            result.put("ok", true);
+            result.put("skipped", skipped);
+            result.put("skippedFiles", skippedCount);
+            result.put("skippedBytes", skippedBytes);
+        } catch (Throwable error) {
+            result = new JSONObject();
+            try {
+                result.put("ok", false);
+                result.put("error", error.toString());
+            } catch (Exception ignored) {
+            }
+            android.util.Log.e("KafiaNetBridge", "Direct-stream sync check failed", error);
+        }
+        return result.toString();
+    }
+
+    @Override
+    public String getLastStartError() {
+        return lastStartError;
+    }
 
     @Override
     public boolean beginDirectStreamJob(
@@ -211,6 +327,7 @@ public final class TransferUserService extends ITransferUserService.Stub {
             long expectedSize,
             long modifiedTime,
             ParcelFileDescriptor source) {
+        lastStartError = "";
         ParcelFileDescriptor reader = null;
         try {
             if (source == null || jobId == null || fileId == null
@@ -226,7 +343,14 @@ public final class TransferUserService extends ITransferUserService.Stub {
             File target = checkedRelativeDestination(destination, relativePath);
             File parent = target.getParentFile();
             if (parent == null || !parent.isDirectory()) {
+                lastStartError = "KAFIANET_SHIZUKU_FILE_START_FAILED: destination parent is missing";
                 return false;
+            }
+            synchronized (job) {
+                if (job.completedPaths.contains(relativePath)) {
+                    lastStartError = "KAFIANET_SHIZUKU_FILE_ALREADY_COMPLETE: " + relativePath;
+                    return false;
+                }
             }
 
             reader = ParcelFileDescriptor.dup(source.getFileDescriptor());
@@ -296,11 +420,14 @@ public final class TransferUserService extends ITransferUserService.Stub {
                     if (modifiedTime > 0) target.setLastModified(modifiedTime);
 
                     synchronized (job) {
+                        if (!job.completedPaths.add(relativePath)) {
+                            throw new IllegalStateException("Direct-stream path was already counted: " + relativePath);
+                        }
                         job.copiedFiles++;
                     }
                     stream.state = "complete";
                 } catch (Throwable error) {
-                    stream.error = error.toString();
+                    stream.error = describeWriteFailure(error);
                     stream.state = job.cancelled.get() ? "cancelled" : "failed";
                     job.error = stream.error;
                     job.state = stream.state;
@@ -323,6 +450,7 @@ public final class TransferUserService extends ITransferUserService.Stub {
             worker.start();
             return true;
         } catch (Throwable error) {
+            lastStartError = describeWriteFailure(error);
             android.util.Log.e("KafiaNetBridge", "Could not start direct stream file", error);
             if (reader != null) {
                 try { reader.close(); } catch (Exception ignored) { }

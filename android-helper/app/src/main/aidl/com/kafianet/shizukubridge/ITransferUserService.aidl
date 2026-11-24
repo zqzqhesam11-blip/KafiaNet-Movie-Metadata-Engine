@@ -12,4 +12,6 @@ interface ITransferUserService {
     boolean startDirectStreamFile(String jobId, String fileId, String destination, String relativePath, long expectedSize, long modifiedTime, in ParcelFileDescriptor source) = 13;
     String getDirectStreamFileStatus(String fileId) = 14;
     void finishDirectStreamJob(String jobId) = 15;
+    String checkDirectStreamFiles(String jobId, String destination, String filesJson) = 17;
+    String getLastStartError() = 18;
 }

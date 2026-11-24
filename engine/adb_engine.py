@@ -2731,7 +2731,7 @@ exit 3
                     )
                     match = re.search(r"\\bversionCode=(\\d+)", version_text)
                     installed_code = int(match.group(1)) if match else 0
-                    if installed_code >= 13:
+                    if installed_code >= 14:
                         self.logChanged.emit(
                             "مساعد CN PlayHub محدث؛ سنستخدم النسخة المثبتة."
                         )
@@ -3069,9 +3069,60 @@ exit 3
                         str(accepted.get("error") or "رفض Shizuku بدء النقل المباشر.")
                     )
 
-                print("SHIZUKU DIRECT STREAM STARTED:", device, total_files, total_bytes)
+                skipped_paths = set()
+                skipped_bytes = 0
+                skipped_files = 0
+                sync_batch_size = 256
+                for offset in range(0, total_files, sync_batch_size):
+                    batch = files[offset:offset + sync_batch_size]
+                    sync_result = request_json(
+                        "/stream/check",
+                        method="POST",
+                        payload={
+                            "jobId": job_id,
+                            "files": [
+                                {
+                                    "path": relative_path,
+                                    "size": file_size,
+                                    "modifiedMs": modified_ms,
+                                }
+                                for _, relative_path, file_size, modified_ms in batch
+                            ],
+                        },
+                        timeout=60,
+                    )
+                    if sync_result.get("ok") is not True:
+                        raise RuntimeError(
+                            "KAFIANET_SHIZUKU_FILE_SYNC_CHECK_FAILED: "
+                            + str(sync_result.get("error") or "تعذر فحص الملفات الموجودة.")
+                        )
+                    for relative_path in (sync_result.get("skipped") or []):
+                        skipped_paths.add(str(relative_path))
+                    skipped_files += int(sync_result.get("skippedFiles") or 0)
+                    skipped_bytes += int(sync_result.get("skippedBytes") or 0)
+
+                known_paths = {relative_path for _, relative_path, _, _ in files}
+                if not skipped_paths.issubset(known_paths):
+                    raise RuntimeError("KAFIANET_SHIZUKU_FILE_SYNC_CHECK_FAILED: helper returned an unknown source path")
+                if len(skipped_paths) != skipped_files:
+                    raise RuntimeError("KAFIANET_SHIZUKU_FILE_SYNC_CHECK_FAILED: skipped-file count mismatch")
+                expected_skipped_bytes = sum(
+                    file_size
+                    for _, relative_path, file_size, _ in files
+                    if relative_path in skipped_paths
+                )
+                if expected_skipped_bytes != skipped_bytes:
+                    raise RuntimeError("KAFIANET_SHIZUKU_FILE_SYNC_CHECK_FAILED: skipped-byte count mismatch")
+
+                files_to_send = [item for item in files if item[1] not in skipped_paths]
+                print(
+                    "SHIZUKU DIRECT STREAM STARTED:",
+                    device, total_files, total_bytes,
+                    "| skipped:", skipped_files, "files /", skipped_bytes, "bytes",
+                    "| pending:", len(files_to_send),
+                )
                 started = time.monotonic()
-                confirmed_bytes = 0
+                confirmed_bytes = skipped_bytes
                 sent_bytes = 0
                 last_emit = 0.0
                 last_percent = -1
@@ -3102,7 +3153,7 @@ exit 3
                         )
                         last_percent = percent
 
-                for index, (local_file, relative_path, file_size, modified_ms) in enumerate(files, start=1):
+                for index, (local_file, relative_path, file_size, modified_ms) in enumerate(files_to_send, start=1):
                     if self._cancel_event.is_set():
                         raise RuntimeError("تم إلغاء النسخ المباشر عبر Shizuku.")
                     self._pause_event.wait()
@@ -3177,7 +3228,9 @@ exit 3
                     True,
                     "اكتمل النقل المباشر إلى مجلد اللعبة عبر Shizuku. "
                     + str(final_status.get("copiedFiles") or total_files)
-                    + " ملفًا، دون مجلد وسيط."
+                    + " ملفًا، وتم تخطي "
+                    + str(final_status.get("skippedFiles") or skipped_files)
+                    + " ملفًا مطابقًا للحجم وتاريخ التعديل، دون مجلد وسيط."
                 )
             except Exception as exc:
                 print("KAFIANET SHIZUKU DIRECT STREAM FAILED:", device, exc)

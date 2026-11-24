@@ -113,8 +113,8 @@ check(
     ADBEngine._version_key("14.0.1") > ADBEngine._version_key("13.6.0"),
 )
 check(
-    "CN PlayHub helper 1.6.6 parses",
-    ADBEngine._version_key("1.6.6") == (1, 6, 6),
+    "CN PlayHub helper 1.6.7 parses",
+    ADBEngine._version_key("1.6.7") == (1, 6, 7),
 )
 
 helper_service = (
@@ -293,7 +293,7 @@ check(
     and "install_if_missing" in prepare_source
     and "def install_helper_if_outdated():" in prepare_source
     and '"dumpsys", "package", helper_package' in prepare_source
-    and "installed_code >= 13" in prepare_source
+    and "installed_code >= 14" in prepare_source
     and "install_helper_if_outdated()" in prepare_source
     and "install_if_missing(shizuku_apk, shizuku_package, \"Shizuku\")" in prepare_source,
 )
@@ -419,6 +419,73 @@ check(
     and cod_start > flash_start
     and all(marker in pubg_source_block for marker in saved_source_guards)
     and all(marker in pubg_flash_source_block for marker in saved_source_guards),
+)
+
+check(
+    "Shizuku fallback is called only after a confirmed ADB protected-write denial",
+    "self._begin_shizuku_fallback(serial, operation, message)" in app_source
+    and "self._request_android_data_root_fallback(serial, operation, message)" not in (
+        app_source.split('if phase == "adb_direct":', 1)[1]
+        .split('if phase == "shizuku_prepare":', 1)[0]
+    ),
+)
+check(
+    "root fallback after Shizuku requires the explicit protected-destination writer denial marker",
+    "def _is_shizuku_destination_write_denial(" in app_source
+    and "self._is_shizuku_destination_write_denial(" in app_source
+    and "kafianet_shizuku_destination_write_denied:" in app_source,
+)
+check(
+    "only explicit Shizuku writer EACCES/EPERM opens root fallback",
+    AppController._is_shizuku_destination_write_denial(
+        saved, "KAFIANET_SHIZUKU_DESTINATION_WRITE_DENIED: open failed: EACCES (Permission denied)"
+    )
+    and not AppController._is_shizuku_destination_write_denial(
+        saved, "لم يمنح الهاتف تطبيق KafiaNet إذن Shizuku"
+    )
+    and not AppController._is_shizuku_destination_write_denial(
+        saved, "KAFIANET_SHIZUKU_DESTINATION_MISSING: Saved not found"
+    )
+    and not AppController._is_shizuku_destination_write_denial(
+        saved, "No space left on device"
+    )
+    and not AppController._is_shizuku_destination_write_denial(
+        "/storage/emulated/0/Download/Saved",
+        "KAFIANET_SHIZUKU_DESTINATION_WRITE_DENIED: EACCES"
+    ),
+)
+aidl_source = (
+    ROOT / "android-helper/app/src/main/aidl/com/kafianet/shizukubridge/ITransferUserService.aidl"
+).read_text(encoding="utf-8")
+check(
+    "Shizuku bridge exposes batched sync checks and precise stream-start errors",
+    "checkDirectStreamFiles(String jobId, String destination, String filesJson) = 17;" in aidl_source
+    and "getLastStartError() = 18;" in aidl_source,
+)
+check(
+    "Shizuku skips only regular files matching exact size and second-resolution mtime",
+    "Os.lstat(target.getAbsolutePath())" in helper_service
+    and "OsConstants.S_ISREG(stat.st_mode)" in helper_service
+    and "stat.st_size == expectedSize" in helper_service
+    and "stat.st_mtime == (modifiedTimeMs / 1000L)" in helper_service,
+)
+check(
+    "Shizuku records skipped files and bytes in the same completion totals",
+    "job.skippedFiles++" in helper_service
+    and "job.skippedBytes += expectedSize" in helper_service
+    and "job.completedPaths.add(relativePath)" in helper_service,
+)
+check(
+    "Shizuku checks file metadata in bounded batches and sends only nonmatching files",
+    'request_json(\n                        "/stream/check"' in engine_source
+    and "sync_batch_size = 256" in engine_source
+    and "files_to_send = [" in engine_source
+    and "enumerate(files_to_send, start=1)" in engine_source,
+)
+check(
+    "Shizuku writer emits a distinct marker only when an attempted write gets EACCES/EPERM",
+    "KAFIANET_SHIZUKU_DESTINATION_WRITE_DENIED:" in helper_service
+    and "describeWriteFailure(error)" in helper_service,
 )
 
 print("SHIZUKU TRANSFER POLICY SIMULATION: PASS")

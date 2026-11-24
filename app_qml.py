@@ -2049,7 +2049,10 @@ class AppController(QObject):
                     operation.get("destination", ""), message
                 )
             ):
-                self._request_android_data_root_fallback(serial, operation, message)
+                # A confirmed ADB write denial must try Shizuku first. The
+                # independent-storage-root option is offered only if Shizuku
+                # also reaches the destination writer and receives EACCES/EPERM.
+                self._begin_shizuku_fallback(serial, operation, message)
                 return
             if success and self._advance_copy_part(serial, operation):
                 return
@@ -2112,6 +2115,22 @@ class AppController(QObject):
             return
 
         if phase == "shizuku_copy":
+            if (
+                not success
+                and operation.get("kind") == "copy"
+                and not operation.get("cancelled", False)
+                and not operation.get("root_fallback_attempted", False)
+                and self._is_shizuku_destination_write_denial(
+                    operation.get("destination", ""), message
+                )
+            ):
+                adb_error = str(operation.get("shizuku_original_error") or "")
+                combined = (
+                    "ADB write denied: " + adb_error
+                    + "\nShizuku destination write denied: " + str(message or "")
+                )
+                self._request_android_data_root_fallback(serial, operation, combined)
+                return
             if success and self._advance_copy_part(serial, operation):
                 return
             operation["phase"] = "final"
@@ -2244,6 +2263,8 @@ class AppController(QObject):
 
         text = str(raw_message or "")
         lowered = text.lower()
+        if "kafianet_shizuku_destination_write_denied" in lowered:
+            return "رفض ADB الكتابة إلى Android/data، ثم رفض Shizuku الكتابة إلى الوجهة المحمية أيضًا. يمكنك الآن اختيار النسخ إلى مجلد مستقل في جذر الذاكرة."
         if "kafianet_shizuku_destination_access_denied" in lowered:
             return "استطاع Shizuku بدء الفحص لكنه لم يحصل على صلاحية قراءة مجلد Saved. راجع صلاحيات Shizuku وحماية الشركة المصنّعة؛ لم نعتبر المجلد مفقودًا."
         if "kafianet_shizuku_destination_missing" in lowered:
@@ -2445,6 +2466,19 @@ class AppController(QObject):
             any(marker in lowered for marker in remote_write_markers)
             and any(marker in lowered for marker in permission_markers)
         )
+
+    @staticmethod
+    def _is_shizuku_destination_write_denial(destination, raw_message):
+        target = str(destination or "").replace("\\", "/").lower()
+        if target.startswith("/sdcard/"):
+            target = "/storage/emulated/0/" + target[len("/sdcard/"):]
+        if "/android/data/" not in target:
+            return False
+        # This marker is emitted only by the Shizuku-side mkdir/open/rename
+        # writer after explicit EACCES or EPERM. Service startup failures,
+        # a declined Shizuku prompt, missing paths, storage errors, and
+        # transport failures must never offer the independent-root fallback.
+        return "kafianet_shizuku_destination_write_denied:" in str(raw_message or "").lower()
 
     def _finished_for_device(self, serial, success, message):
         print("FINISHED:", serial, success, message)

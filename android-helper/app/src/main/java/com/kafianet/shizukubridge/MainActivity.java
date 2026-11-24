@@ -178,7 +178,7 @@ public final class MainActivity extends Activity {
                     .daemon(false)
                     .processNameSuffix("transfer")
                     .debuggable(false)
-                    .version(12)
+                    .version(13)
                     .tag("kafianet-file-transfer");
 
     @Override
@@ -470,6 +470,18 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("Shizuku is not ready for destination inspection");
                 }
                 result = new JSONObject(userService.inspectDestination(destination));
+            } else if ("POST".equals(method) && "/stream/check".equals(path)) {
+                JSONObject payload = new JSONObject(new String(body, 0, read, StandardCharsets.UTF_8));
+                String jobId = payload.getString("jobId");
+                JSONArray files = payload.getJSONArray("files");
+                String destination = directStreamDestinations.get(jobId);
+                if (userService == null || !state.startsWith("ready_")
+                        || destination == null || destination.isEmpty()) {
+                    throw new IllegalStateException("No active Shizuku stream job for sync check");
+                }
+                result = new JSONObject(userService.checkDirectStreamFiles(
+                        jobId, destination, files.toString()
+                ));
             } else if ("POST".equals(method) && "/stream/start".equals(path)) {
                 JSONObject payload = new JSONObject(new String(body, 0, read, StandardCharsets.UTF_8));
                 String jobId = payload.getString("jobId");
@@ -587,8 +599,11 @@ public final class MainActivity extends Activity {
             );
             if (!started) {
                 try { pipe[1].close(); } catch (Exception ignored) { }
+                String startError = userService.getLastStartError();
                 return new JSONObject().put("accepted", false)
-                        .put("error", "Shizuku could not start the destination file writer");
+                        .put("error", startError == null || startError.isEmpty()
+                                ? "KAFIANET_SHIZUKU_FILE_START_FAILED: Shizuku could not start the destination file writer"
+                                : startError);
             }
         } finally {
             try { pipe[0].close(); } catch (Exception ignored) { }
