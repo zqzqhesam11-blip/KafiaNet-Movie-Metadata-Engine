@@ -360,6 +360,7 @@ class AppController(QObject):
     transferBatchChanged = Signal(list)
     deviceProgressChanged = Signal(str, int, str, str, str, str, str)
     operationFinished = Signal(str)
+    androidDataFallbackRequested = Signal(str, str, str, str)
     busyChanged = Signal(bool)
     usbChanged = Signal(str)
     destinationChanged = Signal(str)
@@ -1746,6 +1747,7 @@ class AppController(QObject):
                 "raw_error": operation.get("raw_error", ""),
                 "cancelled": operation.get("cancelled", False),
                 "completed": operation.get("completed", False),
+                "awaitingFallback": operation.get("awaiting_root_fallback", False),
                 "copied_files": operation.get("copied_files", 0),
                 "skipped_files": operation.get("skipped_files", 0),
             }
@@ -1972,6 +1974,52 @@ class AppController(QObject):
         engine.push(serial, operation["source"], operation["destination"])
         return True
 
+    @staticmethod
+    def _root_fallback_destination(game_name):
+        folder = str(game_name or "GameData").strip()
+        for character in ('\\\\', '/', ':', '*', '?', '"', '<', '>', '|'):
+            folder = folder.replace(character, "_")
+        folder = folder.replace(" ", "_").strip("._")
+        if not folder:
+            folder = "GameData"
+        return f"/sdcard/{folder}/"
+
+    def _request_android_data_root_fallback(self, serial, operation, raw_message):
+        raw_error = str(raw_message or "")
+        operation["raw_error"] = raw_error
+        message = self._device_copy_failure_summary(serial, operation, raw_error)
+        destination = self._root_fallback_destination(operation.get("game", ""))
+        operation.update({
+            "awaiting_root_fallback": True,
+            "completed": True,
+            "phase": "awaiting_root_fallback",
+            "status": "بانتظار اختيار وجهة بديلة",
+            "operation": "بانتظار اختيار وجهة بديلة",
+            "error": message,
+            "result": {
+                "serial": serial,
+                "success": False,
+                "message": message,
+            },
+        })
+        self._emit_operation_state()
+        self.operationFinished.emit(f"{serial}: FAILED")
+        self.transferFinished.emit(False, message)
+        self.messageChanged.emit(message)
+        operation["engine"] = None
+
+        reason = (
+            str(message)
+            + "\\n\\nرسالة ADB الأصلية:\\n"
+            + raw_error
+        )
+        self.androidDataFallbackRequested.emit(
+            serial,
+            str(operation.get("game", "")),
+            destination,
+            reason,
+        )
+
     def _engine_finished_for_device(self, serial, success, message):
         operation = self._active_operations.get(serial)
         if operation is None or operation.get("completed"):
@@ -1990,12 +2038,12 @@ class AppController(QObject):
                 not success
                 and operation.get("kind") == "copy"
                 and not operation.get("cancelled", False)
-                and not operation.get("shizuku_fallback_attempted", False)
+                and not operation.get("root_fallback_attempted", False)
                 and self._is_android_data_permission_denial(
                     operation.get("destination", ""), message
                 )
             ):
-                self._begin_shizuku_fallback(serial, operation, message)
+                self._request_android_data_root_fallback(serial, operation, message)
                 return
             if success and self._advance_copy_part(serial, operation):
                 return
@@ -2066,6 +2114,57 @@ class AppController(QObject):
 
         operation["phase"] = "final"
         self._finished_for_device(serial, success, message)
+
+    @Slot(str, result=bool)
+    def copyToDeviceRoot(self, serial):
+        operation = self._active_operations.get(serial)
+        if operation is None or not operation.get("awaiting_root_fallback", False):
+            self.messageChanged.emit("لا يوجد طلب نسخ بديل معلّق لهذا الهاتف.")
+            return False
+
+        original_destination = operation.get(
+            "original_destination", operation.get("destination", "")
+        )
+        destination = self._root_fallback_destination(operation.get("game", ""))
+        operation.update({
+            "original_destination": original_destination,
+            "destination": destination,
+            "root_fallback_attempted": True,
+            "awaiting_root_fallback": False,
+            "completed": False,
+            "phase": "adb_direct",
+            "status": "جاري النسخ إلى الجذر",
+            "percent": 0,
+            "operation": "نسخ إلى مجلد مستقل في جذر الذاكرة",
+            "speed": "0 B/s",
+            "eta": "--",
+            "error": "",
+            "raw_error": "",
+            "history_recorded": False,
+        })
+        operation.pop("result", None)
+        self.messageChanged.emit(
+            f"إعادة نسخ {operation.get('game', 'البيانات')} إلى {destination}"
+        )
+        self._start_operation(operation)
+        return True
+
+    @Slot(str, result=bool)
+    def declineRootFallback(self, serial):
+        operation = self._active_operations.get(serial)
+        if operation is None or not operation.get("awaiting_root_fallback", False):
+            return False
+
+        operation["awaiting_root_fallback"] = False
+        operation["completed"] = True
+        operation["phase"] = "final"
+        operation["status"] = "فشل"
+        operation["operation"] = "تم إلغاء النسخ إلى الجذر"
+        message = "تم إلغاء النسخ إلى الجذر؛ لم يُجرَ نقل بديل."
+        self._record_transfer_history(operation, False, message)
+        self._emit_operation_state()
+        self.messageChanged.emit(message)
+        return True
 
     def _begin_shizuku_fallback(self, serial, operation, original_error):
         package_name = str(operation.get("target_package") or "")
