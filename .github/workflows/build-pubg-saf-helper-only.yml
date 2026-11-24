@@ -1,0 +1,79 @@
+name: CN PlayHub - Build PUBG SAF Helper Only
+
+on:
+  push:
+    branches:
+      - feature/pubg-saf-picker-helper-only-20261125
+    paths:
+      - 'android-helper/**'
+      - '.github/workflows/build-pubg-saf-helper-only.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cn-playhub-pubg-saf-helper-only
+  cancel-in-progress: false
+
+jobs:
+  build-pubg-saf-helper:
+    name: Build only the Android helper APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout helper-only branch
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK 35
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.10.2'
+          cache-provider: basic
+
+      - name: Verify this workflow builds only the companion helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F "applicationId 'com.kafianet.shizukubridge'" android-helper/app/build.gradle
+          grep -F "targetSdk 29" android-helper/app/build.gradle
+          grep -F 'Intent.ACTION_OPEN_DOCUMENT_TREE' android-helper/app/src/main/java/com/kafianet/shizukubridge/MainActivity.java
+          grep -F 'takePersistableUriPermission' android-helper/app/src/main/java/com/kafianet/shizukubridge/MainActivity.java
+
+      - name: Run helper unit tests and build release APK
+        run: |
+          gradle -p android-helper :app:testReleaseUnitTest :app:assembleRelease --no-daemon --console=plain
+
+      - name: Verify APK identity and calculate SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="android-helper/app/build/outputs/apk/release/app-release.apk"
+          aapt="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          test -s "$apk"
+          test -x "$aapt"
+          badging="$("$aapt" dump badging "$apk")"
+          grep -F "package: name='com.kafianet.shizukubridge' versionCode='15' versionName='1.6.8'" <<< "$badging"
+          ls -lh "$apk"
+          sha256sum "$apk" | tee kafianet-pubg-saf-helper-SHA256.txt
+
+      - name: Upload helper-only APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: KafiaNet-PUBG-SAF-Helper-Only-v1.6.8
+          path: |
+            android-helper/app/build/outputs/apk/release/app-release.apk
+            kafianet-pubg-saf-helper-SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
