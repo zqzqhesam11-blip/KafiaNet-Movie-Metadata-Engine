@@ -1107,7 +1107,9 @@ def test_saved_copy_never_changes_permissions_or_writes_probe_files():
     assert "write_test_" not in push_source
     assert '"touch"' not in push_source
     assert '"rm"' not in push_source
-    assert "if is_saved_destination and not self._remote_directory_exists(device, check_path):" in push_source
+    assert "if is_saved_destination and not self._remote_directory_exists(device, check_path):" not in push_source
+    assert "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" not in push_source
+    assert "Never create Saved or its parents." in push_source
     for engine_path in (
         "engine/efootball_saf_engine.py",
         "engine/transfer_engine.py",
@@ -1727,11 +1729,8 @@ def test_shizuku_fallback_recognizes_android_data_remote_error_variants():
             destination, message
         ) is True, message
 
-    # ADB may misreport a protected Android/data/Saved path as missing.
-    assert app_qml.AppController._is_android_data_permission_denial(
-        destination,
-        "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED: ADB could not inspect protected Saved",
-    ) is True
+    # ADB inspection failure alone must not be emitted as a pre-copy denial.
+    assert "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" not in adb_source
 
     # A confirmed missing path from the Shizuku-identity preflight is final;
     # it must not loop back into the same fallback.
@@ -2563,9 +2562,11 @@ def test_paths_and_ui():
     assert "if not is_saved_destination:" in preflight_source
     assert "Never create Saved or its parents." in push_source
     assert '"mkdir", "-p", check_path' in preflight_source
-    # Saved is only inspected read-only; ADB inability to inspect it routes to Shizuku.
-    assert "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" in preflight_source
-    assert "if is_saved_destination and not self._remote_directory_exists(device, check_path):" in preflight_source
+    # Saved is not probed before transfer; the real ADB push decides whether it can write.
+    assert "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" not in preflight_source
+    assert "if is_saved_destination and not self._remote_directory_exists(device, check_path):" not in preflight_source
+    assert "self._remote_directory_exists(device, check_path)" not in preflight_source
+    assert "Never create Saved or its parents." in preflight_source
     assert '"push"' in push_source
     assert "self._preexisting_sync_plan" not in push_source
     assert "self._stream_pending_files" not in push_source
@@ -2808,7 +2809,8 @@ def test_paths_and_ui():
     # The transfer engine never requests ADB sync or skips matching files.
     assert 'command.append("--sync")' not in engine_source
     assert '"--sync"' not in push_source
-    assert "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" in push_source
+    assert "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED" not in push_source
+    assert "KAFIANET_ANDROID_DATA_PERMISSION_DENIED" in push_source
     assert '"/destination/check"' in engine_source
     assert "KAFIANET_SHIZUKU_DESTINATION_MISSING" in engine_source
     assert "KAFIANET_SHIZUKU_DESTINATION_ACCESS_DENIED" in engine_source
