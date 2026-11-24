@@ -247,7 +247,8 @@ public final class PubgOfflineFinalizeService extends Service {
         ));
         for (File child : children) {
             checkCancelled();
-            if (child.isSymbolicLink()) {
+            File canonicalChild = child.getCanonicalFile();
+            if (!canonicalChild.equals(child.getAbsoluteFile())) {
                 throw new SecurityException("رُفض رابط رمزي داخل نسخة الجذر: " + child.getName());
             }
             String childRelative = relative.isEmpty()
