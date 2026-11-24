@@ -912,19 +912,10 @@ class ADBEngine(QObject):
                     self.finished.emit(False, failure)
                     return
 
-            # Saved must already exist. Leave its existing contents untouched until the actual copy starts.
-            # ADB may be unable to inspect a protected Android/data path; route that case to
-            # Shizuku, which performs its own read-only destination check before copying.
-            if is_saved_destination and not self._remote_directory_exists(device, check_path):
-                failure = (
-                    "KAFIANET_ANDROID_DATA_ACCESS_UNVERIFIED: "
-                    "تعذر على ADB التحقق من مجلد Saved؛ سيتم فحص الوجهة عبر Shizuku: "
-                    + check_path
-                )
-                self.statusChanged.emit("سيتم فحص وجهة Saved عبر Shizuku...")
-                self.finished.emit(False, failure)
-                return
-
+            # Never create Saved or its parents. Do not preflight Saved with "test -d":
+            # some Android builds deny shell inspection even when adb push can write.
+            # Let the actual ADB push determine access; only a genuine remote write
+            # denial below should activate the Shizuku fallback.
             manifest, total_bytes = self._build_direct_stream_manifest(source_path)
 
             progress_offset_bytes = min(
