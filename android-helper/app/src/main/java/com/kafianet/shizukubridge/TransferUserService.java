@@ -187,9 +187,7 @@ public final class TransferUserService extends ITransferUserService.Stub {
         return segments;
     }
 
-    private File resolveRelativeDestination(String destination, String relativePath)
-            throws Exception {
-        File root = checkedDestination(destination);
+    private File resolveRelativeDestination(File root, String relativePath) {
         String[] segments = validatedRelativeSegments(relativePath);
         File current = root;
         for (String segment : segments) current = new File(current, segment);
@@ -233,6 +231,7 @@ public final class TransferUserService extends ITransferUserService.Stub {
             if (job == null || !"running".equals(job.state) || job.cancelled.get()) {
                 throw new IllegalStateException("Direct stream job is not running");
             }
+            File syncRoot = checkedDestination(destination);
             JSONArray files = new JSONArray(filesJson == null ? "[]" : filesJson);
             for (int index = 0; index < files.length(); index++) {
                 JSONObject item = files.getJSONObject(index);
@@ -243,7 +242,7 @@ public final class TransferUserService extends ITransferUserService.Stub {
                     throw new IllegalArgumentException("Invalid source file metadata");
                 }
 
-                File target = resolveRelativeDestination(destination, relativePath);
+                File target = resolveRelativeDestination(syncRoot, relativePath);
                 boolean matches = false;
                 try {
                     StructStat stat = Os.lstat(target.getAbsolutePath());
@@ -252,9 +251,14 @@ public final class TransferUserService extends ITransferUserService.Stub {
                             && stat.st_mtime == (modifiedTimeMs / 1000L);
                 } catch (ErrnoException error) {
                     if (error.errno != OsConstants.ENOENT
-                            && error.errno != OsConstants.ENOTDIR) {
+                            && error.errno != OsConstants.ENOTDIR
+                            && error.errno != OsConstants.EACCES
+                            && error.errno != OsConstants.EPERM) {
                         throw error;
                     }
+                    // If metadata cannot be inspected, do not skip the file.
+                    // Let the actual writer report a precise EACCES/EPERM if it
+                    // also cannot create or replace the destination file.
                 }
 
                 if (matches) {
