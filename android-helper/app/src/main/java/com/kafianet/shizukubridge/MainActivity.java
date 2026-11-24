@@ -8,6 +8,7 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.provider.DocumentsContract;
 import android.content.UriPermission;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -70,7 +71,6 @@ public final class MainActivity extends Activity {
     private volatile boolean serviceBound = false;
     private volatile boolean permissionRequestInFlight = false;
     private volatile long permissionRequestStartedAt = 0L;
-    private volatile boolean bridgeModeActive = false;
     private boolean shizukuListenersRegistered = false;
     private boolean httpServerStarted = false;
 
@@ -230,7 +230,6 @@ public final class MainActivity extends Activity {
     }
 
     private void activateBridgeMode() {
-        bridgeModeActive = true;
         if (!httpServerStarted) {
             httpServerStarted = true;
             startHttpServer();
@@ -257,7 +256,11 @@ public final class MainActivity extends Activity {
                     "primary:Android/data/" + PUBG_PACKAGE
             );
             Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-            picker.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
+            // EXTRA_INITIAL_URI was added in API 26. On API 24-25 open the
+            // picker normally and let the user navigate to the PUBG directory.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                picker.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
+            }
             picker.addFlags(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                             | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
