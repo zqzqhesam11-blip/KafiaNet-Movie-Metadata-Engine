@@ -532,6 +532,6 @@ check(
     handoff_source.index("resume_handoff = True") < handoff_source.index(
         "self.copy_via_shizuku_bridge("
     )
-    and "except Exception:\\n                            resume_handoff = False" in handoff_source,
+    and "except Exception:\n                            resume_handoff = False" in handoff_source,
 )
 print("SHIZUKU TRANSFER POLICY SIMULATION: PASS")
