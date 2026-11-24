@@ -3006,7 +3006,7 @@ def run_once():
     test_direct_stream_rejects_source_size_changes()
     test_direct_stream_manifest_preserves_game_relative_paths()
     test_saved_copy_never_changes_permissions_or_writes_probe_files()
-    test_fullscreen_enters_even_when_native_guard_is_unavailable()
+    test_fullscreen_button_requires_native_guard_and_restores_it()
     test_legacy_successful_phone_register_is_no_longer_used()
     test_launch_game_resolves_and_starts_installed_package()
     test_adb_game_close_is_silent_and_package_scoped()
