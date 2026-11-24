@@ -26,7 +26,7 @@ android {
 
     lint {
         // This helper is sideloaded by CN PlayHub, not distributed through Google Play.
-        // Target 29 intentionally preserves the legacy SAF picker behavior for Android/data.
+        // Android 11+ SAF restrictions for Android/data are gated to apps targeting API 30+.
         disable 'ExpiredTargetSdkVersion'
     }
 
