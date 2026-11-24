@@ -2788,12 +2788,15 @@ def test_paths_and_ui():
     assert "prepareDestinationWritable" not in helper_aidl
     assert "startDirectStreamFile" in helper_aidl
     assert "getDirectStreamFileStatus" in helper_aidl
+    assert "checkDirectStreamFiles" in helper_aidl
+    assert "getLastStartError" in helper_aidl
     assert '"/destination/check"' in helper_activity_java
     assert "ParcelFileDescriptor.createPipe()" in helper_activity_java
     assert "ParcelFileDescriptor.AutoCloseOutputStream" in helper_activity_java
     assert '"/stream/file"' in helper_activity_java
     assert '"/permissions"' not in helper_activity_java
-    assert '"/stream/check"' not in helper_activity_java
+    assert '"/stream/check"' in helper_activity_java
+    assert "userService.checkDirectStreamFiles(" in helper_activity_java
     assert "private JSONObject receiveDirectStreamFile(" in helper_activity_java
     assert "userService.startDirectStreamFile(" in helper_activity_java
     assert "private void executeCopy(" not in helper_activity_java
