@@ -1,5 +1,11 @@
 """Regression checks for the Windows password-protected fullscreen guard."""
 from pathlib import Path
+import sys
+
+# Running a script by path sets sys.path[0] to validation/, not the repo root.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from engine.windows_fullscreen import WindowsFullscreenProtection
 
