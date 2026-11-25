@@ -17,9 +17,9 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-HELPER_PACKAGE = "com.kafianet.efootball.saf"
-HELPER_ACTIVITY = HELPER_PACKAGE + "/.MainActivity"
-HELPER_APK_NAME = "KafiaNetEFootballSAF.apk"
+HELPER_PACKAGE = "com.kafianet.shizukubridge"
+HELPER_ACTIVITY = HELPER_PACKAGE + "/.EFootballActivity"
+HELPER_APK_NAME = "CNPlayHubShizukuBridge.apk"
 SERVER_PORT = 18766
 EXPECTED_PROVIDER_AUTHORITY = "com.ziru.official.MTDataFilesProvider"
 CHUNK_SIZE = 1024 * 1024
@@ -118,7 +118,7 @@ class EFootballSAFEngine(QObject):
         apk = BASE_DIR / "android_support" / HELPER_APK_NAME
         if not apk.is_file():
             raise FileNotFoundError(
-                "ملف مساعد eFootball SAF غير موجود داخل حزمة البرنامج: " + str(apk)
+                "ملف مساعد KafiaNet الموحد غير موجود داخل حزمة البرنامج: " + str(apk)
             )
         self.statusChanged.emit("جاري تثبيت مساعد eFootball SAF على الهاتف...")
         installed_result = self._run_adb(
@@ -142,7 +142,7 @@ class EFootballSAFEngine(QObject):
         output = self._result_text(result)
         if result.returncode != 0 or "error:" in output.lower():
             raise RuntimeError(
-                "تعذر فتح مساعد eFootball SAF: " + (output or "activity launch failed")
+                "تعذر فتح مساحة eFootball داخل مساعد KafiaNet الموحد: " + (output or "activity launch failed")
             )
 
     def _create_forward(self, device):
