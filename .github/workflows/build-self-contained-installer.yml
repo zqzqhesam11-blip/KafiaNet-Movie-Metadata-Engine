@@ -736,8 +736,45 @@ jobs:
           $releaseApiRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
           if ($LASTEXITCODE -ne 0) { throw 'Could not retrieve the Windows Latest release ID.' }
           $releaseApi = $releaseApiRaw | ConvertFrom-Json
-          gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$($releaseApi.id)" -F prerelease=false
-          if ($LASTEXITCODE -ne 0) { throw 'Could not promote the verified Windows Latest release to final.' }
+          $releaseId = $releaseApi.id
+
+          # GitHub may apply the PATCH but return an empty HTTP 204 body.
+          # gh api can then report a JSON parse error even though promotion worked.
+          # --silent avoids parsing/printing that response; a fresh GET is the
+          # source of truth for the final release state.
+          $promotionVerified = $false
+          $maxPromotionAttempts = 3
+          for ($attempt = 1; $attempt -le $maxPromotionAttempts; $attempt++) {
+            Write-Host "Promoting Windows Latest release to final (attempt $attempt/$maxPromotionAttempts)"
+            gh api --silent --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" -F prerelease=false
+            $patchExitCode = $LASTEXITCODE
+            if ($patchExitCode -ne 0) {
+              Write-Warning "Release promotion request returned exit code $patchExitCode; checking the actual server state."
+            }
+
+            $verifiedReleaseRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId"
+            $verifyExitCode = $LASTEXITCODE
+            if ($verifyExitCode -eq 0) {
+              try {
+                $verifiedRelease = $verifiedReleaseRaw | ConvertFrom-Json -ErrorAction Stop
+                if (-not [bool]$verifiedRelease.draft -and -not [bool]$verifiedRelease.prerelease) {
+                  $promotionVerified = $true
+                  break
+                }
+              } catch {
+                Write-Warning "Could not parse release verification response on attempt $attempt."
+              }
+            } else {
+              Write-Warning "Could not read release status after promotion attempt $attempt."
+            }
+
+            if ($attempt -lt $maxPromotionAttempts) {
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
+          if (-not $promotionVerified) {
+            throw 'Could not verify that the Windows Latest release is published as final.'
+          }
 
           Write-Host "WINDOWS RELEASE PUBLISHED: $($published.url)" -ForegroundColor Green
           Write-Host 'WINDOWS RELEASE ASSET VERIFICATION: PASS' -ForegroundColor Green
