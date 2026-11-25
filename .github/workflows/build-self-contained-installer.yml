@@ -626,13 +626,22 @@ jobs:
             }
           }
 
+          # Publish an explicit remote Git tag before creating the draft.
+          # gh release create may use an untagged placeholder URL for a draft
+          # when the tag does not yet exist; pre-creating the ref prevents that
+          # mismatch and makes both the tag lookup and gh release upload stable.
+          git tag $tag $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the unique Windows release tag.' }
+          git push origin "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the unique Windows release tag.' }
+
           # Create as a draft: no partially uploaded package can become latest.
-          # Unique run/attempt tags mean this release starts without old assets.
-          gh release create $tag --draft --target $env:GITHUB_SHA --title $releaseTitle --notes 'CN PlayHub self-contained Windows installer and portable package. Android Shizuku helper APK is bundled in the Windows package. Built and smoke-tested by GitHub Actions.'
+          # The remote tag already exists and points to the exact tested commit.
+          gh release create $tag --draft --title $releaseTitle --notes 'CN PlayHub self-contained Windows installer and portable package. Android Shizuku helper APK is bundled in the Windows package. Built and smoke-tested by GitHub Actions.'
           if ($LASTEXITCODE -ne 0) { throw 'Could not create a fresh draft Windows release.' }
 
           $releaseApiRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the newly created draft Windows release.' }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the newly created draft Windows release by its pre-existing tag.' }
           $releaseApi = $releaseApiRaw | ConvertFrom-Json
           $releaseId = [string]$releaseApi.id
           if ([string]::IsNullOrWhiteSpace($releaseId) -or -not [bool]$releaseApi.draft) {
@@ -729,7 +738,7 @@ jobs:
           # Publish only after all four assets pass integrity verification.
           # make_latest=true directs GitHub's stable /releases/latest/download URL
           # to this exact fully verified release.
-          gh api --silent --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" -F draft=false -F prerelease=false -f make_latest=true
+          gh api --silent --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" -F draft=false -F prerelease=false -F make_latest=true
           $publishExitCode = $LASTEXITCODE
           if ($publishExitCode -ne 0) {
             Write-Warning "Publish request returned exit code $publishExitCode; checking the actual release state."
