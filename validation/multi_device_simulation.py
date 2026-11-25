@@ -1936,6 +1936,37 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     assert len(controller.getTransferHistory()) == 1
     assert controller.getTransferHistory()[0]["status"] == "اكتمل"
 
+    # A generic Shizuku stream failure is not proof of protected-write denial.
+    # It must finish as an error without opening the independent-root prompt.
+    generic_controller = make_controller()
+    generic_fallbacks = []
+    generic_controller.androidDataFallbackRequested.connect(
+        lambda *values: generic_fallbacks.append(values)
+    )
+    generic_operation = dict(
+        rows(["SERIAL_C"])[0],
+        source="source-folder",
+        destination=destination,
+        target_package="com.tencent.ig",
+        phase="adb_direct",
+    )
+    generic_controller._start_operation(generic_operation)
+    generic_engine = generic_operation["engine"]
+    generic_engine.finish(False, reason)
+    assert generic_operation["phase"] == "shizuku_prepare"
+    generic_engine.finish(
+        True, json.dumps({"port": 18765, "token": "session-token"})
+    )
+    assert generic_operation["phase"] == "shizuku_copy"
+    generic_engine.finish(
+        False, "KAFIANET_SHIZUKU_TRANSPORT_FAILED: connection reset by peer"
+    )
+    assert generic_fallbacks == []
+    assert generic_operation["phase"] == "final"
+    assert generic_operation["completed"] is True
+    assert generic_operation["status"] == "فشل"
+    assert "لم يتم فتح النسخ إلى الجذر تلقائيًا" in generic_operation["error"]
+
     # A Shizuku setup failure also unlocks the root fallback, without deleting the source.
     setup_controller = make_controller()
     setup_fallbacks = []
