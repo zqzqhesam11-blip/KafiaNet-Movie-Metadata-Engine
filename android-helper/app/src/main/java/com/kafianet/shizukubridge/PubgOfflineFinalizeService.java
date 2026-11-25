@@ -104,8 +104,8 @@ public final class PubgOfflineFinalizeService extends Service {
 
         running = true;
         cancelled = false;
-        startForeground(NOTIFICATION_ID, buildNotification("تم استلام المهمة المحلية", 0, true));
-        updatePersistentState("running", "");
+        startForeground(NOTIFICATION_ID, buildNotification("يجري تجهيز ملفات النقل على الهاتف", 0, true));
+        updatePersistentState("preparing", "");
         worker.execute(() -> runLocalCopy(source, targetPackage, targetRelative, startId));
         return START_REDELIVER_INTENT;
     }
