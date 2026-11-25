@@ -2867,7 +2867,7 @@ def test_paths_and_ui():
     assert "staging_root" not in current
     assert "KafiaNetTransfer" not in current
     assert '"/stream/start"' in adb_source
-    assert '"/stream/check"' not in adb_source
+    assert '"/stream/check"' in adb_source
     assert '"/stream/file"' in adb_source
     assert "X-Kafia-Sha256" not in adb_source
     assert "def _verify_remote_manifest(" not in adb_source
