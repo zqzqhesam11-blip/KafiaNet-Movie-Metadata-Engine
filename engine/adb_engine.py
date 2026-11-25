@@ -2828,7 +2828,7 @@ exit 3
                         + "\\n"
                         + str(version_result.stderr or "")
                     )
-                    match = re.search(r"\\bversionCode=(\\d+)", version_text)
+                    match = re.search(r"\bversionCode=(\d+)", version_text)
                     installed_code = int(match.group(1)) if match else 0
                     if installed_code >= 16:
                         self.logChanged.emit(
