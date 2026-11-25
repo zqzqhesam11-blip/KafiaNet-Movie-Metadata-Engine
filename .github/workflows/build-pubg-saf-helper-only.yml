@@ -1,9 +1,9 @@
-name: CN PlayHub - Build PUBG SAF Helper Only
+name: KafiaNet Assistant - Build Unified Helper Only
 
 on:
   push:
     branches:
-      - feature/pubg-saf-picker-helper-only-20261125
+      - feature/pubg-offline-unified-helper-20261125
     paths:
       - 'android-helper/**'
       - '.github/workflows/build-pubg-saf-helper-only.yml'
@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   build-pubg-saf-helper:
-    name: Build only the Android helper APK
+    name: Build only the unified Android helper APK
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -50,6 +50,9 @@ jobs:
           grep -F "targetSdk 29" android-helper/app/build.gradle
           grep -F 'Intent.ACTION_OPEN_DOCUMENT_TREE' android-helper/app/src/main/java/com/kafianet/shizukubridge/MainActivity.java
           grep -F 'takePersistableUriPermission' android-helper/app/src/main/java/com/kafianet/shizukubridge/MainActivity.java
+          grep -F 'PubgOfflineFinalizeService' android-helper/app/src/main/java/com/kafianet/shizukubridge/PubgOfflineFinalizeService.java
+          grep -F 'EFootballActivity' android-helper/app/src/main/AndroidManifest.xml
+          grep -F 'HomeActivity' android-helper/app/src/main/AndroidManifest.xml
 
       - name: Run helper unit tests and build release APK
         run: |
@@ -64,14 +67,14 @@ jobs:
           test -s "$apk"
           test -x "$aapt"
           badging="$("$aapt" dump badging "$apk")"
-          grep -F "package: name='com.kafianet.shizukubridge' versionCode='15' versionName='1.6.8'" <<< "$badging"
+          grep -F "package: name='com.kafianet.shizukubridge' versionCode='16' versionName='1.7.0'" <<< "$badging"
           ls -lh "$apk"
           sha256sum "$apk" | tee kafianet-pubg-saf-helper-SHA256.txt
 
       - name: Upload helper-only APK
         uses: actions/upload-artifact@v4
         with:
-          name: KafiaNet-PUBG-SAF-Helper-Only-v1.6.8
+          name: KafiaNet-Android-Assistant-Only-v1.7.0
           path: |
             android-helper/app/build/outputs/apk/release/app-release.apk
             kafianet-pubg-saf-helper-SHA256.txt
