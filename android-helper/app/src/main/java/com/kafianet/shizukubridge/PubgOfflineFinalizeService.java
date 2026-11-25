@@ -107,7 +107,7 @@ public final class PubgOfflineFinalizeService extends Service {
         startForeground(NOTIFICATION_ID, buildNotification("تم استلام المهمة المحلية", 0, true));
         updatePersistentState("running", "");
         worker.execute(() -> runLocalCopy(source, targetPackage, targetRelative, startId));
-        return START_NOT_STICKY;
+        return START_REDELIVER_INTENT;
     }
 
     private void runLocalCopy(
@@ -532,7 +532,9 @@ public final class PubgOfflineFinalizeService extends Service {
 
     @Override
     public void onTimeout(int startId, int fgsType) {
-        updatePersistentState("interrupted", "انتهت مهلة خدمة النقل الخلفية في Android؛ افتح المساعد لاستئناف العملية.");
+        cancelled = true;
+        worker.shutdownNow();
+        updatePersistentState("interrupted", "انتهت مهلة خدمة النقل الخلفية في Android؛ افتح المساعد لإعادة المحاولة من نسخة الجذر.");
         stopForeground(true);
         stopSelf(startId);
     }
