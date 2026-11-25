@@ -2792,16 +2792,18 @@ def test_paths_and_ui():
     assert '"signatures do not match" in detail' in engine_source
     workflow_source = Path(".github/workflows/build-self-contained-installer.yml").read_text(encoding="utf-8")
     assert "CNPlayHubShizukuBridge.apk" in workflow_source
-    assert "KafiaNetEFootballSAF.apk" in workflow_source
-    saf_helper_source = Path(
-        "efootball-saf-helper/app/src/main/java/com/kafianet/efootball/saf/MainActivity.java"
+    assert "KafiaNetEFootballSAF.apk" not in workflow_source
+    unified_efootball_source = (
+        helper_root / "java" / "com" / "kafianet" / "shizukubridge" / "EFootballActivity.java"
     ).read_text(encoding="utf-8")
-    assert "ACTION_OPEN_DOCUMENT_TREE" in saf_helper_source
-    assert "com.ziru.official.MTDataFilesProvider" in saf_helper_source
-    assert "takePersistableUriPermission" in saf_helper_source
-    assert "onNewIntent(Intent intent)" in saf_helper_source
-    assert '"/file"' in saf_helper_source
-    assert "DocumentsContract.renameDocument(" in saf_helper_source
+    assert "ACTION_OPEN_DOCUMENT_TREE" in unified_efootball_source
+    assert "com.ziru.official.MTDataFilesProvider" in unified_efootball_source
+    assert "takePersistableUriPermission" in unified_efootball_source
+    assert "onNewIntent(Intent intent)" in unified_efootball_source
+    assert '"/file"' in unified_efootball_source
+    assert "DocumentsContract.renameDocument(" in unified_efootball_source
+    assert "FOREGROUND_SERVICE_DATA_SYNC" in helper_manifest
+    assert "READ_EXTERNAL_STORAGE" in helper_manifest
     assert "from engine.efootball_saf_engine import EFootballSAFEngine" in current
     transfer_user_java = Path(
         "android-helper/app/src/main/java/com/kafianet/shizukubridge/TransferUserService.java"
