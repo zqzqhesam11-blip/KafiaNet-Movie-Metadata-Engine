@@ -2834,7 +2834,10 @@ def test_paths_and_ui():
     assert '"/copy"' not in helper_activity_java
     assert "KafiaNetTransfer" not in helper_activity_java
     assert "requestSafGrantAfterDirectFailure" not in helper_activity_java
-    assert "ACTION_OPEN_DOCUMENT_TREE" not in helper_activity_java
+    assert "ACTION_OPEN_DOCUMENT_TREE" in helper_activity_java
+    assert "takePersistableUriPermission" in helper_activity_java
+    assert "request_local_finalize" in helper_activity_java
+    assert "PubgOfflineFinalizeService" in helper_activity_java
     assert "ready_saf" not in helper_activity_java
     assert "اختر مجلد Android/data" not in engine_source
     assert "private File checkedRelativeDestination(" in transfer_user_java
