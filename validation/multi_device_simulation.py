@@ -1034,6 +1034,39 @@ def test_transfer_history_is_not_truncated_after_500_entries():
     assert all(len(str(item.get("date") or "")) >= 10 for item in entries)
 
 
+def test_shizuku_permission_grant_wait_is_serialized_on_main_thread():
+    source = Path(
+        "android-helper/app/src/main/java/com/kafianet/shizukubridge/MainActivity.java"
+    ).read_text(encoding="utf-8")
+
+    monitor_start = source.index("private final Runnable permissionGrantMonitor")
+    monitor_end = source.index("private final Shizuku.OnBinderReceivedListener", monitor_start)
+    monitor = source[monitor_start:monitor_end]
+    first_guard = monitor.index("if (!permissionRequestInFlight || isFinishing()) return;")
+    permission_probe = monitor.index("Shizuku.checkSelfPermission()", first_guard)
+    second_guard = monitor.index(
+        "if (!permissionRequestInFlight || isFinishing()) return;",
+        first_guard + 1,
+    )
+    timeout_clock = monitor.index("long startedAt = permissionRequestStartedAt;")
+    assert first_guard < permission_probe < second_guard < timeout_clock
+    assert "if (startedAt <= 0L) return;" in monitor
+
+    callback_start = source.index(
+        "private final Shizuku.OnRequestPermissionResultListener permissionResult"
+    )
+    callback_end = source.index("private final ServiceConnection", callback_start)
+    callback = source[callback_start:callback_end]
+    main_post = callback.index("main.post(() -> {")
+    grant_update = callback.index("permissionRequestInFlight = true;", main_post)
+    timer_update = callback.index("permissionRequestStartedAt = SystemClock.elapsedRealtime();", main_post)
+    monitor_resume = callback.index("main.postDelayed(permissionGrantMonitor, 100L);", main_post)
+    assert main_post < grant_update < timer_update < monitor_resume
+    assert "Shizuku permission result granted; waiting for permission state confirmation." in callback
+    assert "permissionRequestInFlight = false;" in callback
+    assert "fail(\"لم يمنح الهاتف تطبيق KafiaNet إذن Shizuku.\")" in callback
+
+
 def test_adb_result_text_and_phone_local_helper_launch():
     assert ADBEngine._result_text(
         SimpleNamespace(stdout="  helper output  \n", stderr="  warning text  \n")
@@ -1093,10 +1126,25 @@ def test_adb_result_text_and_phone_local_helper_launch():
     assert len(completions) == 1
     assert completions[0][0] is True, completions[0][1]
     assert "تم فتح مساعد KafiaNet" in completions[0][1]
-    launch = next(command for command, _timeout in calls if "start" in command)
-    assert "request_local_finalize" in launch
-    assert "com.tencent.ig" in launch
-    assert "/sdcard/PUBG_Mobile/" in launch
+    launch = next(
+        command for command, _timeout in calls
+        if len(command) >= 5 and command[3:5] == ["am", "start"]
+    )
+    extras = {
+        launch[index + 1]: launch[index + 2]
+        for index in range(len(launch) - 2)
+        if launch[index] == "--es"
+    }
+
+    def unquote_shell_arg(value):
+        value = str(value)
+        if len(value) >= 2 and value.startswith("'") and value.endswith("'"):
+            return value[1:-1].replace("'\\''", "'")
+        return value
+
+    assert unquote_shell_arg(extras["kafianet_action"]) == "request_local_finalize"
+    assert unquote_shell_arg(extras["package"]) == "com.tencent.ig"
+    assert unquote_shell_arg(extras["source_root"]) == "/sdcard/PUBG_Mobile/"
 
 
 def test_shizuku_preflight_transport_failure_preserves_destination_for_resume():
@@ -3294,6 +3342,7 @@ def run_once():
     test_pubg_flash_uses_fixed_source_and_exact_package_destination()
     test_uninstall_operation_is_logged_separately_from_copy()
     test_transfer_history_is_not_truncated_after_500_entries()
+    test_shizuku_permission_grant_wait_is_serialized_on_main_thread()
     test_adb_result_text_and_phone_local_helper_launch()
     test_shizuku_preflight_transport_failure_preserves_destination_for_resume()
     test_direct_stream_rejects_source_size_changes()

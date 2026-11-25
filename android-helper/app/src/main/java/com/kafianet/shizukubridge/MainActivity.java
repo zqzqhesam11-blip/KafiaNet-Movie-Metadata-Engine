@@ -99,7 +99,13 @@ public final class MainActivity extends Activity {
             } catch (Throwable ignored) {
                 // Wait while Shizuku starts or its permission UI is open.
             }
-            long elapsed = SystemClock.elapsedRealtime() - permissionRequestStartedAt;
+
+            // The permission result and this monitor are serialized on the main
+            // thread. Recheck in-flight state before reading the timeout clock.
+            if (!permissionRequestInFlight || isFinishing()) return;
+            long startedAt = permissionRequestStartedAt;
+            if (startedAt <= 0L) return;
+            long elapsed = SystemClock.elapsedRealtime() - startedAt;
             if (elapsed >= SHIZUKU_PERMISSION_WAIT_TIMEOUT_MS) {
                 permissionRequestInFlight = false;
                 permissionRequestStartedAt = 0L;
@@ -125,24 +131,37 @@ public final class MainActivity extends Activity {
     private final Shizuku.OnRequestPermissionResultListener permissionResult =
             (requestCode, grantResult) -> {
                 if (requestCode != REQUEST_SHIZUKU) return;
-                boolean granted = grantResult == PackageManager.PERMISSION_GRANTED;
-                if (!granted) {
-                    try {
-                        granted = Shizuku.pingBinder()
-                                && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
-                    } catch (Throwable ignored) {
-                    }
-                }
-                permissionRequestInFlight = false;
-                permissionRequestStartedAt = 0L;
-                main.removeCallbacks(permissionGrantMonitor);
-                final boolean permissionGranted = granted;
+                final int result = grantResult;
+
+                // Shizuku can invoke this listener from its binder callback path.
+                // Keep permission state/timer updates on the same main thread as
+                // permissionGrantMonitor so the first grant cannot race its timeout.
                 main.post(() -> {
-                    if (permissionGranted) {
+                    if (isFinishing()) return;
+                    boolean granted = result == PackageManager.PERMISSION_GRANTED;
+                    if (!granted) {
+                        try {
+                            granted = Shizuku.pingBinder()
+                                    && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
+                        } catch (Throwable ignored) {
+                        }
+                    }
+
+                    main.removeCallbacks(permissionGrantMonitor);
+                    if (granted) {
+                        // A grant callback may arrive just before checkSelfPermission()
+                        // reflects the new permission. Keep this same copy request alive
+                        // until the binder reports the granted state, then bind once.
+                        permissionRequestInFlight = true;
+                        permissionRequestStartedAt = SystemClock.elapsedRealtime();
+                        state = "permission_required";
+                        showMessage("تم قبول إذن Shizuku؛ جاري تأكيد الصلاحية وربط خدمة النقل...");
                         android.util.Log.i("KafiaNetBridge",
-                                "Shizuku permission granted; continuing setup.");
-                        bindTransferService();
+                                "Shizuku permission result granted; waiting for permission state confirmation.");
+                        main.postDelayed(permissionGrantMonitor, 100L);
                     } else {
+                        permissionRequestInFlight = false;
+                        permissionRequestStartedAt = 0L;
                         fail("لم يمنح الهاتف تطبيق KafiaNet إذن Shizuku.");
                     }
                 });
