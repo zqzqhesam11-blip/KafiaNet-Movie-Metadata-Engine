@@ -5,6 +5,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Typeface;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -13,9 +15,17 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 public final class HomeActivity extends Activity {
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private final Runnable progressRefresh = new Runnable() {
+        @Override public void run() {
+            refreshLocalCopyState();
+            ui.postDelayed(this, 700L);
+        }
+    };
     private TextView status;
     private TextView progressLabel;
     private ProgressBar progress;
+    private Button retryLocalButton;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -26,7 +36,20 @@ public final class HomeActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        refreshLocalCopyState();
+        ui.removeCallbacks(progressRefresh);
+        ui.post(progressRefresh);
+    }
+
+    @Override
+    protected void onPause() {
+        ui.removeCallbacks(progressRefresh);
+        super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        ui.removeCallbacks(progressRefresh);
+        super.onDestroy();
     }
 
     private ScrollView buildUi() {
@@ -54,10 +77,25 @@ public final class HomeActivity extends Activity {
             startActivity(new Intent(this, MainActivity.class));
         });
 
-        addAction(root, "السماح بمجلد PUBG / استكمال النقل من الجذر", () -> {
+        addAction(root, "متابعة طلب إذن المجلد الوارد من الكمبيوتر", () -> {
+            SharedPreferences prefs = getSharedPreferences(
+                    PubgOfflineFinalizeService.PREFS, MODE_PRIVATE
+            );
+            String source = prefs.getString(PubgOfflineFinalizeService.KEY_SOURCE_ROOT, "");
+            String targetPackage = prefs.getString(PubgOfflineFinalizeService.KEY_TARGET_PACKAGE, "");
+            String relative = prefs.getString(PubgOfflineFinalizeService.KEY_TARGET_RELATIVE, "");
+            String game = prefs.getString(PubgOfflineFinalizeService.KEY_GAME, "");
+            if (source == null || source.isEmpty() || targetPackage == null || targetPackage.isEmpty()
+                    || relative == null || relative.isEmpty()) {
+                status.setText("لا توجد مهمة نقل محلية محفوظة. ابدأ النسخ إلى الجذر من تطبيق الكمبيوتر أولاً.");
+                return;
+            }
             Intent intent = new Intent(this, MainActivity.class);
-            intent.putExtra("kafianet_action", "request_pubg_tree");
-            intent.putExtra("package", "com.tencent.ig");
+            intent.putExtra("kafianet_action", "request_local_finalize");
+            intent.putExtra("package", targetPackage);
+            intent.putExtra(PubgOfflineFinalizeService.EXTRA_SOURCE_ROOT, source);
+            intent.putExtra(PubgOfflineFinalizeService.EXTRA_TARGET_RELATIVE, relative);
+            intent.putExtra(PubgOfflineFinalizeService.EXTRA_GAME, game);
             startActivity(intent);
         });
 
@@ -85,6 +123,28 @@ public final class HomeActivity extends Activity {
         status.setTextSize(13);
         status.setPadding(0, 4, 0, 12);
         root.addView(status, matchWrap());
+
+        retryLocalButton = new Button(this);
+        retryLocalButton.setText("إعادة محاولة النقل المحلي");
+        retryLocalButton.setAllCaps(false);
+        retryLocalButton.setVisibility(android.view.View.GONE);
+        retryLocalButton.setOnClickListener(view -> {
+            SharedPreferences prefs = getSharedPreferences(
+                    PubgOfflineFinalizeService.PREFS, MODE_PRIVATE
+            );
+            String source = prefs.getString(PubgOfflineFinalizeService.KEY_SOURCE_ROOT, "");
+            String targetPackage = prefs.getString(PubgOfflineFinalizeService.KEY_TARGET_PACKAGE, "");
+            String relative = prefs.getString(PubgOfflineFinalizeService.KEY_TARGET_RELATIVE, "");
+            String game = prefs.getString(PubgOfflineFinalizeService.KEY_GAME, "");
+            Intent intent = new Intent(this, MainActivity.class);
+            intent.putExtra("kafianet_action", "request_local_finalize");
+            intent.putExtra("package", targetPackage);
+            intent.putExtra(PubgOfflineFinalizeService.EXTRA_SOURCE_ROOT, source);
+            intent.putExtra(PubgOfflineFinalizeService.EXTRA_TARGET_RELATIVE, relative);
+            intent.putExtra(PubgOfflineFinalizeService.EXTRA_GAME, game);
+            startActivity(intent);
+        });
+        root.addView(retryLocalButton, matchWrap());
 
         TextView note = new TextView(this);
         note.setText(
@@ -135,8 +195,14 @@ public final class HomeActivity extends Activity {
                     + " ملف — " + formatBytes(bytes) + " / " + formatBytes(totalBytes));
         }
         if (status == null) return;
+        if (retryLocalButton != null) {
+            retryLocalButton.setVisibility(
+                    ("failed".equals(state) || "interrupted".equals(state) || "cancelled".equals(state))
+                            ? android.view.View.VISIBLE : android.view.View.GONE
+            );
+        }
         if ("running".equals(state)) {
-            status.setText("المساعد ينقل البيانات محلياً. يمكنك فصل USB بأمان.\n" + current);
+            status.setText("النقل يعمل داخل الهاتف. بعد ظهور هذه الحالة يمكن فصل كابل USB بأمان.\n" + current);
         } else if ("completed".equals(state)) {
             status.setText("اكتمل النقل إلى مجلد اللعبة. نسخة الجذر الأصلية بقيت كما هي.");
         } else if ("failed".equals(state) || "interrupted".equals(state)) {
