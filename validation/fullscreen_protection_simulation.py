@@ -78,13 +78,22 @@ lock_body = qml.split("function enterFullscreenLock()", 1)[1].split(
 )[0]
 guard_setup = lock_body.find("var guardReady")
 guard_state = lock_body.find("fullscreenGuardEnabled = guardReady")
+guard_failure = lock_body.find("if (!guardReady)")
+failure_end = lock_body.find("wasMaximizedBeforeLock", guard_failure)
+failure_handling = (
+    lock_body[guard_failure:failure_end]
+    if guard_failure >= 0 and failure_end > guard_failure
+    else ""
+)
 lock_transition = lock_body.find("fullscreenLocked = true")
 check(
     "fullscreen lock still activates when native Windows protection is unavailable",
     guard_setup >= 0
     and guard_state > guard_setup
-    and lock_transition > guard_state
-    and "if (!guardReady)" not in lock_body,
+    and guard_failure > guard_state
+    and failure_end > guard_failure
+    and "return" not in failure_handling
+    and lock_transition > failure_end,
 )
 app_source = (repo_root / "app_qml.py").read_text(encoding="utf-8")
 check(
