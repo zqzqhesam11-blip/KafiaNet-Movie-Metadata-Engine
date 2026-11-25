@@ -2600,6 +2600,104 @@ exit 3
         """Public cleanup hook for a setup that succeeded but could not start a copy."""
         self._cleanup_shizuku_bridge(device)
 
+    def launch_phone_local_finalize(
+        self, device, source_root, target_package, target_relative, game_name
+    ):
+        """Open the unified helper and hand a root copy to its on-device SAF service."""
+        def worker():
+            try:
+                state = self._run(
+                    ["-s", str(device), "get-state"],
+                    timeout=12
+                )
+                if state.returncode != 0 or state.stdout.strip().lower() != "device":
+                    raise RuntimeError(
+                        "الهاتف غير متصل بعد اكتمال النسخ إلى الجذر: "
+                        + self._result_text(state)
+                    )
+
+                helper_package = "com.kafianet.shizukubridge"
+                package_path = self._run(
+                    ["-s", str(device), "shell", "pm", "path", helper_package],
+                    timeout=20
+                )
+                installed = (
+                    package_path.returncode == 0
+                    and "package:" in self._result_text(package_path)
+                )
+                installed_code = 0
+                if installed:
+                    version_result = self._run(
+                        ["-s", str(device), "shell", "dumpsys", "package", helper_package],
+                        timeout=20
+                    )
+                    version_match = re.search(
+                        r"\bversionCode=(\d+)",
+                        self._result_text(version_result)
+                    )
+                    installed_code = int(version_match.group(1)) if version_match else 0
+
+                if installed_code < 16:
+                    helper_apk = BASE_DIR / "android_support" / "CNPlayHubShizukuBridge.apk"
+                    if not helper_apk.is_file():
+                        raise FileNotFoundError(
+                            "نسخة المساعد الموحد 1.7.0 غير موجودة داخل حزمة الكمبيوتر."
+                        )
+                    self.statusChanged.emit("جاري تحديث المساعد الموحد قبل النقل المحلي...")
+                    install = self._run_install_command(
+                        ["-s", str(device), "install", "-r", str(helper_apk)],
+                        timeout=3600
+                    )
+                    install_output = self._result_text(install)
+                    if install.returncode != 0 or "success" not in install_output.lower():
+                        raise RuntimeError(
+                            "تعذر تحديث المساعد الموحد دون حذف بياناته: "
+                            + (install_output or "adb install failed")
+                        )
+
+                launch_args = [
+                    "-s", str(device), "shell", "am", "start",
+                    "-n", helper_package + "/.MainActivity",
+                    "--es", "kafianet_action", "request_local_finalize",
+                    "--es", "package", self._shell_quote(target_package),
+                    "--es", "source_root", self._shell_quote(source_root),
+                    "--es", "target_relative", self._shell_quote(target_relative),
+                    "--es", "game", self._shell_quote(game_name),
+                ]
+                launch = self._run(launch_args, timeout=30)
+                output = self._result_text(launch)
+                if launch.returncode != 0 or "error:" in output.lower():
+                    raise RuntimeError(
+                        "تعذر فتح المساعد لطلب إذن مجلد اللعبة: "
+                        + (output or "activity launch failed")
+                    )
+
+                self.statusChanged.emit(
+                    "تم فتح المساعد على الهاتف. وافق على مجلد اللعبة؛ "
+                    "بعد ظهور تقدم النقل المحلي يمكن فصل USB."
+                )
+                self.finished.emit(
+                    True,
+                    "اكتمل نسخ الجذر، وتم فتح مساعد KafiaNet لطلب صلاحية المجلد المحمي. "
+                    "بعد الموافقة يبدأ النقل داخل الهاتف ويستمر دون اتصال الكمبيوتر. "
+                    "نسخة الجذر محفوظة."
+                )
+            except Exception as failure:
+                self.logChanged.emit(
+                    "PHONE LOCAL SAF FINALIZE LAUNCH ERROR: " + repr(failure)
+                )
+                self.finished.emit(
+                    False,
+                    "اكتمل النسخ إلى الجذر وبقيت الملفات محفوظة، لكن تعذر فتح المساعد للنقل المحلي: "
+                    + str(failure)
+                )
+
+        threading.Thread(
+            target=worker,
+            name="KafiaNet-Phone-Local-Finalize-" + str(device),
+            daemon=True
+        ).start()
+
     @Slot(str, str, str, str, str, str)
     def prepare_shizuku_bridge(
         self, device, shizuku_apk, helper_apk, session_token, package_name, destination
@@ -2732,9 +2830,9 @@ exit 3
                     )
                     match = re.search(r"\\bversionCode=(\\d+)", version_text)
                     installed_code = int(match.group(1)) if match else 0
-                    if installed_code >= 14:
+                    if installed_code >= 16:
                         self.logChanged.emit(
-                            "مساعد CN PlayHub محدث؛ سنستخدم النسخة المثبتة."
+                            "مساعد KafiaNet الموحد 1.7.0 محدث؛ سنستخدم النسخة المثبتة."
                         )
                         return
                     self.logChanged.emit(
