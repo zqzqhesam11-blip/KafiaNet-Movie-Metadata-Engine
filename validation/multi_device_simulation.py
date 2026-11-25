@@ -2803,6 +2803,10 @@ def test_paths_and_ui():
     assert '"/file"' in unified_efootball_source
     assert "DocumentsContract.renameDocument(" in unified_efootball_source
     assert "FOREGROUND_SERVICE_DATA_SYNC" in helper_manifest
+    assert "WAKE_LOCK" in helper_manifest
+    local_service = (helper_root / "java" / "com" / "kafianet" / "shizukubridge" / "PubgOfflineFinalizeService.java").read_text(encoding="utf-8")
+    assert "PowerManager.PARTIAL_WAKE_LOCK" in local_service
+    assert "releaseTransferWakeLock()" in local_service
     assert "READ_EXTERNAL_STORAGE" in helper_manifest
     assert "from engine.efootball_saf_engine import EFootballSAFEngine" in current
     transfer_user_java = Path(
@@ -2883,10 +2887,10 @@ def test_paths_and_ui():
     assert "Source file was truncated during transfer" in adb_source
     assert "KafiaNetTransfer" not in adb_source
     helper_gradle = Path("android-helper/app/build.gradle").read_text(encoding="utf-8")
-    assert "versionCode 17" in helper_gradle
-    assert "versionName '1.7.1'" in helper_gradle
+    assert "versionCode 18" in helper_gradle
+    assert "versionName '1.7.2'" in helper_gradle
     assert "install_helper_if_outdated()" in engine_source
-    assert "installed_code >= 17" in engine_source
+    assert "installed_code >= 18" in engine_source
     assert ".version(13)" in helper_activity_java
     assert "Shizuku.addBinderDeadListener(binderDead);" in helper_activity_java
     assert "private volatile boolean bindingService" in helper_activity_java
