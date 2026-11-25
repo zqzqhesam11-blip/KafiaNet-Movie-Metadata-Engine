@@ -74,7 +74,7 @@ jobs:
           gradle-version: '8.10.2'
           cache-provider: basic
 
-      - name: Build Android Shizuku bridge and bundle official Shizuku
+      - name: Build unified Android assistant and bundle official Shizuku
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -90,17 +90,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path $supportDir | Out-Null
           Copy-Item -LiteralPath $helperApk -Destination (Join-Path $supportDir 'CNPlayHubShizukuBridge.apk') -Force
 
-          gradle -p efootball-saf-helper :app:assembleRelease --no-daemon --console=plain
-          if ($LASTEXITCODE -ne 0) { throw 'eFootball SAF companion build failed.' }
-          $efootballHelperApk = 'efootball-saf-helper\app\build\outputs\apk\release\app-release.apk'
-          if (-not (Test-Path -LiteralPath $efootballHelperApk -PathType Leaf)) {
-            throw 'eFootball SAF companion APK was not produced.'
+          $aapt = Join-Path $env:ANDROID_HOME 'build-tools\35.0.0\aapt.exe'
+          $badging = (& $aapt dump badging $helperApk | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $badging -notmatch "package: name='com.kafianet.shizukubridge' versionCode='16' versionName='1.7.0'") {
+            throw "Unified Android assistant identity/version validation failed: $badging"
           }
-          if ((Get-Item -LiteralPath $efootballHelperApk).Length -lt 10000) {
-            throw 'eFootball SAF companion APK looks incomplete.'
-          }
-          Copy-Item -LiteralPath $efootballHelperApk -Destination (Join-Path $supportDir 'KafiaNetEFootballSAF.apk') -Force
-          Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $supportDir 'KafiaNetEFootballSAF.apk') | Format-List
+          Get-FileHash -Algorithm SHA256 -LiteralPath $helperApk | Format-List
 
           $shizukuUrl = 'https://github.com/RikkaApps/Shizuku/releases/download/v13.6.0/shizuku-v13.6.0.r1086.2650830c-release.apk'
           $shizukuApk = Join-Path $supportDir 'Shizuku.apk'
@@ -196,11 +191,12 @@ jobs:
             'engine\path_manager.py',
             'engine\game_config.py',
             'android-helper\app\src\main\AndroidManifest.xml',
+            'android-helper\app\build.gradle',
             'android-helper\app\src\main\java\com\kafianet\shizukubridge\MainActivity.java',
+            'android-helper\app\src\main\java\com\kafianet\shizukubridge\HomeActivity.java',
+            'android-helper\app\src\main\java\com\kafianet\shizukubridge\EFootballActivity.java',
+            'android-helper\app\src\main\java\com\kafianet\shizukubridge\PubgOfflineFinalizeService.java',
             'android-helper\app\src\main\java\com\kafianet\shizukubridge\TransferUserService.java',
-            'efootball-saf-helper\app\src\main\AndroidManifest.xml',
-            'efootball-saf-helper\app\build.gradle',
-            'efootball-saf-helper\app\src\main\java\com\kafianet\efootball\saf\MainActivity.java',
             'platform-tools\adb.exe',
             'platform-tools\AdbWinApi.dll',
             'platform-tools\AdbWinUsbApi.dll',
@@ -397,7 +393,7 @@ jobs:
           Write-Host 'NO EXTERNAL PYTHON RUNTIME PATH REQUIRED' -ForegroundColor Green
           Write-Host ("EXE SHA256: {0}" -f (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)
           $androidSupport = Join-Path $bundleDir '_internal\android_support'
-          foreach ($supportFile in @('Shizuku.apk', 'CNPlayHubShizukuBridge.apk', 'KafiaNetEFootballSAF.apk')) {
+          foreach ($supportFile in @('Shizuku.apk', 'CNPlayHubShizukuBridge.apk')) {
             $supportPath = Join-Path $androidSupport $supportFile
             if (-not (Test-Path -LiteralPath $supportPath -PathType Leaf)) {
               throw "Bundled Android support file is missing: $supportFile"
@@ -407,7 +403,7 @@ jobs:
               throw "Bundled Android support file looks incomplete: $supportFile"
             }
           }
-          Write-Host 'Verified bundled Shizuku, Shizuku bridge and eFootball SAF helper APKs.' -ForegroundColor Green
+          Write-Host 'Verified bundled official Shizuku APK and unified KafiaNet assistant APK.' -ForegroundColor Green
           Write-Host 'STATIC BUNDLE CHECK: PASS' -ForegroundColor Green
 
       - name: Run frozen Qt startup smoke test
