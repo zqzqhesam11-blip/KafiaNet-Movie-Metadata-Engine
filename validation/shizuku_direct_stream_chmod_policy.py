@@ -62,10 +62,10 @@ check("permission wait lasts fifteen minutes", (
     "SHIZUKU_PERMISSION_WAIT_TIMEOUT_MS = 15L * 60L * 1000L" in activity
     and "permissionRequestStartedAt" in activity
 ))
-check("Shizuku UserService version advances", ".version(12)" in activity)
+check("Shizuku UserService version advances", ".version(13)" in activity)
 check("HTTP receive buffer is 4 MiB", "new byte[4 * 1024 * 1024]" in activity)
 check("Shizuku writer buffer is 4 MiB", "new byte[4 * 1024 * 1024]" in service)
-check("helper package is 1.6.6 / code 13", (
-    "versionCode 13" in gradle and "versionName '1.6.6'" in gradle
+check("helper package is 1.7.2 / code 18", (
+    "versionCode 18" in gradle and "versionName '1.7.2'" in gradle
 ))
 print("SHIZUKU PERMISSION / STREAM POLICY: PASS")
