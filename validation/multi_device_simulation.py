@@ -81,6 +81,16 @@ class FakeOperationEngine(QObject):
             job_id, staging, destination, relative
         ))
 
+    def launch_phone_local_finalize(self, serial, source_root, package, relative, game):
+        self.serial = serial
+        self.calls.append((
+            "launch_phone_local_finalize", serial, source_root, package, relative, game
+        ))
+        self.finished.emit(
+            True,
+            "تم فتح المساعد لطلب الإذن؛ يستمر النقل محلياً بعد الموافقة."
+        )
+
     def prepare_game_permissions_via_shizuku(self, serial, port, token, destination):
         self.serial = serial
         self.calls.append((
@@ -1878,7 +1888,7 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     assert any(call[0] == "copy_via_shizuku_bridge" for call in adb_engine.calls)
     assert fallback_requests == []
 
-    # Only a concrete writer-side EACCES/EPERM marker opens the legacy root dialog.
+    # A failed Shizuku writer opens the same user-confirmed root fallback.
     writer_denial = (
         "KAFIANET_SHIZUKU_DESTINATION_WRITE_DENIED: "
         "open failed: EACCES (Permission denied)"
@@ -1904,7 +1914,15 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     root_engine = operation["engine"]
     assert root_engine is not adb_engine
     assert root_engine.calls == [
-        ("push", "SERIAL_A", "source-folder", "/sdcard/PUBG_Mobile/")
+        ("push", "SERIAL_A", "source-folder", "/sdcard/PUBG_Mobile/"),
+        (
+            "launch_phone_local_finalize",
+            "SERIAL_A",
+            "/sdcard/PUBG_Mobile/",
+            "com.tencent.ig",
+            "files/UE4Game/",
+            "PUBG Mobile",
+        ),
     ]
     assert operation["destination"] == "/sdcard/PUBG_Mobile/"
     assert operation["original_destination"] == destination
@@ -1918,7 +1936,7 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     assert len(controller.getTransferHistory()) == 1
     assert controller.getTransferHistory()[0]["status"] == "اكتمل"
 
-    # Shizuku setup or permission-prompt failure must never unlock the root fallback.
+    # A Shizuku setup failure also unlocks the root fallback, without deleting the source.
     setup_controller = make_controller()
     setup_fallbacks = []
     setup_controller.androidDataFallbackRequested.connect(
@@ -1936,8 +1954,11 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     setup_engine.finish(False, reason)
     assert setup_operation["phase"] == "shizuku_prepare"
     setup_engine.finish(False, "لم يمنح الهاتف تطبيق KafiaNet إذن Shizuku.")
+    assert setup_operation["phase"] == "awaiting_root_fallback"
+    assert setup_operation["awaiting_root_fallback"] is True
     assert setup_operation["completed"] is True
-    assert setup_fallbacks == []
+    assert len(setup_fallbacks) == 1
+    assert setup_fallbacks[0][0] == "SERIAL_B"
 
     # ADB success and failures outside Android/data do not invoke Shizuku or root.
     success_controller = make_controller()
@@ -2755,6 +2776,14 @@ def test_paths_and_ui():
     assert "نسخ إلى الجذر" in qml
     assert "def copyToDeviceRoot(" in current
     assert "def declineRootFallback(" in current
+    assert "def launch_phone_local_finalize(" in engine_source
+    helper_root = ROOT / "android-helper" / "app" / "src" / "main"
+    helper_manifest = (helper_root / "AndroidManifest.xml").read_text(encoding="utf-8")
+    assert "PubgOfflineFinalizeService" in helper_manifest
+    assert "EFootballActivity" in helper_manifest
+    assert (helper_root / "java" / "com" / "kafianet" / "shizukubridge" / "HomeActivity.java").is_file()
+    assert "tree_uri_" in (helper_root / "java" / "com" / "kafianet" / "shizukubridge" / "PubgOfflineFinalizeService.java").read_text(encoding="utf-8")
+    assert "com.kafianet.shizukubridge" in (ROOT / "engine" / "efootball_saf_engine.py").read_text(encoding="utf-8")
     assert "build/android_support" in Path("build_full.spec").read_text(encoding="utf-8")
     assert '["-s", device, "install", "-r", apk_path]' in engine_source
     assert "install_failed_update_incompatible" in engine_source
