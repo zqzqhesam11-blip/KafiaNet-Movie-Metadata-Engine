@@ -2641,7 +2641,7 @@ exit 3
                     helper_apk = BASE_DIR / "android_support" / "CNPlayHubShizukuBridge.apk"
                     if not helper_apk.is_file():
                         raise FileNotFoundError(
-                            "نسخة المساعد الموحد 1.7.0 غير موجودة داخل حزمة الكمبيوتر."
+                            "نسخة المساعد الموحد 1.7.1 غير موجودة داخل حزمة الكمبيوتر."
                         )
                     self.statusChanged.emit("جاري تحديث المساعد الموحد قبل النقل المحلي...")
                     install = self._run_install_command(
