@@ -2134,12 +2134,29 @@ class AppController(QObject):
                 and not operation.get("cancelled", False)
                 and not operation.get("root_fallback_attempted", False)
             ):
-                adb_error = str(operation.get("shizuku_original_error") or "")
-                combined = (
-                    "ADB copy failed: " + adb_error
-                    + "\nShizuku copy failed: " + str(message or "سبب غير معروف")
+                shizuku_error = str(message or "سبب غير معروف")
+                if self._is_shizuku_destination_write_denial(
+                    operation.get("destination"), shizuku_error
+                ):
+                    adb_error = str(operation.get("shizuku_original_error") or "")
+                    combined = (
+                        "ADB copy failed: " + adb_error
+                        + "\nShizuku copy failed: " + shizuku_error
+                    )
+                    self._request_android_data_root_fallback(serial, operation, combined)
+                    return
+
+                # A generic Shizuku error is not proof that Android denied a
+                # protected write. Keep the original destination untouched and
+                # report the failure instead of opening the root-copy fallback.
+                operation["phase"] = "final"
+                self._finished_for_device(
+                    serial,
+                    False,
+                    "تعذر إكمال النسخ عبر Shizuku دون تأكيد رفض الكتابة إلى المجلد المحمي. "
+                    "لم يتم فتح النسخ إلى الجذر تلقائيًا.\n"
+                    + shizuku_error,
                 )
-                self._request_android_data_root_fallback(serial, operation, combined)
                 return
             if success and self._advance_copy_part(serial, operation):
                 return
