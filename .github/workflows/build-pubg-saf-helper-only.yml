@@ -67,14 +67,14 @@ jobs:
           test -s "$apk"
           test -x "$aapt"
           badging="$("$aapt" dump badging "$apk")"
-          grep -F "package: name='com.kafianet.shizukubridge' versionCode='17' versionName='1.7.1'" <<< "$badging"
+          grep -F "package: name='com.kafianet.shizukubridge' versionCode='18' versionName='1.7.2'" <<< "$badging"
           ls -lh "$apk"
           sha256sum "$apk" | tee kafianet-pubg-saf-helper-SHA256.txt
 
       - name: Upload helper-only APK
         uses: actions/upload-artifact@v4
         with:
-          name: KafiaNet-Android-Assistant-Only-v1.7.1
+          name: KafiaNet-Android-Assistant-Only-v1.7.2
           path: |
             android-helper/app/build/outputs/apk/release/app-release.apk
             kafianet-pubg-saf-helper-SHA256.txt
