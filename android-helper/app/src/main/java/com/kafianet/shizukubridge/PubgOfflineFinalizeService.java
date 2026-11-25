@@ -13,6 +13,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.os.IBinder;
+import android.os.PowerManager;
 import android.provider.DocumentsContract;
 import android.provider.DocumentsContract.Document;
 
@@ -66,6 +67,7 @@ public final class PubgOfflineFinalizeService extends Service {
     private volatile long totalBytes;
     private volatile String currentFile = "";
     private volatile String gameName = "PUBG Mobile";
+    private PowerManager.WakeLock transferWakeLock;
 
     @Override
     public void onCreate() {
@@ -105,6 +107,17 @@ public final class PubgOfflineFinalizeService extends Service {
         running = true;
         cancelled = false;
         startForeground(NOTIFICATION_ID, buildNotification("يجري تجهيز ملفات النقل على الهاتف", 0, true));
+        try {
+            acquireTransferWakeLock();
+        } catch (Throwable wakeFailure) {
+            running = false;
+            String detail = "تعذر إبقاء معالج الهاتف مستيقظاً أثناء النقل: " + wakeFailure;
+            updatePersistentState("failed", detail);
+            showFinalNotification("لم يبدأ النقل المحلي", detail);
+            stopForeground(true);
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
         updatePersistentState("preparing", "");
         worker.execute(() -> runLocalCopy(source, targetPackage, targetRelative, startId));
         return START_REDELIVER_INTENT;
@@ -179,6 +192,7 @@ public final class PubgOfflineFinalizeService extends Service {
             android.util.Log.e("KafiaNetLocalCopy", "Local SAF finalization failed", failure);
         } finally {
             running = false;
+            releaseTransferWakeLock();
             stopForeground(false);
             stopSelf(startId);
         }
@@ -534,6 +548,7 @@ public final class PubgOfflineFinalizeService extends Service {
     public void onTimeout(int startId, int fgsType) {
         cancelled = true;
         worker.shutdownNow();
+        releaseTransferWakeLock();
         updatePersistentState("interrupted", "انتهت مهلة خدمة النقل الخلفية في Android؛ افتح المساعد لإعادة المحاولة من نسخة الجذر.");
         stopForeground(true);
         stopSelf(startId);
@@ -541,8 +556,32 @@ public final class PubgOfflineFinalizeService extends Service {
 
     @Override
     public void onDestroy() {
+        releaseTransferWakeLock();
         super.onDestroy();
         if (worker != null) worker.shutdownNow();
+    }
+
+    private void acquireTransferWakeLock() {
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        if (power == null) throw new IllegalStateException("خدمة إدارة الطاقة غير متاحة.");
+        PowerManager.WakeLock lock = power.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "KafiaNetAssistant:LocalGameTransfer"
+        );
+        lock.setReferenceCounted(false);
+        lock.acquire();
+        transferWakeLock = lock;
+    }
+
+    private void releaseTransferWakeLock() {
+        PowerManager.WakeLock lock = transferWakeLock;
+        transferWakeLock = null;
+        if (lock != null && lock.isHeld()) {
+            try { lock.release(); }
+            catch (Throwable failure) {
+                android.util.Log.w("KafiaNetLocalCopy", "WakeLock release warning", failure);
+            }
+        }
     }
 
     @Override
