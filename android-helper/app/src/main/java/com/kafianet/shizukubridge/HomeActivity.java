@@ -86,7 +86,7 @@ public final class HomeActivity extends Activity {
             String relative = prefs.getString(PubgOfflineFinalizeService.KEY_TARGET_RELATIVE, "");
             String game = prefs.getString(PubgOfflineFinalizeService.KEY_GAME, "");
             if (source == null || source.isEmpty() || targetPackage == null || targetPackage.isEmpty()
-                    || relative == null || relative.isEmpty()) {
+                    || relative == null) {
                 status.setText("لا توجد مهمة نقل محلية محفوظة. ابدأ النسخ إلى الجذر من تطبيق الكمبيوتر أولاً.");
                 return;
             }
