@@ -415,7 +415,7 @@ public final class PubgOfflineFinalizeService extends Service {
 
     private String[] validateRelativeSegments(String value) {
         if (value == null || value.trim().isEmpty()) {
-            throw new IllegalArgumentException("المسار النسبي للوجهة فارغ.");
+            return new String[0];
         }
         String normalized = value.replace('\\', '/');
         if (normalized.startsWith("/") || normalized.contains(":") || normalized.indexOf('\0') >= 0) {
