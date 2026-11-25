@@ -132,11 +132,16 @@ ApplicationWindow {
         var guardReady = Boolean(
             appController && appController.setFullscreenProtection(true)
         )
+        // The application-level password lock must remain usable even if
+        // a Windows-native safeguard is unavailable (for example, policy
+        // permissions or taskbar API restrictions on this PC).
+        fullscreenGuardEnabled = guardReady
         if (!guardReady) {
-            fullscreenGuardEnabled = false
-            return
+            console.warn(
+                "FULLSCREEN LOCK: native Windows protection unavailable; "
+                + "the in-app password lock remains active."
+            )
         }
-        fullscreenGuardEnabled = true
 
         wasMaximizedBeforeLock = visibility === Window.Maximized
         savedWindowX = x

@@ -76,11 +76,20 @@ qml = (repo_root / "qml" / "main.qml").read_text(encoding="utf-8")
 lock_body = qml.split("function enterFullscreenLock()", 1)[1].split(
     "function openFullscreenPasswordDialog", 1
 )[0]
-guard_check = lock_body.find("if (!guardReady)")
+guard_setup = lock_body.find("var guardReady")
+guard_state = lock_body.find("fullscreenGuardEnabled = guardReady")
 lock_transition = lock_body.find("fullscreenLocked = true")
 check(
-    "fullscreen lock does not activate when native Windows protection fails",
-    guard_check >= 0 and lock_transition > guard_check,
+    "fullscreen lock still activates when native Windows protection is unavailable",
+    guard_setup >= 0
+    and guard_state > guard_setup
+    and lock_transition > guard_state
+    and "if (!guardReady)" not in lock_body,
+)
+app_source = (repo_root / "app_qml.py").read_text(encoding="utf-8")
+check(
+    "native-protection failure clearly warns that Windows shortcuts may remain available",
+    "قد تظل اختصارات Windows وإدارة المهام متاحة." in app_source,
 )
 
 print("WINDOWS FULLSCREEN PROTECTION SIMULATION: PASS")

@@ -1577,8 +1577,9 @@ class AppController(QObject):
                 ).strip()
                 suffix = (" التفاصيل: " + detail) if detail else ""
                 self.messageChanged.emit(
-                    "تعذر تفعيل حماية لوحة المفاتيح أو شريط المهام أو إدارة المهام؛ "
-                    "لم يتم تفعيل قفل ملء الشاشة." + suffix
+                    "تعذر تفعيل الحماية الإضافية على مستوى Windows. "
+                    "سيعمل ملء الشاشة مع قفل الإغلاق داخل التطبيق بكلمة المرور، "
+                    "لكن قد تظل اختصارات Windows وإدارة المهام متاحة." + suffix
                 )
                 return False
 
