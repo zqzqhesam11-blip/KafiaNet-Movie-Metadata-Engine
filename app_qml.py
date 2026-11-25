@@ -2162,25 +2162,26 @@ class AppController(QObject):
         if normalized.lower().startswith("/sdcard/"):
             normalized = "/storage/emulated/0/" + normalized[len("/sdcard/"):]
         package_root = "/storage/emulated/0/Android/data/" + package_name
-        if (
-            not package_name
-            or not normalized.lower().startswith((package_root + "/").lower())
-        ):
+        if not package_name:
+            operation["phase"] = "final"
+            self._finished_for_device(
+                serial, True,
+                "اكتمل النسخ إلى الجذر، لكن لم يُحدد Package ID صالح لإكمال النقل المحلي."
+            )
+            return
+        normalized_lower = normalized.lower()
+        package_root_lower = package_root.lower()
+        if normalized_lower == package_root_lower:
+            target_relative = ""
+        elif normalized_lower.startswith(package_root_lower + "/"):
+            target_relative = normalized[len(package_root):].lstrip("/")
+        else:
             operation["phase"] = "final"
             self._finished_for_device(
                 serial,
                 True,
                 "اكتمل النسخ إلى مجلد الجذر وبقيت الملفات محفوظة. "
                 "لم يمكن تحديد مسار Android/data الأصلي بدقة لإكمال النقل المحلي."
-            )
-            return
-
-        target_relative = normalized[len(package_root):].lstrip("/")
-        if not target_relative:
-            operation["phase"] = "final"
-            self._finished_for_device(
-                serial, True,
-                "اكتمل النسخ إلى الجذر، لكن مسار مجلد اللعبة الداخلي غير محدد. بقيت النسخة محفوظة."
             )
             return
 
