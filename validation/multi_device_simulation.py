@@ -1144,7 +1144,7 @@ def test_saved_copy_never_changes_permissions_or_writes_probe_files():
 
 
 
-def test_fullscreen_button_requires_native_guard_and_restores_it():
+def test_fullscreen_button_activates_without_native_guard_and_restores_it():
     qml = Path("qml/main.qml").read_text(encoding="utf-8")
 
     # The in-app ⛶ control is the entry point under repair, not the title-bar
@@ -1160,28 +1160,36 @@ def test_fullscreen_button_requires_native_guard_and_restores_it():
     end = qml.index("    function openFullscreenPasswordDialog", start)
     enter = qml[start:end]
     guard_ready = enter.index("var guardReady = Boolean(")
-    guard_failure = enter.index("if (!guardReady)", guard_ready)
-    failure_return = enter.index("return", guard_failure)
+    guard_state = enter.index("fullscreenGuardEnabled = guardReady", guard_ready)
+    guard_failure = enter.index("if (!guardReady)", guard_state)
+    failure_end = enter.index("wasMaximizedBeforeLock", guard_failure)
+    failure_handling = enter[guard_failure:failure_end]
     lock_transition = enter.index("fullscreenLocked = true")
     fullscreen_transition = enter.index("window.showFullScreen()")
-    assert guard_ready < guard_failure < failure_return < lock_transition
-    assert lock_transition < fullscreen_transition
-    assert "fullscreenGuardEnabled = false" in enter
-    assert "fullscreenGuardEnabled = true" in enter
+    assert (
+        guard_ready < guard_state < guard_failure < failure_end
+        and "native Windows protection unavailable" in failure_handling
+        and "return" not in failure_handling
+        and lock_transition > failure_end
+        and fullscreen_transition > lock_transition
+    )
 
     leave_start = qml.index("    function leaveFullscreenLock(")
     leave_end = qml.index("    onClosing:", leave_start)
     leave = qml[leave_start:leave_end]
+    # Release the native safeguard only when activation actually succeeded.
     assert "if (appController && fullscreenGuardEnabled)" in leave
     assert "appController.setFullscreenProtection(false)" in leave
     assert "fullscreenGuardEnabled = false" in leave
     assert "window.showNormal()" in leave
 
-    # Losing visibility/focus must not leave the in-app lock unprotected.
+    # Losing visibility/focus must keep the in-app lock fullscreen; reapply
+    # native protection only when that optional layer was successfully enabled.
     handlers_start = qml.index("    onVisibilityChanged:")
     handlers_end = qml.index("    // Stable model:", handlers_start)
     handlers = qml[handlers_start:handlers_end]
     assert "window.showFullScreen()" in handlers
+    assert "if (appController && window.fullscreenGuardEnabled)" in handlers
     assert "appController.setFullscreenProtection(true)" in handlers
 
 def test_legacy_successful_phone_register_is_no_longer_used():
@@ -3160,7 +3168,7 @@ def run_once():
     test_direct_stream_rejects_source_size_changes()
     test_direct_stream_manifest_preserves_game_relative_paths()
     test_saved_copy_never_changes_permissions_or_writes_probe_files()
-    test_fullscreen_button_requires_native_guard_and_restores_it()
+    test_fullscreen_button_activates_without_native_guard_and_restores_it()
     test_legacy_successful_phone_register_is_no_longer_used()
     test_launch_game_resolves_and_starts_installed_package()
     test_adb_game_close_is_silent_and_package_scoped()
