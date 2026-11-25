@@ -25,7 +25,7 @@ for _stream in (sys.stdout, sys.stderr):
 os.environ["QT_QUICK_CONTROLS_STYLE"] = "Fusion"
 
 from PySide6.QtCore import QObject, Signal, Slot, Property, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QFileDialog
 from PySide6.QtQml import QQmlApplicationEngine
 
@@ -387,9 +387,9 @@ class AppController(QObject):
         # password-protected fullscreen lock.
         self._windows_fullscreen_protection = WindowsFullscreenProtection()
         self._fullscreen_taskbar_timer = QTimer(self)
-        self._fullscreen_taskbar_timer.setInterval(350)
+        self._fullscreen_taskbar_timer.setInterval(100)
         self._fullscreen_taskbar_timer.timeout.connect(
-            self._windows_fullscreen_protection.reapply_taskbar_visibility
+            self._windows_fullscreen_protection.enforce_locked_desktop
         )
 
         self.adb_engine.progressChanged.connect(
@@ -1561,12 +1561,52 @@ class AppController(QObject):
         return hmac.compare_digest(candidate, expected)
 
 
+    @staticmethod
+    def _find_main_window_handle():
+        """Resolve the QML main window's native HWND without changing its flags."""
+        try:
+            windows = QGuiApplication.topLevelWindows()
+        except Exception:
+            return 0
+
+        for window in windows:
+            try:
+                if (
+                    window.objectName() == "mainWindow"
+                    or window.title() == "CN PlayHub"
+                ):
+                    handle = int(window.winId())
+                    if handle > 0:
+                        return handle
+            except Exception:
+                continue
+        return 0
+
     @Slot(bool, result=bool)
     def setFullscreenProtection(self, enabled):
-        """Enable or release the Windows taskbar and keyboard guard."""
+        """Enable or release the Windows fullscreen desktop barrier."""
         if enabled:
+            window_handle = self._find_main_window_handle()
+            if (
+                not window_handle
+                or not self._windows_fullscreen_protection.set_window_handle(
+                    window_handle
+                )
+            ):
+                self._windows_fullscreen_protection.last_error = (
+                    "Could not resolve the CN PlayHub native window handle."
+                )
+                detail = self._windows_fullscreen_protection.last_error
+                self.messageChanged.emit(
+                    "تعذر تفعيل حاجز سطح المكتب. سيبقى قفل كلمة المرور داخل التطبيق فقط، "
+                    "ويمكن الخروج إلى سطح المكتب أو إظهار شريط المهام. التفاصيل: "
+                    + detail
+                )
+                return False
+
             if self._windows_fullscreen_protection.enabled:
-                self._windows_fullscreen_protection.reapply_taskbar_visibility()
+                if not self._windows_fullscreen_protection.enforce_locked_desktop():
+                    return False
                 if not self._fullscreen_taskbar_timer.isActive():
                     self._fullscreen_taskbar_timer.start()
                 return True
@@ -1577,16 +1617,18 @@ class AppController(QObject):
                 ).strip()
                 suffix = (" التفاصيل: " + detail) if detail else ""
                 self.messageChanged.emit(
-                    "تعذر تفعيل الحماية الإضافية على مستوى Windows. "
-                    "سيعمل ملء الشاشة مع قفل الإغلاق داخل التطبيق بكلمة المرور، "
-                    "لكن قد تظل اختصارات Windows وإدارة المهام متاحة." + suffix
+                    "تعذر تفعيل حاجز سطح المكتب. سيبقى قفل كلمة المرور داخل التطبيق فقط، "
+                    "ويمكن الخروج إلى سطح المكتب أو إظهار شريط المهام. التفاصيل: "
+                    + detail
                 )
                 return False
 
             self._fullscreen_taskbar_timer.start()
             print("WINDOWS FULLSCREEN PROTECTION: ENABLED")
             self.messageChanged.emit(
-                "تم تفعيل قفل الشاشة الكاملة وتعطيل إدارة المهام وإخفاء شريط المهام."
+                "تم تفعيل الحاجز الإضافي: حظر اختصارات التنقل الشائعة، "
+                "وتثبيت نافذة التطبيق فوق النوافذ، وإخفاء شريط المهام. "
+                "هذا ليس وضع Kiosk على مستوى Windows."
             )
             return True
 

@@ -35,9 +35,21 @@ check(
     not guard_with(())._should_block_keyboard_event(guard_type.VK_F4, True),
 )
 check(
-    "Alt+F4 is not intercepted while another app is foreground",
-    not guard_with((0xA4,), foreground=False)._should_block_keyboard_event(
+    "Alt+F4 stays blocked if another app briefly receives focus",
+    guard_with((0xA4,), foreground=False)._should_block_keyboard_event(
         guard_type.VK_F4, True
+    ),
+)
+check(
+    "Alt+Tab stays blocked after focus leaves the protected app",
+    guard_with((0xA4,), foreground=False)._should_block_keyboard_event(
+        guard_type.VK_TAB, True
+    ),
+)
+check(
+    "Windows key stays blocked after focus leaves the protected app",
+    guard_with((), foreground=False)._should_block_keyboard_event(
+        guard_type.VK_LWIN, True
     ),
 )
 check(
@@ -95,10 +107,37 @@ check(
     and "return" not in failure_handling
     and lock_transition > failure_end,
 )
+protection_source = (repo_root / "engine" / "windows_fullscreen.py").read_text(
+    encoding="utf-8"
+)
+lock_filter_start = protection_source.index("def _should_block_keyboard_event")
+lock_filter_end = protection_source.index("def _keyboard_hook_proc", lock_filter_start)
+lock_filter = protection_source[lock_filter_start:lock_filter_end]
+check(
+    "global escape-key filter does not depend on app foreground",
+    "_application_is_foreground" not in lock_filter,
+)
+check(
+    "fullscreen guard pins the native window above desktop windows",
+    "def enforce_locked_desktop(self)" in protection_source
+    and "HWND_TOPMOST" in protection_source
+    and "SetWindowPos" in protection_source,
+)
 app_source = (repo_root / "app_qml.py").read_text(encoding="utf-8")
 check(
-    "native-protection failure clearly warns that Windows shortcuts may remain available",
-    "قد تظل اختصارات Windows وإدارة المهام متاحة." in app_source,
+    "native-protection failure clearly warns that desktop and taskbar remain accessible",
+    "يمكن الخروج إلى سطح المكتب أو إظهار شريط المهام." in app_source,
+)
+check(
+    "fullscreen enforcement timer runs every 100 ms",
+    "self._fullscreen_taskbar_timer.setInterval(100)" in app_source
+    and "self._windows_fullscreen_protection.enforce_locked_desktop"
+        in app_source,
+)
+check(
+    "main QML window is discoverable for native topmost enforcement",
+    'objectName: "mainWindow"' in qml
+    and "QGuiApplication.topLevelWindows()" in app_source,
 )
 
 print("WINDOWS FULLSCREEN PROTECTION SIMULATION: PASS")

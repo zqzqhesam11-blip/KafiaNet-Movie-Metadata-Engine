@@ -6,6 +6,7 @@ import "pages"
 ApplicationWindow {
 
     id: window
+    objectName: "mainWindow"
 
     visible: true
 

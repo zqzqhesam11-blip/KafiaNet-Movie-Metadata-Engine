@@ -35,6 +35,15 @@ class WindowsFullscreenProtection:
     SW_HIDE = 0
     SW_SHOW = 5
 
+    HWND_TOPMOST = -1
+    HWND_NOTOPMOST = -2
+    GWL_EXSTYLE = -20
+    WS_EX_TOPMOST = 0x00000008
+    SWP_NOSIZE = 0x0001
+    SWP_NOMOVE = 0x0002
+    SWP_NOACTIVATE = 0x0010
+    SWP_SHOWWINDOW = 0x0040
+
     TASKBAR_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
 
     # Per-user policy: only the signed-in Windows account is affected.
@@ -72,6 +81,9 @@ class WindowsFullscreenProtection:
         self._enum_callback_type = None
         self._taskbar_visibility = {}
         self._pressed_modifiers = set()
+        self._window_handle = None
+        self._window_was_topmost = False
+        self._window_z_order_captured = False
         # Restore an interrupted lock from a previous process before allowing
         # the normal desktop session to continue.
         self._recover_stale_task_manager_policy()
@@ -121,6 +133,21 @@ class WindowsFullscreenProtection:
         self._user32.IsWindow.restype = wintypes.BOOL
         self._user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         self._user32.ShowWindow.restype = wintypes.BOOL
+        self._user32.SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT
+        ]
+        self._user32.SetWindowPos.restype = wintypes.BOOL
+        self._user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        self._user32.BringWindowToTop.restype = wintypes.BOOL
+        self._user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        self._user32.SetForegroundWindow.restype = wintypes.BOOL
+        get_window_long = getattr(
+            self._user32, "GetWindowLongPtrW", None
+        ) or self._user32.GetWindowLongW
+        get_window_long.argtypes = [wintypes.HWND, ctypes.c_int]
+        get_window_long.restype = ctypes.c_ssize_t
+        self._get_window_long_ptr = get_window_long
         self._user32.GetForegroundWindow.restype = wintypes.HWND
         self._user32.GetWindowThreadProcessId.argtypes = [
             wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
@@ -429,11 +456,19 @@ class WindowsFullscreenProtection:
             if not self._set_task_manager_disabled():
                 self.disable()
                 return False
-            self.reapply_taskbar_visibility()
+            if not self.enforce_locked_desktop():
+                self.disable()
+                return False
             return True
 
         try:
             self._initialize_apis()
+            if not self._window_handle or not self._user32.IsWindow(
+                wintypes.HWND(self._window_handle)
+            ):
+                raise RuntimeError(
+                    "The CN PlayHub native window handle is unavailable."
+                )
             if not self._set_task_manager_disabled():
                 raise RuntimeError(
                     self.last_error
@@ -455,9 +490,9 @@ class WindowsFullscreenProtection:
                 error = ctypes.get_last_error()
                 raise OSError(error, "SetWindowsHookExW failed")
 
-            if not self.reapply_taskbar_visibility():
+            if not self.enforce_locked_desktop():
                 raise RuntimeError(
-                    "Windows taskbar windows were not found; protection was not enabled."
+                    "The Windows taskbar or the CN PlayHub topmost window could not be enforced."
                 )
             return True
         except Exception as exc:
@@ -478,6 +513,7 @@ class WindowsFullscreenProtection:
         self._hook_callback = None
         self._pressed_modifiers.clear()
         self._restore_taskbars()
+        self._restore_window_z_order()
         restored = self._restore_task_manager_policy()
         if not restored:
             print(
@@ -508,6 +544,99 @@ class WindowsFullscreenProtection:
         self._enum_callback = self._enum_callback_type(collect)
         self._user32.EnumWindows(self._enum_callback, 0)
         return sorted(found)
+
+    def set_window_handle(self, handle):
+        """Remember the native QML window that must stay above the desktop."""
+        try:
+            native_handle = int(handle)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if native_handle <= 0:
+            return False
+        self._window_handle = native_handle
+        return True
+
+    def _promote_locked_window(self):
+        """Keep the app topmost and reclaim focus if another desktop window wins."""
+        if not self._enabled or self._user32 is None or not self._window_handle:
+            return False
+
+        hwnd = wintypes.HWND(self._window_handle)
+        if not self._user32.IsWindow(hwnd):
+            self.last_error = "The CN PlayHub native window is no longer valid."
+            return False
+
+        if not self._window_z_order_captured:
+            try:
+                style = int(self._get_window_long_ptr(hwnd, self.GWL_EXSTYLE))
+                self._window_was_topmost = bool(style & self.WS_EX_TOPMOST)
+            except Exception:
+                # The app window is normally not topmost before the lock.
+                self._window_was_topmost = False
+            self._window_z_order_captured = True
+
+        flags = (
+            self.SWP_NOMOVE
+            | self.SWP_NOSIZE
+            | self.SWP_NOACTIVATE
+            | self.SWP_SHOWWINDOW
+        )
+        if not self._user32.SetWindowPos(
+            hwnd, ctypes.c_void_p(self.HWND_TOPMOST), 0, 0, 0, 0, flags
+        ):
+            self.last_error = (
+                "Windows refused to keep the CN PlayHub window above other windows."
+            )
+            return False
+
+        if not self._application_is_foreground():
+            self._user32.ShowWindow(hwnd, self.SW_SHOW)
+            self._user32.BringWindowToTop(hwnd)
+            # Windows may reject foreground activation due to its foreground
+            # lock rules; HWND_TOPMOST still keeps the fullscreen surface above
+            # ordinary desktop windows while the keyboard filter is active.
+            self._user32.SetForegroundWindow(hwnd)
+        return True
+
+    def _restore_window_z_order(self):
+        """Restore the main window's original topmost state after password unlock."""
+        if (
+            self._user32 is None
+            or not self._window_handle
+            or not self._window_z_order_captured
+        ):
+            self._window_z_order_captured = False
+            self._window_was_topmost = False
+            return True
+
+        hwnd = wintypes.HWND(self._window_handle)
+        insert_after = (
+            ctypes.c_void_p(self.HWND_TOPMOST)
+            if self._window_was_topmost
+            else ctypes.c_void_p(self.HWND_NOTOPMOST)
+        )
+        flags = self.SWP_NOMOVE | self.SWP_NOSIZE | self.SWP_NOACTIVATE
+        try:
+            restored = bool(
+                self._user32.IsWindow(hwnd)
+                and self._user32.SetWindowPos(
+                    hwnd, insert_after, 0, 0, 0, 0, flags
+                )
+            )
+        except Exception as exc:
+            print("WINDOWS FULLSCREEN Z-ORDER RESTORE WARNING:", exc)
+            restored = False
+        self._window_z_order_captured = False
+        self._window_was_topmost = False
+        return restored
+
+    def enforce_locked_desktop(self):
+        """Re-hide the shell taskbars and reassert the fullscreen app surface."""
+        if not self._enabled or self._user32 is None:
+            return False
+        taskbar_hidden = self.reapply_taskbar_visibility()
+        window_promoted = self._promote_locked_window()
+        return bool(taskbar_hidden and window_promoted)
 
     def reapply_taskbar_visibility(self):
         """Hide taskbars again if Explorer recreated or showed them."""
@@ -552,9 +681,8 @@ class WindowsFullscreenProtection:
 
     def _should_block_keyboard_event(self, key, is_down):
         """Suppress kiosk escape shortcuts only while this app is foreground."""
-        if not self._application_is_foreground():
-            return False
-
+        # The low-level hook is global. Keep these escape shortcuts blocked
+        # even after Windows briefly gives focus to Explorer or the taskbar.
         if key in self.BLOCKED_KEYS:
             return True
 
