@@ -201,8 +201,10 @@ public final class HomeActivity extends Activity {
                             ? android.view.View.VISIBLE : android.view.View.GONE
             );
         }
-        if ("running".equals(state)) {
-            status.setText("النقل يعمل داخل الهاتف. بعد ظهور هذه الحالة يمكن فصل كابل USB بأمان.\n" + current);
+        if ("preparing".equals(state)) {
+            status.setText("المساعد يجهز قائمة الملفات محلياً. لا تفصل كابل USB حتى تظهر نسبة التقدم.");
+        } else if ("running".equals(state)) {
+            status.setText("النقل يعمل داخل الهاتف. بعد ظهور نسبة التقدم وحالة النقل المحلي يمكنك فصل كابل USB بأمان.\n" + current);
         } else if ("completed".equals(state)) {
             status.setText("اكتمل النقل إلى مجلد اللعبة. نسخة الجذر الأصلية بقيت كما هي.");
         } else if ("failed".equals(state) || "interrupted".equals(state)) {
