@@ -247,9 +247,11 @@ transfer_loop_source = (
     )[1].split("final_status = request_json(", 1)[0]
 )
 check(
-    "Shizuku file loop uses progress signals instead of per-file status messages",
+    "Shizuku file loop updates progress without per-file status messages",
     "self.statusChanged.emit(" not in transfer_loop_source
-    and "self.progressChanged.emit(" in transfer_loop_source,
+    and "emit_progress(file_sent)" in transfer_loop_source
+    and "emit_progress(0)" in transfer_loop_source
+    and "self.progressChanged.emit(" in direct_copy_source,
 )
 check(
     "Shizuku transfer still reports phone disconnects for reconnect handling",
