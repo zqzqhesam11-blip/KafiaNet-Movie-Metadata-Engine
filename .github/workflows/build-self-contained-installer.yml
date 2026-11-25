@@ -92,7 +92,7 @@ jobs:
 
           $aapt = Join-Path $env:ANDROID_HOME 'build-tools\35.0.0\aapt.exe'
           $badging = (& $aapt dump badging $helperApk | Out-String)
-          if ($LASTEXITCODE -ne 0 -or $badging -notmatch "package: name='com.kafianet.shizukubridge' versionCode='16' versionName='1.7.0'") {
+          if ($LASTEXITCODE -ne 0 -or $badging -notmatch "package: name='com.kafianet.shizukubridge' versionCode='17' versionName='1.7.1'") {
             throw "Unified Android assistant identity/version validation failed: $badging"
           }
           Get-FileHash -Algorithm SHA256 -LiteralPath $helperApk | Format-List
