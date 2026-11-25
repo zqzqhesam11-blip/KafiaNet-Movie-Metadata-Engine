@@ -2641,7 +2641,7 @@ exit 3
                     helper_apk = BASE_DIR / "android_support" / "CNPlayHubShizukuBridge.apk"
                     if not helper_apk.is_file():
                         raise FileNotFoundError(
-                            "نسخة المساعد الموحد 1.7.1 غير موجودة داخل حزمة الكمبيوتر."
+                            "نسخة المساعد الموحد 1.7.2 غير موجودة داخل حزمة الكمبيوتر."
                         )
                     self.statusChanged.emit("جاري تحديث المساعد الموحد قبل النقل المحلي...")
                     install = self._run_install_command(
@@ -2685,7 +2685,7 @@ exit 3
 
                     if install.returncode != 0 or "success" not in lowered_install:
                         raise RuntimeError(
-                            "تعذر تثبيت المساعد الموحد 1.7.1: "
+                            "تعذر تثبيت المساعد الموحد 1.7.2: "
                             + (install_output or "adb install failed")
                         )
 
@@ -2864,9 +2864,9 @@ exit 3
                     )
                     match = re.search(r"\bversionCode=(\d+)", version_text)
                     installed_code = int(match.group(1)) if match else 0
-                    if installed_code >= 17:
+                    if installed_code >= 18:
                         self.logChanged.emit(
-                            "مساعد KafiaNet الموحد 1.7.1 محدث؛ سنستخدم النسخة المثبتة."
+                            "مساعد KafiaNet الموحد 1.7.2 محدث؛ سنستخدم النسخة المثبتة."
                         )
                         return
                     self.logChanged.emit(
