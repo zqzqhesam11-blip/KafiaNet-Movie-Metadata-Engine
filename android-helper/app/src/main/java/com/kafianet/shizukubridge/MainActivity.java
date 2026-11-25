@@ -45,12 +45,14 @@ import rikka.shizuku.Shizuku;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_SHIZUKU = 7301;
-    private static final int REQUEST_PUBG_TREE = 7302;
+    private static final int REQUEST_LOCAL_TREE = 7302;
+    private static final int REQUEST_SOURCE_READ_PERMISSION = 7303;
     private static final String EXTRA_KAFIANET_ACTION = "kafianet_action";
-    private static final String ACTION_REQUEST_PUBG_TREE = "request_pubg_tree";
-    private static final String PUBG_PACKAGE = "com.tencent.ig";
-    private static final String PUBG_TREE_PREFS = "kafianet_storage_permissions";
-    private static final String PUBG_TREE_URI_KEY = "pubg_tree_uri";
+    private static final String ACTION_REQUEST_LOCAL_FINALIZE = "request_local_finalize";
+    private static final String TREE_PREFS = "kafianet_storage_permissions";
+    private static final String SOURCE_ROOT_EXTRA = "source_root";
+    private static final String TARGET_RELATIVE_EXTRA = "target_relative";
+    private static final String GAME_EXTRA = "game";
     private static final int SERVER_PORT = 18765;
     private static final long SHIZUKU_PERMISSION_WAIT_TIMEOUT_MS = 15L * 60L * 1000L;
 
@@ -71,6 +73,9 @@ public final class MainActivity extends Activity {
     private volatile boolean serviceBound = false;
     private volatile boolean permissionRequestInFlight = false;
     private volatile long permissionRequestStartedAt = 0L;
+    private String pendingSourceRoot = "";
+    private String pendingTargetRelative = "";
+    private String pendingGame = "PUBG Mobile";
     private boolean shizukuListenersRegistered = false;
     private boolean httpServerStarted = false;
 
@@ -198,8 +203,8 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(createContent());
         readSession(getIntent());
-        if (isPubgTreeRequest(getIntent())) {
-            requestPubgTreeAccess();
+        if (isLocalFinalizeRequest(getIntent())) {
+            requestLocalFinalizeTreeAccess();
         } else {
             activateBridgeMode();
         }
@@ -210,8 +215,8 @@ public final class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         readSession(intent);
-        if (isPubgTreeRequest(intent)) {
-            requestPubgTreeAccess();
+        if (isLocalFinalizeRequest(intent)) {
+            requestLocalFinalizeTreeAccess();
             return;
         }
         activateBridgeMode();
@@ -222,9 +227,9 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private boolean isPubgTreeRequest(Intent intent) {
+    private boolean isLocalFinalizeRequest(Intent intent) {
         return intent != null
-                && ACTION_REQUEST_PUBG_TREE.equals(
+                && ACTION_REQUEST_LOCAL_FINALIZE.equals(
                         intent.getStringExtra(EXTRA_KAFIANET_ACTION)
                 );
     }
@@ -244,16 +249,40 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void requestPubgTreeAccess() {
-        if (!PUBG_PACKAGE.equals(targetPackage)) {
-            showMessage("طلب الإذن مخصص لمجلد PUBG Mobile: " + PUBG_PACKAGE);
+    private void requestLocalFinalizeTreeAccess() {
+        targetPackage = getIntent().getStringExtra("package");
+        if (targetPackage == null || !targetPackage.matches("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+")) {
+            showMessage("معرّف حزمة اللعبة غير صالح؛ لم نفتح منتقي الملفات.");
             return;
         }
+        pendingSourceRoot = getIntent().getStringExtra(SOURCE_ROOT_EXTRA);
+        pendingTargetRelative = getIntent().getStringExtra(TARGET_RELATIVE_EXTRA);
+        pendingGame = getIntent().getStringExtra(GAME_EXTRA);
+        if (pendingSourceRoot == null || pendingTargetRelative == null
+                || pendingSourceRoot.trim().isEmpty() || pendingTargetRelative.trim().isEmpty()) {
+            showMessage("بيانات النقل المحلي غير مكتملة. أعد تشغيل العملية من تطبيق الكمبيوتر.");
+            return;
+        }
+        if (pendingGame == null || pendingGame.trim().isEmpty()) pendingGame = targetPackage;
 
+        if (Build.VERSION.SDK_INT >= 23
+                && checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                        != PackageManager.PERMISSION_GRANTED) {
+            showMessage("اسمح للمساعد بقراءة مجلد النسخة الموجودة في الجذر أولاً.");
+            requestPermissions(
+                    new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE},
+                    REQUEST_SOURCE_READ_PERMISSION
+            );
+            return;
+        }
+        openLocalFinalizeTreePicker();
+    }
+
+    private void openLocalFinalizeTreePicker() {
         try {
             Uri initialUri = DocumentsContract.buildDocumentUri(
                     "com.android.externalstorage.documents",
-                    "primary:Android/data/" + PUBG_PACKAGE
+                    "primary:Android/data/" + targetPackage
             );
             Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
             // EXTRA_INITIAL_URI was added in API 26. On API 24-25 open the
@@ -267,21 +296,22 @@ public final class MainActivity extends Activity {
                             | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
                             | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
             );
-            showMessage("اختر مجلد com.tencent.ig ثم اضغط «استخدام هذا المجلد» لمنح KafiaNet الإذن.");
-            startActivityForResult(picker, REQUEST_PUBG_TREE);
+            showMessage("اختر مجلد " + targetPackage
+                    + " داخل Android/data ثم اضغط «استخدام هذا المجلد». بعد الموافقة يبدأ المساعد النقل محلياً.");
+            startActivityForResult(picker, REQUEST_LOCAL_TREE);
         } catch (Throwable failure) {
-            android.util.Log.e("KafiaNetBridge", "Could not open PUBG SAF tree picker", failure);
-            showMessage("تعذر فتح نافذة اختيار مجلد PUBG: " + failure.getMessage());
+            android.util.Log.e("KafiaNetBridge", "Could not open Android/data SAF tree picker", failure);
+            showMessage("تعذر فتح نافذة مجلد اللعبة: " + failure.getMessage());
         }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQUEST_PUBG_TREE) return;
+        if (requestCode != REQUEST_LOCAL_TREE) return;
 
         if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
-            showMessage("تم إلغاء طلب الإذن. لم يتم تغيير أي ملفات أو حذف نسخة الجذر.");
+            showMessage("تم إلغاء الإذن. بقيت ملفات الجذر كما هي ولم يبدأ النقل المحلي.");
             return;
         }
 
@@ -293,11 +323,11 @@ public final class MainActivity extends Activity {
             }
 
             String selectedDocumentId = DocumentsContract.getTreeDocumentId(selectedTree);
-            String expectedDocumentId = "primary:Android/data/" + PUBG_PACKAGE;
+            String expectedDocumentId = "primary:Android/data/" + targetPackage;
             if (!"com.android.externalstorage.documents".equals(selectedTree.getAuthority())
                     || !expectedDocumentId.equals(selectedDocumentId)) {
                 showMessage(
-                        "لم يتم حفظ الإذن. اختر مجلد com.tencent.ig نفسه، وليس Android/data أو مجلداً آخر."
+                        "لم يتم حفظ الإذن. اختر مجلد " + targetPackage + " نفسه، وليس Android/data أو مجلداً آخر."
                 );
                 return;
             }
@@ -328,26 +358,30 @@ public final class MainActivity extends Activity {
                 return;
             }
 
-            getSharedPreferences(PUBG_TREE_PREFS, MODE_PRIVATE)
+            getSharedPreferences(TREE_PREFS, MODE_PRIVATE)
                     .edit()
-                    .putString(PUBG_TREE_URI_KEY, selectedTree.toString())
-                    .putString("pubg_package", PUBG_PACKAGE)
+                    .putString(treeUriKey(targetPackage), selectedTree.toString())
                     .apply();
 
-            showMessage(
-                    "تم منح وحفظ إذن القراءة والكتابة لمجلد PUBG Mobile بنجاح.\n"
-                            + "يمكن الآن استخدام هذه الصلاحية في خطوة النقل التالية."
-            );
-            android.util.Log.i("KafiaNetBridge", "Persisted PUBG SAF tree grant: " + selectedTree);
+            showMessage("تم حفظ إذن مجلد " + targetPackage
+                    + ". يجري الآن تشغيل النقل داخل الهاتف...");
+            startLocalFinalizeService(selectedTree);
+            android.util.Log.i("KafiaNetBridge", "Persisted local SAF tree grant: " + selectedTree);
         } catch (Throwable failure) {
             android.util.Log.e("KafiaNetBridge", "Could not persist PUBG SAF tree grant", failure);
             showMessage("تعذر حفظ إذن مجلد PUBG: " + failure.getMessage());
         }
     }
 
+    private String treeUriKey(String packageName) {
+        return "tree_uri_" + packageName;
+    }
+
     private boolean hasPersistedPubgTreePermission() {
-        String stored = getSharedPreferences(PUBG_TREE_PREFS, MODE_PRIVATE)
-                .getString(PUBG_TREE_URI_KEY, "");
+        String packageName = targetPackage == null ? "" : targetPackage;
+        if (packageName.isEmpty()) return false;
+        String stored = getSharedPreferences(TREE_PREFS, MODE_PRIVATE)
+                .getString(treeUriKey(packageName), "");
         if (stored == null || stored.isEmpty()) return false;
         Uri expectedUri = Uri.parse(stored);
         for (UriPermission permission : getContentResolver().getPersistedUriPermissions()) {
