@@ -398,6 +398,14 @@ public final class MainActivity extends Activity {
 
     private void startLocalFinalizeService(Uri selectedTree) {
         try {
+            getSharedPreferences(PubgOfflineFinalizeService.PREFS, MODE_PRIVATE)
+                    .edit()
+                    .putString(PubgOfflineFinalizeService.KEY_SOURCE_ROOT, pendingSourceRoot)
+                    .putString(PubgOfflineFinalizeService.KEY_TARGET_PACKAGE, targetPackage)
+                    .putString(PubgOfflineFinalizeService.KEY_TARGET_RELATIVE, pendingTargetRelative)
+                    .putString(PubgOfflineFinalizeService.KEY_GAME, pendingGame)
+                    .apply();
+
             Intent service = new Intent(this, PubgOfflineFinalizeService.class);
             service.setAction(PubgOfflineFinalizeService.ACTION_START);
             service.putExtra(PubgOfflineFinalizeService.EXTRA_SOURCE_ROOT, pendingSourceRoot);
