@@ -607,8 +607,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          $tag = 'cn-playhub-windows-latest'
-          $releaseTitle = 'CN PlayHub - Final Windows (Latest)'
+          # Every workflow attempt gets a brand-new release and asset namespace.
+          # This avoids replacing same-name assets on an old release, which has
+          # repeatedly triggered HTTP 500 from GitHub's release-asset API.
+          $shortSha = $env:GITHUB_SHA.Substring(0, 12)
+          $tag = "cn-playhub-windows-$shortSha-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $releaseTitle = "CN PlayHub - Windows $shortSha"
 
           $assets = @(
             'installer/CN_PLAYHUB_Setup.exe',
@@ -622,160 +626,129 @@ jobs:
             }
           }
 
-          # Use Release assets instead of Actions artifacts: the latter can be
-          # blocked by the repository/account Actions storage quota.
-          $releaseListRaw = gh release list --limit 100 --json tagName
-          if ($LASTEXITCODE -ne 0) { throw 'Could not query existing GitHub releases.' }
-          $releaseList = @($releaseListRaw | ConvertFrom-Json)
-          $releaseExists = @($releaseList | Where-Object { $_.tagName -eq $tag }).Count -gt 0
+          # Create as a draft: no partially uploaded package can become latest.
+          # Unique run/attempt tags mean this release starts without old assets.
+          gh release create $tag --draft --target $env:GITHUB_SHA --title $releaseTitle --notes 'CN PlayHub self-contained Windows installer and portable package. Android Shizuku helper APK is bundled in the Windows package. Built and smoke-tested by GitHub Actions.'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create a fresh draft Windows release.' }
 
-          if (-not $releaseExists) {
-            gh release create $tag --target $env:GITHUB_SHA --title $releaseTitle --notes 'CN PlayHub self-contained Windows installer and portable package. Android Shizuku helper APK is bundled in the Windows package. Built and smoke-tested by GitHub Actions.' --prerelease
-            if ($LASTEXITCODE -ne 0) { throw 'Could not create the Windows latest release.' }
-          } else {
-            # Move only the dedicated Windows latest tag to this tested commit.
-            # No branch, especially main, is modified by this operation.
-            git tag --force $tag $env:GITHUB_SHA
-            if ($LASTEXITCODE -ne 0) { throw 'Could not update the local Windows release tag.' }
-            git push origin "refs/tags/$tag" --force
-            if ($LASTEXITCODE -ne 0) { throw 'Could not update the Windows latest release tag on GitHub.' }
+          $releaseApiRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the newly created draft Windows release.' }
+          $releaseApi = $releaseApiRaw | ConvertFrom-Json
+          $releaseId = [string]$releaseApi.id
+          if ([string]::IsNullOrWhiteSpace($releaseId) -or -not [bool]$releaseApi.draft) {
+            throw 'Fresh Windows release was not created in draft state.'
           }
 
-          # Retire files belonging to the removed changed-files-only updater.
-          $releaseBeforePublishRaw = gh release view $tag --json assets
-          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect existing Windows release assets.' }
-          $releaseBeforePublish = $releaseBeforePublishRaw | ConvertFrom-Json
-          $existingAssetNames = @($releaseBeforePublish.assets | ForEach-Object { $_.name })
-          foreach ($retiredAsset in @(
-            'CN_PLAYHUB_Bundle_Manifest.json',
-            'CN_PLAYHUB_Update.zip',
-            'CN_PLAYHUB_Update_SHA256.txt'
-          )) {
-            if ($existingAssetNames -contains $retiredAsset) {
-              gh release delete-asset $tag $retiredAsset --yes
-              if ($LASTEXITCODE -ne 0) { throw "Could not retire obsolete release asset: $retiredAsset" }
-            }
-          }
-
-          # Upload assets individually so a transient GitHub API 5xx only
-          # retries the affected file instead of restarting the whole batch.
-          # --clobber first removes an existing same-name asset; GitHub can
-          # briefly return HTTP 5xx for that delete, so retry with backoff.
+          # Upload one file at a time without --clobber. After an upload error,
+          # inspect the release: the server may have accepted the bytes before
+          # the client received the response. Compare size and SHA-256 before
+          # deciding whether another upload attempt is actually needed.
           $maxUploadAttempts = 5
           foreach ($asset in $assets) {
+            $assetName = [IO.Path]::GetFileName($asset)
+            $localSize = [int64](Get-Item -LiteralPath $asset).Length
+            $localDigest = 'sha256:' + (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
             $uploaded = $false
+
             for ($attempt = 1; $attempt -le $maxUploadAttempts; $attempt++) {
-              Write-Host "Publishing $asset (attempt $attempt/$maxUploadAttempts)"
-              & gh release upload $tag $asset --clobber
+              $checkRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId"
+              if ($LASTEXITCODE -ne 0) { throw "Could not inspect draft release before uploading $assetName." }
+              $checkRelease = $checkRaw | ConvertFrom-Json
+              $existing = @($checkRelease.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1)
+
+              if ($existing.Count -gt 0) {
+                if ([int64]$existing[0].size -eq $localSize -and [string]$existing[0].digest -eq $localDigest) {
+                  Write-Host "WINDOWS RELEASE ASSET ALREADY UPLOADED AND VERIFIED: $assetName"
+                  $uploaded = $true
+                  break
+                }
+                throw "Unexpected conflicting asset already exists in fresh draft release: $assetName"
+              }
+
+              Write-Host "Uploading $assetName (attempt $attempt/$maxUploadAttempts)"
+              & gh release upload $tag $asset
               $uploadExitCode = $LASTEXITCODE
-              if ($uploadExitCode -eq 0) {
-                $uploaded = $true
-                break
+
+              # Always inspect server state after the upload attempt.
+              $verifyRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId"
+              $verifyExitCode = $LASTEXITCODE
+              if ($verifyExitCode -eq 0) {
+                $verifyRelease = $verifyRaw | ConvertFrom-Json
+                $remote = @($verifyRelease.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1)
+                if ($remote.Count -gt 0) {
+                  if ([int64]$remote[0].size -eq $localSize -and [string]$remote[0].digest -eq $localDigest) {
+                    Write-Host "WINDOWS RELEASE ASSET VERIFIED: $assetName ($localSize bytes)"
+                    $uploaded = $true
+                    break
+                  }
+                  throw "Uploaded Windows release asset does not match local bytes: $assetName"
+                }
               }
 
               if ($attempt -lt $maxUploadAttempts) {
                 $delaySeconds = [Math]::Min(30, 5 * [Math]::Pow(2, $attempt - 1))
-                Write-Warning "GitHub release upload failed for $asset (exit $uploadExitCode). Retrying in $delaySeconds seconds."
+                Write-Warning "Upload did not produce a verifiable asset (exit $uploadExitCode). Retrying $assetName in $delaySeconds seconds."
                 Start-Sleep -Seconds $delaySeconds
               }
             }
 
             if (-not $uploaded) {
-              throw "Could not upload Windows release asset after $maxUploadAttempts attempts: $asset"
+              throw "Could not publish and verify Windows release asset after $maxUploadAttempts attempts: $assetName"
             }
           }
 
-          $publishedRaw = gh release view $tag --json tagName,name,url,assets
-          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the published Windows release.' }
-          $published = $publishedRaw | ConvertFrom-Json
-          $publishedNames = @($published.assets | ForEach-Object { $_.name })
-
-          # Verify every uploaded asset against the exact local bytes, not only
-          # its filename. GitHub exposes SHA-256 digests for release assets.
-          $releaseApiRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect uploaded Windows release asset digests.' }
-          $releaseApi = $releaseApiRaw | ConvertFrom-Json
-          foreach ($asset in $assets) {
-            $assetName = [IO.Path]::GetFileName($asset)
-            $localDigest = 'sha256:' + (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
-            $remoteAsset = @($releaseApi.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1)
-            if ($remoteAsset.Count -eq 0) {
-              throw "Windows release is missing uploaded asset: $assetName"
-            }
-            if ([int64]$remoteAsset[0].size -ne [int64](Get-Item -LiteralPath $asset).Length) {
-              throw "Windows release asset size mismatch: $assetName"
-            }
-            if ([string]::IsNullOrWhiteSpace([string]$remoteAsset[0].digest)) {
-              throw "GitHub did not provide a SHA-256 digest for release asset: $assetName"
-            }
-            if ([string]$remoteAsset[0].digest -ne $localDigest) {
-              throw "Windows release asset SHA-256 mismatch: $assetName"
-            }
-            Write-Host "WINDOWS RELEASE ASSET VERIFIED: $assetName ($($remoteAsset[0].size) bytes)"
-          }
-          foreach ($asset in @(
+          # Final pre-publication audit: exact four files, exact sizes and hashes.
+          $finalDraftRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not perform final draft release audit.' }
+          $finalDraft = $finalDraftRaw | ConvertFrom-Json
+          $expectedNames = @(
             'CN_PLAYHUB_Setup.exe',
             'SHA256SUMS.txt',
             'CN_PLAYHUB_Portable.zip',
             'CN_PLAYHUB_Portable_SHA256.txt'
-          )) {
-            if ($publishedNames -notcontains $asset) {
-              throw "Windows release is missing uploaded asset: $asset"
+          )
+          $actualNames = @($finalDraft.assets | ForEach-Object { $_.name })
+          if ($actualNames.Count -ne $expectedNames.Count) {
+            throw "Draft Windows release has an unexpected asset count: $($actualNames.Count)"
+          }
+          foreach ($asset in $assets) {
+            $assetName = [IO.Path]::GetFileName($asset)
+            $localItem = Get-Item -LiteralPath $asset
+            $localDigest = 'sha256:' + (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+            $remote = @($finalDraft.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1)
+            if ($remote.Count -eq 0 -or
+                [int64]$remote[0].size -ne [int64]$localItem.Length -or
+                [string]$remote[0].digest -ne $localDigest) {
+              throw "Final Windows release integrity check failed: $assetName"
             }
           }
-          foreach ($retiredAsset in @(
-            'CN_PLAYHUB_Bundle_Manifest.json',
-            'CN_PLAYHUB_Update.zip',
-            'CN_PLAYHUB_Update_SHA256.txt'
-          )) {
-            if ($publishedNames -contains $retiredAsset) {
-              throw "Obsolete update-only asset remains in the Windows release: $retiredAsset"
-            }
+          foreach ($name in $expectedNames) {
+            if ($actualNames -notcontains $name) { throw "Final Windows release is missing: $name" }
           }
 
-          $releaseApiRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not retrieve the Windows Latest release ID.' }
-          $releaseApi = $releaseApiRaw | ConvertFrom-Json
-          $releaseId = $releaseApi.id
-
-          # GitHub may apply the PATCH but return an empty HTTP 204 body.
-          # gh api can then report a JSON parse error even though promotion worked.
-          # --silent avoids parsing/printing that response; a fresh GET is the
-          # source of truth for the final release state.
-          $promotionVerified = $false
-          $maxPromotionAttempts = 3
-          for ($attempt = 1; $attempt -le $maxPromotionAttempts; $attempt++) {
-            Write-Host "Promoting Windows Latest release to final (attempt $attempt/$maxPromotionAttempts)"
-            gh api --silent --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" -F prerelease=false
-            $patchExitCode = $LASTEXITCODE
-            if ($patchExitCode -ne 0) {
-              Write-Warning "Release promotion request returned exit code $patchExitCode; checking the actual server state."
-            }
-
-            $verifiedReleaseRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId"
-            $verifyExitCode = $LASTEXITCODE
-            if ($verifyExitCode -eq 0) {
-              try {
-                $verifiedRelease = $verifiedReleaseRaw | ConvertFrom-Json -ErrorAction Stop
-                if (-not [bool]$verifiedRelease.draft -and -not [bool]$verifiedRelease.prerelease) {
-                  $promotionVerified = $true
-                  break
-                }
-              } catch {
-                Write-Warning "Could not parse release verification response on attempt $attempt."
-              }
-            } else {
-              Write-Warning "Could not read release status after promotion attempt $attempt."
-            }
-
-            if ($attempt -lt $maxPromotionAttempts) {
-              Start-Sleep -Seconds (5 * $attempt)
-            }
-          }
-          if (-not $promotionVerified) {
-            throw 'Could not verify that the Windows Latest release is published as final.'
+          # Publish only after all four assets pass integrity verification.
+          # make_latest=true directs GitHub's stable /releases/latest/download URL
+          # to this exact fully verified release.
+          gh api --silent --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" -F draft=false -F prerelease=false -f make_latest=true
+          $publishExitCode = $LASTEXITCODE
+          if ($publishExitCode -ne 0) {
+            Write-Warning "Publish request returned exit code $publishExitCode; checking the actual release state."
           }
 
-          Write-Host "WINDOWS RELEASE PUBLISHED: $($published.url)" -ForegroundColor Green
+          $publishedRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the published Windows release.' }
+          $published = $publishedRaw | ConvertFrom-Json
+          if ([bool]$published.draft -or [bool]$published.prerelease) {
+            throw 'Windows release assets were uploaded but release publication was not confirmed.'
+          }
+
+          $latestRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the repository latest release pointer.' }
+          $latestRelease = $latestRaw | ConvertFrom-Json
+          if ([string]$latestRelease.id -ne $releaseId) {
+            throw 'GitHub latest release pointer does not reference the newly verified Windows build.'
+          }
+
+          Write-Host "WINDOWS RELEASE PUBLISHED: $($published.html_url)" -ForegroundColor Green
           Write-Host 'WINDOWS RELEASE ASSET VERIFICATION: PASS' -ForegroundColor Green
           Write-Host 'WINDOWS RELEASE FINAL STATUS: PASS' -ForegroundColor Green
