@@ -377,6 +377,42 @@ public final class MainActivity extends Activity {
         return "tree_uri_" + packageName;
     }
 
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_SOURCE_READ_PERMISSION) return;
+        if (grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            openLocalFinalizeTreePicker();
+        } else {
+            showMessage("لم تُمنح صلاحية قراءة مجلد الجذر. بقيت الملفات كما هي ولم يبدأ النقل.");
+        }
+    }
+
+    private void startLocalFinalizeService(Uri selectedTree) {
+        try {
+            Intent service = new Intent(this, PubgOfflineFinalizeService.class);
+            service.setAction(PubgOfflineFinalizeService.ACTION_START);
+            service.putExtra(PubgOfflineFinalizeService.EXTRA_SOURCE_ROOT, pendingSourceRoot);
+            service.putExtra(PubgOfflineFinalizeService.EXTRA_TARGET_PACKAGE, targetPackage);
+            service.putExtra(PubgOfflineFinalizeService.EXTRA_TARGET_RELATIVE, pendingTargetRelative);
+            service.putExtra(PubgOfflineFinalizeService.EXTRA_GAME, pendingGame);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(service);
+            } else {
+                startService(service);
+            }
+            showMessage("بدأ النقل المحلي على الهاتف. انتظر ظهور النسبة قبل فصل كابل USB.");
+            android.util.Log.i("KafiaNetBridge",
+                    "Started phone-local SAF copy for " + targetPackage + " using " + selectedTree);
+        } catch (Throwable failure) {
+            android.util.Log.e("KafiaNetBridge", "Could not start local SAF copy service", failure);
+            showMessage("تم حفظ الإذن، لكن تعذر بدء خدمة النقل المحلي: " + failure.getMessage()
+                    + "\nنسخة الجذر ما زالت محفوظة.");
+        }
+    }
+
     private boolean hasPersistedPubgTreePermission() {
         String packageName = targetPackage == null ? "" : targetPackage;
         if (packageName.isEmpty()) return false;
