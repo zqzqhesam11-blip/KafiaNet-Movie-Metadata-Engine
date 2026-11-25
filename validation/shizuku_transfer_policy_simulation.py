@@ -113,8 +113,8 @@ check(
     ADBEngine._version_key("14.0.1") > ADBEngine._version_key("13.6.0"),
 )
 check(
-    "CN PlayHub helper 1.6.7 parses",
-    ADBEngine._version_key("1.6.7") == (1, 6, 7),
+    "KafiaNet Assistant 1.7.2 parses",
+    ADBEngine._version_key("1.7.2") == (1, 7, 2),
 )
 
 helper_service = (
@@ -293,7 +293,7 @@ check(
     and "install_if_missing" in prepare_source
     and "def install_helper_if_outdated():" in prepare_source
     and '"dumpsys", "package", helper_package' in prepare_source
-    and "installed_code >= 14" in prepare_source
+    and "installed_code >= 18" in prepare_source
     and "install_helper_if_outdated()" in prepare_source
     and "install_if_missing(shizuku_apk, shizuku_package, \"Shizuku\")" in prepare_source,
 )
