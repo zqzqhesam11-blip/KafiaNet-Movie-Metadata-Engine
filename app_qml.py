@@ -2043,7 +2043,13 @@ class AppController(QObject):
         if phase == "root_helper_launch":
             operation["phase"] = "final"
             operation["local_finalize_pending"] = True
-            self._finished_for_device(serial, success, message)
+            if not success:
+                message = (
+                    "اكتمل النسخ إلى الجذر وبقيت الملفات محفوظة، لكن تعذر فتح مساعد الهاتف تلقائياً. "
+                    "افتح KafiaNet Assistant يدوياً ثم تابع طلب إذن المجلد.\n"
+                    + str(message or "")
+                )
+            self._finished_for_device(serial, True, message)
             return
 
         if phase == "adb_direct":
