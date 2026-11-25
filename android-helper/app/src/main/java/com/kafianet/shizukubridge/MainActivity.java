@@ -259,7 +259,7 @@ public final class MainActivity extends Activity {
         pendingTargetRelative = getIntent().getStringExtra(TARGET_RELATIVE_EXTRA);
         pendingGame = getIntent().getStringExtra(GAME_EXTRA);
         if (pendingSourceRoot == null || pendingTargetRelative == null
-                || pendingSourceRoot.trim().isEmpty() || pendingTargetRelative.trim().isEmpty()) {
+                || pendingSourceRoot.trim().isEmpty()) {
             showMessage("بيانات النقل المحلي غير مكتملة. أعد تشغيل العملية من تطبيق الكمبيوتر.");
             return;
         }
