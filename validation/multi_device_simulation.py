@@ -2798,7 +2798,8 @@ def test_paths_and_ui():
     assert "RECOVERY_PREVIOUS_VALUE" in window_guard
     assert "_recover_stale_task_manager_policy()" in window_guard
     assert "_restore_task_manager_policy()" in window_guard
-    assert "تعطيل إدارة المهام" in current
+    assert "إخفاء شريط المهام" in current
+    assert "هذا ليس وضع Kiosk على مستوى Windows." in current
     assert "enumerate_removable_storage_devices" in current
     assert "target_type" in current and "local_usb_copy" in current
     assert "getSelectedTargetUnits" in current
