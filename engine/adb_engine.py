@@ -2830,9 +2830,9 @@ exit 3
                     )
                     match = re.search(r"\bversionCode=(\d+)", version_text)
                     installed_code = int(match.group(1)) if match else 0
-                    if installed_code >= 16:
+                    if installed_code >= 17:
                         self.logChanged.emit(
-                            "مساعد KafiaNet الموحد 1.7.0 محدث؛ سنستخدم النسخة المثبتة."
+                            "مساعد KafiaNet الموحد 1.7.1 محدث؛ سنستخدم النسخة المثبتة."
                         )
                         return
                     self.logChanged.emit(
