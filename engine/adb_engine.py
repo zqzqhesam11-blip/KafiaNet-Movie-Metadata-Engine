@@ -2649,9 +2649,43 @@ exit 3
                         timeout=3600
                     )
                     install_output = self._result_text(install)
-                    if install.returncode != 0 or "success" not in install_output.lower():
+                    lowered_install = install_output.lower()
+                    signature_conflict = (
+                        "install_failed_update_incompatible" in lowered_install
+                        or "signature mismatch" in lowered_install
+                        or "signatures do not match" in lowered_install
+                    )
+                    if (
+                        (install.returncode != 0 or "success" not in lowered_install)
+                        and signature_conflict
+                    ):
+                        self.statusChanged.emit(
+                            "تعارض توقيع نسخة المساعد القديمة. سنعيد تثبيت المساعد الموحد فقط؛ "
+                            "قد يحتاج إذن المجلد إلى منح مرة أخرى. نسخة الجذر لن تتغير."
+                        )
+                        uninstall = self._run(
+                            ["-s", str(device), "uninstall", helper_package],
+                            timeout=120
+                        )
+                        uninstall_output = self._result_text(uninstall)
+                        if (
+                            uninstall.returncode != 0
+                            and "success" not in uninstall_output.lower()
+                        ):
+                            raise RuntimeError(
+                                "تعذر إزالة نسخة المساعد ذات التوقيع المتعارض: "
+                                + (uninstall_output or "uninstall failed")
+                            )
+                        install = self._run_install_command(
+                            ["-s", str(device), "install", "-r", str(helper_apk)],
+                            timeout=3600
+                        )
+                        install_output = self._result_text(install)
+                        lowered_install = install_output.lower()
+
+                    if install.returncode != 0 or "success" not in lowered_install:
                         raise RuntimeError(
-                            "تعذر تحديث المساعد الموحد دون حذف بياناته: "
+                            "تعذر تثبيت المساعد الموحد 1.7.1: "
                             + (install_output or "adb install failed")
                         )
 
