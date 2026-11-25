@@ -156,7 +156,8 @@ def build_shizuku_helper_apk_path():
 
 
 def build_efootball_saf_helper_apk_path():
-    return BASE_DIR / "android_support" / "KafiaNetEFootballSAF.apk"
+    # Backward-compatible alias: eFootball now uses the same unified helper APK.
+    return build_shizuku_helper_apk_path()
 
 
 def _read_axml_package_name(manifest_bytes):
