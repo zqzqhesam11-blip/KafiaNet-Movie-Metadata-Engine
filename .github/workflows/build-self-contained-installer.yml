@@ -635,18 +635,23 @@ jobs:
           git push origin "refs/tags/$tag"
           if ($LASTEXITCODE -ne 0) { throw 'Could not publish the unique Windows release tag.' }
 
-          # Create as a draft: no partially uploaded package can become latest.
-          # The remote tag already exists and points to the exact tested commit.
-          gh release create $tag --draft --title $releaseTitle --notes 'CN PlayHub self-contained Windows installer and portable package. Android Shizuku helper APK is bundled in the Windows package. Built and smoke-tested by GitHub Actions.'
-          if ($LASTEXITCODE -ne 0) { throw 'Could not create a fresh draft Windows release.' }
-
-          $releaseApiRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the newly created draft Windows release by its pre-existing tag.' }
-          $releaseApi = $releaseApiRaw | ConvertFrom-Json
-          $releaseId = [string]$releaseApi.id
-          if ([string]::IsNullOrWhiteSpace($releaseId) -or -not [bool]$releaseApi.draft) {
-            throw 'Fresh Windows release was not created in draft state.'
+          # Create the draft through the REST API with an explicit tag_name.
+          # This avoids gh release create returning an untagged placeholder URL
+          # even though the remote Git tag already exists.
+          $releaseNotes = 'CN PlayHub self-contained Windows installer and portable package. Android Shizuku helper APK is bundled in the Windows package. Built and smoke-tested by GitHub Actions.'
+          $releaseApiRaw = gh api --method POST "repos/$env:GITHUB_REPOSITORY/releases" -f "tag_name=$tag" -f "target_commitish=$env:GITHUB_SHA" -f "name=$releaseTitle" -f "body=$releaseNotes" -F draft=true -F prerelease=false
+          $createReleaseExitCode = $LASTEXITCODE
+          if ($createReleaseExitCode -ne 0 -or [string]::IsNullOrWhiteSpace(($releaseApiRaw | Out-String))) {
+            throw 'Could not create a fresh draft Windows release through the GitHub REST API.'
           }
+          $releaseApi = ($releaseApiRaw | Out-String) | ConvertFrom-Json
+          $releaseId = [string]$releaseApi.id
+          if ([string]::IsNullOrWhiteSpace($releaseId) -or
+              [string]$releaseApi.tag_name -ne $tag -or
+              -not [bool]$releaseApi.draft) {
+            throw "GitHub created a draft release with an unexpected tag or state. Expected tag: $tag; actual tag: $($releaseApi.tag_name)"
+          }
+          Write-Host "Fresh draft Windows release created with verified tag: $($releaseApi.tag_name) (ID $releaseId)"
 
           # Upload one file at a time without --clobber. After an upload error,
           # inspect the release: the server may have accepted the bytes before
