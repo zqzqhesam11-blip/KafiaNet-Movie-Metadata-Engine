@@ -1055,7 +1055,7 @@ def test_adb_result_text_and_phone_local_helper_launch():
             stdout = "package:/data/app/com.kafianet.shizukubridge/base.apk\n"
         elif len(command) >= 3 and command[-3] == "dumpsys":
             stdout = "Package [com.kafianet.shizukubridge]\n    versionCode=18\n"
-        elif len(command) >= 4 and command[-4:-2] == ["am", "start"]:
+        elif len(command) >= 5 and command[3:5] == ["am", "start"]:
             stdout = (
                 "Starting: Intent { act=android.intent.action.MAIN }\n"
                 "Status: ok\n"
