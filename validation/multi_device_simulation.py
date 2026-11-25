@@ -1914,15 +1914,7 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     root_engine = operation["engine"]
     assert root_engine is not adb_engine
     assert root_engine.calls == [
-        ("push", "SERIAL_A", "source-folder", "/sdcard/PUBG_Mobile/"),
-        (
-            "launch_phone_local_finalize",
-            "SERIAL_A",
-            "/sdcard/PUBG_Mobile/",
-            "com.tencent.ig",
-            "files/UE4Game/",
-            "PUBG Mobile",
-        ),
+        ("push", "SERIAL_A", "source-folder", "/sdcard/PUBG_Mobile/")
     ]
     assert operation["destination"] == "/sdcard/PUBG_Mobile/"
     assert operation["original_destination"] == destination
@@ -1931,6 +1923,14 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     assert operation["completed"] is False
 
     root_engine.finish(True, "root copy complete")
+    assert root_engine.calls[-1] == (
+        "launch_phone_local_finalize",
+        "SERIAL_A",
+        "/sdcard/PUBG_Mobile/",
+        "com.tencent.ig",
+        "files/UE4Game",
+        "PUBG Mobile",
+    )
     assert operation["completed"] is True
     assert operation["status"] == "اكتمل"
     assert len(controller.getTransferHistory()) == 1
