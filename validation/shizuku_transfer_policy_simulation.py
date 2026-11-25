@@ -240,9 +240,21 @@ direct_copy_source = (
     engine_source.split("def copy_via_shizuku_bridge", 1)[1]
     .split("@Slot(str)\n    def install", 1)[0]
 )
+transfer_loop_source = (
+    direct_copy_source.split(
+        "for index, (local_file, relative_path, file_size, modified_ms) in enumerate(files_to_send, start=1):",
+        1
+    )[1].split("final_status = request_json(", 1)[0]
+)
 check(
-    "Shizuku copy loop does not emit per-file UI statuses",
-    "self.statusChanged.emit(" not in direct_copy_source,
+    "Shizuku file loop uses progress signals instead of per-file status messages",
+    "self.statusChanged.emit(" not in transfer_loop_source
+    and "self.progressChanged.emit(" in transfer_loop_source,
+)
+check(
+    "Shizuku transfer still reports phone disconnects for reconnect handling",
+    "انقطع اتصال الهاتف أثناء Shizuku" in direct_copy_source
+    and "self.statusChanged.emit(" in direct_copy_source,
 )
 check(
     "fallback uses one fixed Shizuku comment",
