@@ -1034,6 +1034,71 @@ def test_transfer_history_is_not_truncated_after_500_entries():
     assert all(len(str(item.get("date") or "")) >= 10 for item in entries)
 
 
+def test_adb_result_text_and_phone_local_helper_launch():
+    assert ADBEngine._result_text(
+        SimpleNamespace(stdout="  helper output  \n", stderr="  warning text  \n")
+    ) == "helper output\nwarning text"
+    assert ADBEngine._result_text(
+        SimpleNamespace(stdout=None, stderr="  ")
+    ) == ""
+
+    engine = ADBEngine()
+    calls = []
+    completions = []
+
+    def fake_run(args, timeout=None):
+        command = list(args)
+        calls.append((command, timeout))
+        if command[-1:] == ["get-state"]:
+            stdout = "device\n"
+        elif command[-3:-1] == ["pm", "path"]:
+            stdout = "package:/data/app/com.kafianet.shizukubridge/base.apk\n"
+        elif len(command) >= 3 and command[-3] == "dumpsys":
+            stdout = "Package [com.kafianet.shizukubridge]\n    versionCode=18\n"
+        elif len(command) >= 4 and command[-4:-2] == ["am", "start"]:
+            stdout = (
+                "Starting: Intent { act=android.intent.action.MAIN }\n"
+                "Status: ok\n"
+                "Activity: com.kafianet.shizukubridge/.MainActivity\n"
+            )
+        else:
+            raise AssertionError("Unexpected ADB command: " + repr(command))
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    class ImmediateThread:
+        def __init__(self, *args, **kwargs):
+            self.target = kwargs["target"]
+
+        def start(self):
+            self.target()
+
+    engine._run = fake_run
+    engine.finished.connect(
+        lambda success, message: completions.append((success, str(message)))
+    )
+
+    original_thread = threading.Thread
+    try:
+        threading.Thread = ImmediateThread
+        engine.launch_phone_local_finalize(
+            "SERIAL_TEST",
+            "/sdcard/PUBG_Mobile/",
+            "com.tencent.ig",
+            "files/UE4Game",
+            "PUBG Mobile",
+        )
+    finally:
+        threading.Thread = original_thread
+
+    assert len(completions) == 1
+    assert completions[0][0] is True, completions[0][1]
+    assert "تم فتح مساعد KafiaNet" in completions[0][1]
+    launch = next(command for command, _timeout in calls if "start" in command)
+    assert "request_local_finalize" in launch
+    assert "com.tencent.ig" in launch
+    assert "/sdcard/PUBG_Mobile/" in launch
+
+
 def test_shizuku_preflight_transport_failure_preserves_destination_for_resume():
     destination = (
         "/storage/emulated/0/Android/data/com.tencent.ig/files/"
@@ -3229,6 +3294,7 @@ def run_once():
     test_pubg_flash_uses_fixed_source_and_exact_package_destination()
     test_uninstall_operation_is_logged_separately_from_copy()
     test_transfer_history_is_not_truncated_after_500_entries()
+    test_adb_result_text_and_phone_local_helper_launch()
     test_shizuku_preflight_transport_failure_preserves_destination_for_resume()
     test_direct_stream_rejects_source_size_changes()
     test_direct_stream_manifest_preserves_game_relative_paths()

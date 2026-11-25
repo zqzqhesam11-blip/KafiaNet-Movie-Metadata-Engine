@@ -129,6 +129,19 @@ class ADBEngine(QObject):
         self._current_http_connection = None
         self._shizuku_cleanup_state = {}
 
+    @staticmethod
+    def _result_text(result):
+        """Combine captured stdout/stderr from an ADB subprocess result."""
+        output = []
+        for stream_name in ("stdout", "stderr"):
+            value = getattr(result, stream_name, "")
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                output.append(text)
+        return "\n".join(output)
+
     def _get_adb_path(self):
         # Prefer the ADB binary bundled with this application. This keeps
         # packaged builds independent of a machine-specific D:\games path.
