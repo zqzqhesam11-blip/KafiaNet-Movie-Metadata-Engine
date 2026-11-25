@@ -3261,8 +3261,13 @@ exit 3
         if not self._bridge_transfer_active:
             self._cancel_event.clear()
         source_root = Path(source_path)
+        # Preserve the caller-supplied path until the Shizuku identity preflight
+        # returns a verified canonical path. Error/reconnect handling can run
+        # before that request succeeds, so the worker must always have a path.
+        requested_destination = str(destination or "")
 
         def worker():
+            destination = requested_destination
             self._bridge_transfer_active = True
             resume_handoff = False
             cleanup_done = False

@@ -9,6 +9,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
 import json
+import urllib.error
+import urllib.request
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -1030,6 +1032,68 @@ def test_transfer_history_is_not_truncated_after_500_entries():
     assert entries[0]["serial"] == "SERIAL_0519"
     assert entries[-1]["serial"] == "SERIAL_0000"
     assert all(len(str(item.get("date") or "")) >= 10 for item in entries)
+
+
+def test_shizuku_preflight_transport_failure_preserves_destination_for_resume():
+    destination = (
+        "/storage/emulated/0/Android/data/com.tencent.ig/files/"
+        "UE4Game/ShadowTrackerExtra/ShadowTrackerExtra/Saved/"
+    )
+    engine = ADBEngine()
+    engine._build_direct_stream_manifest = lambda _source: ([], 0)
+    engine._device_is_connected = lambda _device: False
+    engine._shizuku_cleanup_state["SERIAL_TEST"] = {
+        "resume_attempts": 0,
+        "local_port": 18765,
+    }
+    resumed = []
+    completed = []
+
+    def stop_after_resume_path_check(device, previous_port, session_token, resume_destination):
+        resumed.append((device, previous_port, session_token, resume_destination))
+        raise RuntimeError("test stop after verifying the original destination")
+
+    class ImmediateThread:
+        def __init__(self, *args, **kwargs):
+            self.target = kwargs["target"]
+
+        def start(self):
+            self.target()
+
+    def fail_preflight_connection(*_args, **_kwargs):
+        raise urllib.error.URLError("connection refused")
+
+    engine._resume_shizuku_bridge_after_reconnect = stop_after_resume_path_check
+    engine._cleanup_shizuku_bridge = lambda *_args: None
+    engine.finished.connect(
+        lambda success, message: completed.append((success, str(message)))
+    )
+
+    original_thread = threading.Thread
+    original_urlopen = urllib.request.urlopen
+    try:
+        threading.Thread = ImmediateThread
+        urllib.request.urlopen = fail_preflight_connection
+        engine.copy_via_shizuku_bridge(
+            "SERIAL_TEST",
+            "18765",
+            "test-session-token",
+            "test-job",
+            "unused-source",
+            destination,
+            "files/UE4Game/ShadowTrackerExtra",
+        )
+    finally:
+        threading.Thread = original_thread
+        urllib.request.urlopen = original_urlopen
+
+    assert resumed == [
+        ("SERIAL_TEST", 18765, "test-session-token", destination)
+    ]
+    assert len(completed) == 1
+    assert completed[0][0] is False
+    assert "cannot access local variable 'destination'" not in completed[0][1]
+    assert "test stop after verifying the original destination" in completed[0][1]
 
 
 def test_direct_stream_rejects_source_size_changes():
@@ -3165,6 +3229,7 @@ def run_once():
     test_pubg_flash_uses_fixed_source_and_exact_package_destination()
     test_uninstall_operation_is_logged_separately_from_copy()
     test_transfer_history_is_not_truncated_after_500_entries()
+    test_shizuku_preflight_transport_failure_preserves_destination_for_resume()
     test_direct_stream_rejects_source_size_changes()
     test_direct_stream_manifest_preserves_game_relative_paths()
     test_saved_copy_never_changes_permissions_or_writes_probe_files()
