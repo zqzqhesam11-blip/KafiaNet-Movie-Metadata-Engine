@@ -112,7 +112,7 @@ class EFootballSAFEngine(QObject):
             version_text = self._result_text(version)
             match = re.search(r"\bversionCode=(\d+)", version_text)
             installed_code = int(match.group(1)) if match else 0
-            if installed_code >= 1:
+            if installed_code >= 16:
                 return
 
         apk = BASE_DIR / "android_support" / HELPER_APK_NAME
