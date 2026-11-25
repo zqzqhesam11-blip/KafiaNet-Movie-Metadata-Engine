@@ -52,7 +52,6 @@ public final class PubgOfflineFinalizeService extends Service {
     static final String KEY_GAME = "game";
 
     private static final String TREE_PREFS = "kafianet_storage_permissions";
-    private static final String TREE_URI_KEY = "pubg_tree_uri";
     private static final int NOTIFICATION_ID = 73021;
     private static final String CHANNEL_ID = "kafianet_local_game_copy";
     private static final int BUFFER_SIZE = 1024 * 1024;
@@ -189,7 +188,8 @@ public final class PubgOfflineFinalizeService extends Service {
         if (targetPackage == null || !targetPackage.matches("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+")) {
             throw new SecurityException("معرّف حزمة اللعبة غير صالح.");
         }
-        String saved = getSharedPreferences(TREE_PREFS, MODE_PRIVATE).getString(TREE_URI_KEY, "");
+        String saved = getSharedPreferences(TREE_PREFS, MODE_PRIVATE)
+                .getString("tree_uri_" + targetPackage, "");
         if (saved == null || saved.isEmpty()) {
             throw new IllegalStateException("لم يتم حفظ إذن مجلد Android/data الخاص باللعبة.");
         }
