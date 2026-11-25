@@ -2883,10 +2883,10 @@ def test_paths_and_ui():
     assert "Source file was truncated during transfer" in adb_source
     assert "KafiaNetTransfer" not in adb_source
     helper_gradle = Path("android-helper/app/build.gradle").read_text(encoding="utf-8")
-    assert "versionCode 13" in helper_gradle
-    assert "versionName '1.6.7'" in helper_gradle
+    assert "versionCode 17" in helper_gradle
+    assert "versionName '1.7.1'" in helper_gradle
     assert "install_helper_if_outdated()" in engine_source
-    assert "installed_code >= 14" in engine_source
+    assert "installed_code >= 17" in engine_source
     assert ".version(13)" in helper_activity_java
     assert "Shizuku.addBinderDeadListener(binderDead);" in helper_activity_java
     assert "private volatile boolean bindingService" in helper_activity_java
