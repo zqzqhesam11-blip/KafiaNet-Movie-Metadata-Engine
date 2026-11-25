@@ -275,6 +275,12 @@ public final class MainActivity extends Activity {
             );
             return;
         }
+        Uri savedTree = getPersistedTreeForPackage(targetPackage);
+        if (savedTree != null) {
+            showMessage("صلاحية مجلد " + targetPackage + " محفوظة. يجري بدء النقل المحلي...");
+            startLocalFinalizeService(savedTree);
+            return;
+        }
         openLocalFinalizeTreePicker();
     }
 
@@ -404,6 +410,9 @@ public final class MainActivity extends Activity {
                 startService(service);
             }
             showMessage("بدأ النقل المحلي على الهاتف. انتظر ظهور النسبة قبل فصل كابل USB.");
+            Intent home = new Intent(this, HomeActivity.class);
+            home.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            startActivity(home);
             android.util.Log.i("KafiaNetBridge",
                     "Started phone-local SAF copy for " + targetPackage + " using " + selectedTree);
         } catch (Throwable failure) {
@@ -413,21 +422,30 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private boolean hasPersistedPubgTreePermission() {
-        String packageName = targetPackage == null ? "" : targetPackage;
-        if (packageName.isEmpty()) return false;
+    private Uri getPersistedTreeForPackage(String packageName) {
+        if (packageName == null || packageName.isEmpty()) return null;
         String stored = getSharedPreferences(TREE_PREFS, MODE_PRIVATE)
                 .getString(treeUriKey(packageName), "");
-        if (stored == null || stored.isEmpty()) return false;
+        if (stored == null || stored.isEmpty()) return null;
         Uri expectedUri = Uri.parse(stored);
+        String expectedId = "primary:Android/data/" + packageName;
+        if (!DocumentsContract.isTreeUri(expectedUri)
+                || !"com.android.externalstorage.documents".equals(expectedUri.getAuthority())
+                || !expectedId.equals(DocumentsContract.getTreeDocumentId(expectedUri))) {
+            return null;
+        }
         for (UriPermission permission : getContentResolver().getPersistedUriPermissions()) {
             if (expectedUri.equals(permission.getUri())
                     && permission.isReadPermission()
                     && permission.isWritePermission()) {
-                return true;
+                return expectedUri;
             }
         }
-        return false;
+        return null;
+    }
+
+    private boolean hasPersistedPubgTreePermission() {
+        return getPersistedTreeForPackage(targetPackage) != null;
     }
 
     private void readSession(Intent intent) {
