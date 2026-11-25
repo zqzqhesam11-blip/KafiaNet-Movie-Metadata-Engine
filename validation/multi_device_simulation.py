@@ -2896,7 +2896,13 @@ def test_paths_and_ui():
     assert "private volatile boolean bindingService" in helper_activity_java
     assert "private volatile boolean permissionRequestInFlight" in helper_activity_java
     helper_create = helper_activity_java[helper_activity_java.index("protected void onCreate("):helper_activity_java.index("protected void onNewIntent(")]
-    assert helper_create.index("addRequestPermissionResultListener") < helper_create.index("addBinderReceivedListenerSticky")
+    assert "requestLocalFinalizeTreeAccess();" in helper_create
+    assert "activateBridgeMode();" in helper_create
+    helper_bridge = helper_activity_java[
+        helper_activity_java.index("private void activateBridgeMode()"):
+        helper_activity_java.index("private void requestLocalFinalizeTreeAccess()")
+    ]
+    assert helper_bridge.index("addRequestPermissionResultListener") < helper_bridge.index("addBinderReceivedListenerSticky")
     assert "initializeShizuku();" not in helper_create
     assert "Os.chmod(folder.getAbsolutePath(), 0777)" not in transfer_user_java
     helper_manifest = Path("android-helper/app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
