@@ -2039,6 +2039,12 @@ class AppController(QObject):
             self._finished_for_device(serial, success, message)
             return
 
+        if phase == "root_helper_launch":
+            operation["phase"] = "final"
+            operation["local_finalize_pending"] = True
+            self._finished_for_device(serial, success, message)
+            return
+
         if phase == "adb_direct":
             if (
                 not success
@@ -2054,6 +2060,9 @@ class AppController(QObject):
                 # also reaches the destination writer and receives EACCES/EPERM.
                 self._begin_shizuku_fallback(serial, operation, message)
                 return
+            if success and operation.get("root_fallback_attempted", False):
+                self._launch_phone_local_finalize(serial, operation)
+                return
             if success and self._advance_copy_part(serial, operation):
                 return
             operation["phase"] = "final"
@@ -2062,14 +2071,11 @@ class AppController(QObject):
 
         if phase == "shizuku_prepare":
             if not success:
-                operation["phase"] = "final"
-                operation["raw_error"] = str(message or "")
-                self._finished_for_device(
-                    serial,
-                    False,
-                    "رفض ADB الكتابة إلى Android/data، وتعذر تجهيز Shizuku: "
-                    + str(message or "سبب غير معروف")
+                combined = (
+                    "ADB write denied: " + str(operation.get("shizuku_original_error") or "")
+                    + "\nShizuku setup failed: " + str(message or "سبب غير معروف")
                 )
+                self._request_android_data_root_fallback(serial, operation, combined)
                 return
             try:
                 bridge = json.loads(str(message or "{}"))
@@ -2078,15 +2084,15 @@ class AppController(QObject):
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 if engine is not None:
                     engine.cleanup_shizuku_bridge(serial)
-                operation["phase"] = "final"
-                self._finished_for_device(
-                    serial, False, "استجابة تطبيق Shizuku غير صالحة: " + str(exc)
+                self._request_android_data_root_fallback(
+                    serial, operation, "تعذر قراءة إعداد اتصال Shizuku: " + str(exc)
                 )
                 return
 
             if engine is None:
-                operation["phase"] = "final"
-                self._finished_for_device(serial, False, "محرك ADB غير متاح لاستكمال النقل.")
+                self._request_android_data_root_fallback(
+                    serial, operation, "محرك ADB غير متاح لاستكمال النقل عبر Shizuku."
+                )
                 return
             operation["phase"] = "shizuku_copy"
             operation["status"] = "جاري نسخ الملفات عبر شيزوكو"
@@ -2120,14 +2126,11 @@ class AppController(QObject):
                 and operation.get("kind") == "copy"
                 and not operation.get("cancelled", False)
                 and not operation.get("root_fallback_attempted", False)
-                and self._is_shizuku_destination_write_denial(
-                    operation.get("destination", ""), message
-                )
             ):
                 adb_error = str(operation.get("shizuku_original_error") or "")
                 combined = (
-                    "ADB write denied: " + adb_error
-                    + "\nShizuku destination write denied: " + str(message or "")
+                    "ADB copy failed: " + adb_error
+                    + "\nShizuku copy failed: " + str(message or "سبب غير معروف")
                 )
                 self._request_android_data_root_fallback(serial, operation, combined)
                 return
@@ -2139,6 +2142,81 @@ class AppController(QObject):
 
         operation["phase"] = "final"
         self._finished_for_device(serial, success, message)
+
+    def _launch_phone_local_finalize(self, serial, operation):
+        """After the root copy completes, ask the unified phone helper to finish into Android/data."""
+        package_name = str(operation.get("target_package") or "").strip()
+        original_destination = str(
+            operation.get("original_destination")
+            or operation.get("destination")
+            or ""
+        ).replace("\\", "/").rstrip("/")
+        normalized = original_destination
+        if normalized.lower().startswith("/sdcard/"):
+            normalized = "/storage/emulated/0/" + normalized[len("/sdcard/"):]
+        package_root = "/storage/emulated/0/Android/data/" + package_name
+        if (
+            not package_name
+            or not normalized.lower().startswith((package_root + "/").lower())
+        ):
+            operation["phase"] = "final"
+            self._finished_for_device(
+                serial,
+                True,
+                "اكتمل النسخ إلى مجلد الجذر وبقيت الملفات محفوظة. "
+                "لم يمكن تحديد مسار Android/data الأصلي بدقة لإكمال النقل المحلي."
+            )
+            return
+
+        target_relative = normalized[len(package_root):].lstrip("/")
+        if not target_relative:
+            operation["phase"] = "final"
+            self._finished_for_device(
+                serial, True,
+                "اكتمل النسخ إلى الجذر، لكن مسار مجلد اللعبة الداخلي غير محدد. بقيت النسخة محفوظة."
+            )
+            return
+
+        engine = operation.get("engine")
+        if engine is None or not hasattr(engine, "launch_phone_local_finalize"):
+            operation["phase"] = "final"
+            self._finished_for_device(
+                serial, True,
+                "اكتمل النسخ إلى الجذر. تعذر تشغيل طلب الإكمال المحلي من نسخة المحرك الحالية؛ "
+                "الملفات محفوظة ويمكن فتح مساعد KafiaNet يدوياً."
+            )
+            return
+
+        source_root = str(operation.get("destination") or "")
+        if not source_root:
+            operation["phase"] = "final"
+            self._finished_for_device(serial, True, "اكتمل النسخ إلى الجذر، لكن مسار نسخة الجذر غير متاح.")
+            return
+
+        operation["phase"] = "root_helper_launch"
+        operation["status"] = "تم النسخ إلى الجذر — بانتظار إذن المساعد"
+        operation["operation"] = "فتح مساعد الهاتف لنقل الملفات إلى المجلد المحمي"
+        operation["percent"] = 100
+        self._update_operation(
+            serial,
+            percent=100,
+            status=operation["status"],
+            operation_text=operation["operation"],
+            speed="--",
+            eta="--",
+            error=""
+        )
+        self.messageChanged.emit(
+            "اكتمل النسخ إلى الجذر. يجري فتح تطبيق KafiaNet Assistant على الهاتف "
+            "لطلب إذن مجلد " + package_name + ". بعد ظهور نسبة النقل داخل المساعد يمكنك فصل USB."
+        )
+        engine.launch_phone_local_finalize(
+            serial,
+            source_root,
+            package_name,
+            target_relative,
+            str(operation.get("game") or package_name)
+        )
 
     @Slot(str, result=bool)
     def copyToDeviceRoot(self, serial):
