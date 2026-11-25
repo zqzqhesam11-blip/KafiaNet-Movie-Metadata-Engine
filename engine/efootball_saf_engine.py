@@ -120,14 +120,43 @@ class EFootballSAFEngine(QObject):
             raise FileNotFoundError(
                 "ملف مساعد KafiaNet الموحد غير موجود داخل حزمة البرنامج: " + str(apk)
             )
-        self.statusChanged.emit("جاري تثبيت مساعد eFootball SAF على الهاتف...")
+        self.statusChanged.emit("جاري تجهيز مساعد KafiaNet الموحد على الهاتف...")
         installed_result = self._run_adb(
-            device, "install", "-r", str(apk), timeout=180
+            device, "install", "-r", str(apk), timeout=360
         )
         install_text = self._result_text(installed_result)
-        if installed_result.returncode != 0 or "success" not in install_text.lower():
+        lowered_install = install_text.lower()
+        signature_conflict = (
+            "install_failed_update_incompatible" in lowered_install
+            or "signature mismatch" in lowered_install
+            or "signatures do not match" in lowered_install
+        )
+        if (
+            (installed_result.returncode != 0 or "success" not in lowered_install)
+            and signature_conflict
+        ):
+            self.statusChanged.emit(
+                "توقيع مساعد KafiaNet القديم مختلف. سنعيد تثبيت المساعد الموحد فقط؛ "
+                "قد تحتاج إلى اختيار مساحة eFootball مرة أخرى."
+            )
+            uninstall = self._run_adb(
+                device, "uninstall", HELPER_PACKAGE, timeout=120
+            )
+            uninstall_text = self._result_text(uninstall)
+            if uninstall.returncode != 0 and "success" not in uninstall_text.lower():
+                raise RuntimeError(
+                    "تعذر إزالة نسخة المساعد الموحد ذات التوقيع القديم: "
+                    + (uninstall_text or "adb uninstall failed")
+                )
+            installed_result = self._run_adb(
+                device, "install", "-r", str(apk), timeout=360
+            )
+            install_text = self._result_text(installed_result)
+            lowered_install = install_text.lower()
+
+        if installed_result.returncode != 0 or "success" not in lowered_install:
             raise RuntimeError(
-                "تعذر تثبيت مساعد eFootball SAF: "
+                "تعذر تثبيت مساعد KafiaNet الموحد: "
                 + (install_text or "adb install failed")
             )
 
