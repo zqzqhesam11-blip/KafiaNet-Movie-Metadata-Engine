@@ -657,13 +657,62 @@ jobs:
             }
           }
 
-          gh release upload $tag @assets --clobber
-          if ($LASTEXITCODE -ne 0) { throw 'Could not upload the Windows release assets.' }
+          # Upload assets individually so a transient GitHub API 5xx only
+          # retries the affected file instead of restarting the whole batch.
+          # --clobber first removes an existing same-name asset; GitHub can
+          # briefly return HTTP 5xx for that delete, so retry with backoff.
+          $maxUploadAttempts = 5
+          foreach ($asset in $assets) {
+            $uploaded = $false
+            for ($attempt = 1; $attempt -le $maxUploadAttempts; $attempt++) {
+              Write-Host "Publishing $asset (attempt $attempt/$maxUploadAttempts)"
+              & gh release upload $tag $asset --clobber
+              $uploadExitCode = $LASTEXITCODE
+              if ($uploadExitCode -eq 0) {
+                $uploaded = $true
+                break
+              }
+
+              if ($attempt -lt $maxUploadAttempts) {
+                $delaySeconds = [Math]::Min(30, 5 * [Math]::Pow(2, $attempt - 1))
+                Write-Warning "GitHub release upload failed for $asset (exit $uploadExitCode). Retrying in $delaySeconds seconds."
+                Start-Sleep -Seconds $delaySeconds
+              }
+            }
+
+            if (-not $uploaded) {
+              throw "Could not upload Windows release asset after $maxUploadAttempts attempts: $asset"
+            }
+          }
 
           $publishedRaw = gh release view $tag --json tagName,name,url,assets
           if ($LASTEXITCODE -ne 0) { throw 'Could not verify the published Windows release.' }
           $published = $publishedRaw | ConvertFrom-Json
           $publishedNames = @($published.assets | ForEach-Object { $_.name })
+
+          # Verify every uploaded asset against the exact local bytes, not only
+          # its filename. GitHub exposes SHA-256 digests for release assets.
+          $releaseApiRaw = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect uploaded Windows release asset digests.' }
+          $releaseApi = $releaseApiRaw | ConvertFrom-Json
+          foreach ($asset in $assets) {
+            $assetName = [IO.Path]::GetFileName($asset)
+            $localDigest = 'sha256:' + (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+            $remoteAsset = @($releaseApi.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1)
+            if ($remoteAsset.Count -eq 0) {
+              throw "Windows release is missing uploaded asset: $assetName"
+            }
+            if ([int64]$remoteAsset[0].size -ne [int64](Get-Item -LiteralPath $asset).Length) {
+              throw "Windows release asset size mismatch: $assetName"
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$remoteAsset[0].digest)) {
+              throw "GitHub did not provide a SHA-256 digest for release asset: $assetName"
+            }
+            if ([string]$remoteAsset[0].digest -ne $localDigest) {
+              throw "Windows release asset SHA-256 mismatch: $assetName"
+            }
+            Write-Host "WINDOWS RELEASE ASSET VERIFIED: $assetName ($($remoteAsset[0].size) bytes)"
+          }
           foreach ($asset in @(
             'CN_PLAYHUB_Setup.exe',
             'SHA256SUMS.txt',
