@@ -10,8 +10,8 @@ android {
         applicationId 'com.kafianet.shizukubridge'
         minSdk 24
         targetSdk 29
-        versionCode 17
-        versionName '1.7.1'
+        versionCode 18
+        versionName '1.7.2'
     }
 
     buildFeatures {
