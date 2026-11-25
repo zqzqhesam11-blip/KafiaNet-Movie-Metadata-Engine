@@ -12,7 +12,6 @@ on:
       - 'requirements.txt'
       - 'engine/**'
       - 'android-helper/**'
-      - 'efootball-saf-helper/**'
       - 'qml/**'
       - 'assets/**'
       - 'ui/**'
