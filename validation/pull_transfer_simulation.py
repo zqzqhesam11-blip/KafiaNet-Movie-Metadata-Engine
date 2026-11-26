@@ -89,6 +89,7 @@ def test_pull_skips_existing_files_and_reports_progress():
         # Progress must advance while the file is being transferred, never
         # exceed 99 before successful completion, and only then report 100.
         assert progress, progress
+        assert progress[0] == 0, progress
         assert progress[-1] == 100, progress
         assert any(0 < value < 100 for value in progress[:-1]), progress
         assert progress == sorted(progress), progress
