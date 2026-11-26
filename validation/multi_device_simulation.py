@@ -65,6 +65,12 @@ class FakeOperationEngine(QObject):
         self.serial = serial
         self.calls.append(("push", serial, source, destination))
 
+    def pull(self, serial, remote_source, local_destination, comparison_root=""):
+        self.serial = serial
+        self.calls.append((
+            "pull", serial, remote_source, local_destination, comparison_root
+        ))
+
     def install_if_missing(self, serial, apk, package_id):
         self.serial = serial
         self.calls.append(("install_if_missing", serial, apk, package_id))
@@ -744,6 +750,44 @@ def test_amount_install_uses_all_games_when_source_is_smaller_than_tier():
         assert operation["game_count"] == 4
         assert len(operation["selected_games"]) == 4
 
+
+
+def test_pubg_phone_pull_uses_read_only_original_folder_for_comparison():
+    controller = make_controller()
+    with TemporaryDirectory(prefix="kafianet_pubg_pull_route_") as directory:
+        root = Path(directory)
+        server_root = root / "server-games"
+        (server_root / "PUBG" / "Saved").mkdir(parents=True)
+        local_root = root / "D_games"
+        original_saved = local_root / "ببجي (PUBG)" / "Saved"
+        original_saved.mkdir(parents=True)
+        controller.source_root = server_root
+        controller.destination_root = local_root
+        controller.selected_devices = ["SERIAL_A"]
+
+        assert controller.pullGame("PUBG Mobile") is True
+        engine = engine_for("SERIAL_A")
+        expected_restore = local_root / "من الهاتف" / "PUBG" / "Saved"
+        assert engine.calls == [(
+            "pull",
+            "SERIAL_A",
+            app_qml.ADB_GAME_DESTINATIONS["PUBG Mobile"],
+            str(expected_restore),
+            str(original_saved),
+        )]
+        operation = controller._active_operations["SERIAL_A"]
+        assert operation["kind"] == "pull"
+        assert operation["comparison_destination"] == str(original_saved)
+
+        # A missing comparison folder must block the pull instead of treating
+        # every original PUBG file as missing.
+        blocked = make_controller()
+        blocked.source_root = server_root
+        blocked.destination_root = root / "D_games_missing"
+        blocked.selected_devices = ["SERIAL_A"]
+        before = len(FakeOperationEngine.instances)
+        assert blocked.pullGame("PUBG Mobile") is False
+        assert len(FakeOperationEngine.instances) == before
 
 
 def test_android_copy_starts_without_preinstalling_companion_apps():
@@ -3338,6 +3382,7 @@ def run_once():
     test_amount_install_uses_all_games_when_source_is_smaller_than_tier()
     test_installation_does_not_increment_copy_counters()
     test_pubg_source_size_selects_sibling_folder()
+    test_pubg_phone_pull_uses_read_only_original_folder_for_comparison()
     test_android_copy_starts_without_preinstalling_companion_apps()
     test_shizuku_startup_supports_running_and_both_versions()
     test_pubg_flash_uses_fixed_source_and_exact_package_destination()
