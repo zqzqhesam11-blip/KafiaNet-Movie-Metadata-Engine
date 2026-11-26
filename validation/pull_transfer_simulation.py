@@ -51,8 +51,8 @@ def test_pull_skips_existing_files_and_reports_progress():
                 return 0, manifest
 
             assert args[0] == "pull", args
-            assert args[1] == f"{remote_root}/new-from-phone.bin", f"Unexpected remote file: {args[1]!r}"
-            temporary_file = Path(args[2])
+            assert args[2] == f"{remote_root}/new-from-phone.bin", f"Unexpected remote file: {args[2]!r}"
+            temporary_file = Path(args[3])
             payload = b"phone!"
             with temporary_file.open("wb") as output:
                 for end in (2, 4, 6):
