@@ -1885,14 +1885,14 @@ class ADBEngine(QObject):
         seen = set()
 
         for raw_line in str(output or "").splitlines():
-            line = raw_line.strip().rstrip("\\r")
+            line = raw_line.strip()
             if not line:
                 continue
             size_text, separator, remote_file = line.partition("|")
             if not separator or not size_text.strip().isdigit():
                 raise RuntimeError(
                     "تعذر قراءة قائمة ملفات الهاتف وأحجامها؛ "
-                    "أوقفنا الاسترجاع حتى لا نتخطى ملفات بالخطأ.\\n"
+                    "أوقفنا الاسترجاع حتى لا نتخطى ملفات بالخطأ.\n"
                     + line[:300]
                 )
 
@@ -1978,11 +1978,11 @@ class ADBEngine(QObject):
                 return False
 
             try:
-                with os.fdopen(descriptor, "wb") as target, open(
-                    temporary_file, "rb"
-                ) as source:
+                with os.fdopen(descriptor, "wb") as target:
                     descriptor = None
-                    shutil.copyfileobj(source, target, length=8 * 1024 * 1024)
+                    with open(temporary_file, "rb") as source:
+                        shutil.copyfileobj(source, target, length=8 * 1024 * 1024)
+                shutil.copystat(temporary_file, destination_file)
                 return True
             except Exception:
                 try:
@@ -2038,7 +2038,7 @@ class ADBEngine(QObject):
                 details = str(list_output or "").strip()
                 raise RuntimeError(
                     "تعذر فحص ملفات مجلد الهاتف عبر ADB؛ لم يتم نقل أي ملف."
-                    + (("\\n" + details[-1200:]) if details else "")
+                    + (("\n" + details[-1200:]) if details else "")
                 )
 
             entries = self._parse_pull_manifest(list_output, remote_root)
@@ -2221,7 +2221,7 @@ class ADBEngine(QObject):
                     details = str(pull_output or "").strip()
                     raise RuntimeError(
                         "فشل سحب الملف من الهاتف: " + relative.as_posix()
-                        + (("\\n" + details[-1000:]) if details else "")
+                        + (("\n" + details[-1000:]) if details else "")
                     )
                 if not temporary_file.is_file():
                     raise RuntimeError(
