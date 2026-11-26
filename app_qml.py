@@ -3583,7 +3583,7 @@ class AppController(QObject):
             self._reject_operation(
                 "لم يتم العثور على مجلد PUBG الأصلي للمقارنة: "
                 + str(expected_comparison)
-                + "\\nلم يبدأ النقل حتى لا يعيد نسخ ملفات اللعبة الموجودة."
+                + "\nلم يبدأ النقل حتى لا يعيد نسخ ملفات اللعبة الموجودة."
             )
             return False
         started = 0
