@@ -224,7 +224,8 @@ def test_pull_watchdog_uses_local_file_progress_when_adb_output_is_quiet():
         )
     assert code == 0, code
     assert output == ""
-    assert markers["value"] == 4 * 1024 * 1024
+    # Four in-process polls plus the final progress flush after ADB exits.
+    assert markers["value"] == 5 * 1024 * 1024, markers
 
 
 def test_pull_watchdog_stops_only_after_real_inactivity():
