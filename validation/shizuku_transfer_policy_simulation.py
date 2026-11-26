@@ -89,6 +89,22 @@ check(
     ),
 )
 check(
+    "IncompleteRead is transport loss, not Android/data permission denial",
+    not AppController._is_android_data_permission_denial(
+        saved,
+        "adb: error: failed to copy 'x' to 'y': "
+        "IncompleteRead(0 bytes read, 142 more expected)",
+    ),
+)
+check(
+    "IncompleteRead is not overridden by an earlier generic wrapper label",
+    not AppController._is_android_data_permission_denial(
+        saved,
+        "KAFIANET_ANDROID_DATA_PERMISSION_DENIED: remote open failed: Permission denied; "
+        "IncompleteRead(0 bytes read, 142 more expected)",
+    ),
+)
+check(
     "permission denial outside Android/data does not request the root dialog",
     not AppController._is_android_data_permission_denial(
         "/storage/emulated/0/Download/Saved", "remote open failed: Permission denied"
@@ -443,6 +459,15 @@ check(
         .split('if phase == "shizuku_prepare":', 1)[0]
     ),
 )
+shizuku_prepare_source = (
+    app_source.split('if phase == "shizuku_prepare":', 1)[1]
+    .split('if phase == "shizuku_copy":', 1)[0]
+)
+check(
+    "Shizuku setup failures do not open root fallback before a destination write",
+    "_request_android_data_root_fallback" not in shizuku_prepare_source
+    and "لم يتم تأكيد رفض الكتابة" in shizuku_prepare_source,
+)
 check(
     "root fallback after Shizuku requires the explicit protected-destination writer denial marker",
     "def _is_shizuku_destination_write_denial(" in app_source
@@ -513,6 +538,19 @@ check(
     "error.errno != OsConstants.EACCES" in helper_service
     and "error.errno != OsConstants.EPERM" in helper_service
     and "Let the actual writer report a precise EACCES/EPERM" in helper_service,
+)
+adb_disconnect_source = (
+    engine_source.split("# A disconnected handset often makes adb push exit", 1)[1]
+    .split("device_connected = self._device_is_connected(device)", 1)[0]
+)
+shizuku_transport_source = (
+    direct_copy_source.split("transport_markers = (", 1)[1]
+    .split(")", 1)[0]
+)
+check(
+    "ADB and Shizuku classify IncompleteRead as a transport interruption",
+    '"incompleteread"' in adb_disconnect_source
+    and '"incompleteread"' in shizuku_transport_source,
 )
 check(
     "Shizuku transport loss waits for the same device and restarts from a fresh size+mtime sync pass",

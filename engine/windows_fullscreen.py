@@ -589,6 +589,15 @@ class WindowsFullscreenProtection:
             )
             return False
 
+        try:
+            actual_style = int(self._get_window_long_ptr(hwnd, self.GWL_EXSTYLE))
+        except Exception as exc:
+            self.last_error = "Could not verify the CN PlayHub topmost window: " + str(exc)
+            return False
+        if not (actual_style & self.WS_EX_TOPMOST):
+            self.last_error = "Windows did not retain the CN PlayHub topmost window flag."
+            return False
+
         if not self._application_is_foreground():
             self._user32.ShowWindow(hwnd, self.SW_SHOW)
             self._user32.BringWindowToTop(hwnd)
@@ -644,14 +653,22 @@ class WindowsFullscreenProtection:
             return False
 
         handles = self._taskbar_handles()
+        all_hidden = True
         for handle in handles:
             hwnd = wintypes.HWND(handle)
+            if not self._user32.IsWindow(hwnd):
+                all_hidden = False
+                continue
             if handle not in self._taskbar_visibility:
                 self._taskbar_visibility[handle] = bool(
                     self._user32.IsWindowVisible(hwnd)
                 )
             self._user32.ShowWindow(hwnd, self.SW_HIDE)
-        return bool(handles)
+            if self._user32.IsWindowVisible(hwnd):
+                all_hidden = False
+        if handles and not all_hidden:
+            self.last_error = "Windows did not keep every taskbar window hidden."
+        return bool(handles) and all_hidden
 
     def _restore_taskbars(self):
         if self._user32 is None:

@@ -99,12 +99,10 @@ failure_handling = (
 )
 lock_transition = lock_body.find("fullscreenLocked = true")
 check(
-    "fullscreen lock still activates when native Windows protection is unavailable",
+    "fullscreen refuses a protected lock when native Windows protection is unavailable",
     guard_setup >= 0
-    and guard_state > guard_setup
-    and guard_failure > guard_state
-    and failure_end > guard_failure
-    and "return" not in failure_handling
+    and guard_failure > guard_setup
+    and "return" in failure_handling
     and lock_transition > failure_end,
 )
 protection_source = (repo_root / "engine" / "windows_fullscreen.py").read_text(
@@ -121,7 +119,21 @@ check(
     "fullscreen guard pins the native window above desktop windows",
     "def enforce_locked_desktop(self)" in protection_source
     and "HWND_TOPMOST" in protection_source
-    and "SetWindowPos" in protection_source,
+    and "SetWindowPos" in protection_source
+    and "actual_style & self.WS_EX_TOPMOST" in protection_source,
+)
+check(
+    "fullscreen guard confirms taskbars are hidden after each reapply",
+    "self._user32.ShowWindow(hwnd, self.SW_HIDE)" in protection_source
+    and "self._user32.IsWindowVisible(hwnd)" in protection_source
+    and "return bool(handles) and all_hidden" in protection_source,
+)
+check(
+    "Start, context-menu, Ctrl+Esc and Alt+Tab escape keys are blocked",
+    "BLOCKED_KEYS = {VK_LWIN, VK_RWIN, VK_APPS}" in protection_source
+    and "if key in self.BLOCKED_KEYS:" in protection_source
+    and "key == self.VK_ESCAPE and (control_down or alt_down)" in protection_source
+    and "key == self.VK_TAB and alt_down" in protection_source,
 )
 app_source = (repo_root / "app_qml.py").read_text(encoding="utf-8")
 check(

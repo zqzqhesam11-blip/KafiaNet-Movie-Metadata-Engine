@@ -2127,10 +2127,12 @@ class AppController(QObject):
         if phase == "shizuku_prepare":
             if not success:
                 combined = (
-                    "ADB write denied: " + str(operation.get("shizuku_original_error") or "")
-                    + "\nShizuku setup failed: " + str(message or "سبب غير معروف")
+                    "تعذر تجهيز Shizuku قبل بدء إرسال الملفات؛ لم يتم تأكيد رفض الكتابة "
+                    "إلى Android/data، لذلك لم يُفتح النسخ إلى الجذر.\n"
+                    + "خطأ تجهيز Shizuku: " + str(message or "سبب غير معروف")
                 )
-                self._request_android_data_root_fallback(serial, operation, combined)
+                operation["phase"] = "final"
+                self._finished_for_device(serial, False, combined)
                 return
             try:
                 bridge = json.loads(str(message or "{}"))
@@ -2139,14 +2141,21 @@ class AppController(QObject):
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 if engine is not None:
                     engine.cleanup_shizuku_bridge(serial)
-                self._request_android_data_root_fallback(
-                    serial, operation, "تعذر قراءة إعداد اتصال Shizuku: " + str(exc)
+                operation["phase"] = "final"
+                self._finished_for_device(
+                    serial,
+                    False,
+                    "تعذر قراءة بيانات جلسة Shizuku قبل بدء النقل؛ لم يتم فتح النسخ إلى الجذر. "
+                    + str(exc),
                 )
                 return
 
             if engine is None:
-                self._request_android_data_root_fallback(
-                    serial, operation, "محرك ADB غير متاح لاستكمال النقل عبر Shizuku."
+                operation["phase"] = "final"
+                self._finished_for_device(
+                    serial,
+                    False,
+                    "محرك النقل غير متاح لاستكمال Shizuku؛ لم يتم فتح النسخ إلى الجذر.",
                 )
                 return
             operation["phase"] = "shizuku_copy"
@@ -2584,6 +2593,22 @@ class AppController(QObject):
             return False
 
         lowered = str(raw_message or "").lower()
+        # An incomplete transport response is not proof that Android denied a write.
+        # Retry the interrupted ADB file before considering the Shizuku fallback.
+        transport_failure_markers = (
+            "incompleteread",
+            "incomplete read",
+            "unexpected eof",
+            "unexpected end of stream",
+            "connection reset",
+            "connection aborted",
+            "broken pipe",
+            "device offline",
+            "device disconnected",
+        )
+        if any(marker in lowered for marker in transport_failure_markers):
+            return False
+
         # ADB may print either "secure_mkdirs failed" or "secure_mkdirs() failed".
         # Normalize the empty call suffix so both forms activate the Shizuku fallback.
         lowered = lowered.replace("secure_mkdirs()", "secure_mkdirs")

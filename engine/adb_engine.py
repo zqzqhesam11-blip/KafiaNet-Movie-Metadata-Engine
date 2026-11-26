@@ -1655,6 +1655,11 @@ class ADBEngine(QObject):
                 "device disconnected",
                 "transport error",
                 "connection reset",
+                "connection aborted",
+                "incompleteread",
+                "incomplete read",
+                "unexpected eof",
+                "unexpected end of stream",
                 "error: closed",
             )
             looks_disconnected = any(
@@ -3971,6 +3976,10 @@ exit 3
                     "connection reset",
                     "connection aborted",
                     "connection refused",
+                    "incompleteread",
+                    "incomplete read",
+                    "unexpected eof",
+                    "unexpected end of stream",
                     "broken pipe",
                     "remote end closed",
                     "forcibly closed",
