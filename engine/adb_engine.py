@@ -2266,7 +2266,8 @@ class ADBEngine(QObject):
         except Exception as exc:
             self.finished.emit(
                 False,
-                f"تعذر استرجاع ملفات الهاتف: {exc}"
+                "تعذر استرجاع ملفات الهاتف: "
+                + f"{type(exc).__name__}: {exc!r}"
             )
         finally:
             for temporary_file in temporary_files:
