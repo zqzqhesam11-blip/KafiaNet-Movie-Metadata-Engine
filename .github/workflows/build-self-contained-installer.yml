@@ -166,6 +166,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Transfer mode / USB no-overwrite simulation failed.' }
           python validation\pull_path_mapping_simulation.py
           if ($LASTEXITCODE -ne 0) { throw 'Phone-to-PC path mapping simulation failed.' }
+          python validation\pull_transfer_simulation.py
+          if ($LASTEXITCODE -ne 0) { throw 'Phone-to-PC skip-existing / live progress simulation failed.' }
           python validation\shizuku_transfer_policy_simulation.py
           if ($LASTEXITCODE -ne 0) { throw 'Shizuku transfer policy simulation failed.' }
           python validation\dashboard_artwork_simulation.py
