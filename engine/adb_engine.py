@@ -2088,8 +2088,6 @@ class ADBEngine(QObject):
                     skip_reason = "موجود مسبقًا في مجلد من الهاتف"
 
                 if skip_reason:
-                    completed_bytes += item["size"]
-                    completed_files += 1
                     self.pull_stats["skipped_files"] += 1
                     self.logChanged.emit(
                         "تم تخطي " + relative.as_posix() + " — " + skip_reason
@@ -2101,6 +2099,8 @@ class ADBEngine(QObject):
                     })
 
             required_bytes = sum(item["size"] for item in planned)
+            copy_total_bytes = required_bytes
+            copy_total_files = len(planned)
             available_bytes = shutil.disk_usage(destination).free
             if required_bytes > available_bytes:
                 raise OSError(
@@ -2118,13 +2118,17 @@ class ADBEngine(QObject):
                 nonlocal last_percent
                 current_file_bytes = max(0, int(current_file_bytes or 0))
                 done_bytes = min(
-                    total_bytes,
+                    copy_total_bytes,
                     completed_bytes + current_file_bytes,
                 )
-                if total_bytes > 0:
-                    percent = min(int(done_bytes * 100 / total_bytes), 99)
+                if copy_total_bytes > 0:
+                    percent = min(int(done_bytes * 100 / copy_total_bytes), 99)
+                elif copy_total_files > 0:
+                    percent = min(
+                        int(completed_files * 100 / copy_total_files), 99
+                    )
                 else:
-                    percent = min(int(completed_files * 100 / total_files), 99)
+                    percent = 0
                 if done_bytes > 0 and percent == 0:
                     percent = 1
                 percent = max(last_percent, percent)
@@ -2132,7 +2136,7 @@ class ADBEngine(QObject):
 
                 elapsed = max(time.monotonic() - started_at, 0.001)
                 speed = (transferred_bytes + current_file_bytes) / elapsed
-                remaining = max(total_bytes - done_bytes, 0)
+                remaining = max(copy_total_bytes - done_bytes, 0)
                 eta = remaining / speed if speed > 0 else 0
                 self.progressChanged.emit(
                     percent,
