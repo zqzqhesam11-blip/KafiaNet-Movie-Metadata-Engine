@@ -2004,17 +2004,17 @@ class ADBEngine(QObject):
         temporary_files = []
         try:
             destination = Path(local_destination)
-            destination.mkdir(parents=True, exist_ok=True)
-            if not destination.is_dir():
-                raise NotADirectoryError(
-                    "وجهة استرجاع الهاتف ليست مجلدًا: " + str(destination)
-                )
-
             comparison = Path(comparison_root) if comparison_root else None
             if comparison is not None and not comparison.is_dir():
                 raise FileNotFoundError(
                     "مجلد المقارنة غير موجود؛ لم يبدأ النقل حتى لا يعاد نسخ "
                     "مكتبة PUBG كاملة بالخطأ: " + str(comparison)
+                )
+
+            destination.mkdir(parents=True, exist_ok=True)
+            if not destination.is_dir():
+                raise NotADirectoryError(
+                    "وجهة استرجاع الهاتف ليست مجلدًا: " + str(destination)
                 )
 
             remote_root = str(remote_source).rstrip("/")
@@ -2131,7 +2131,7 @@ class ADBEngine(QObject):
                 last_percent = percent
 
                 elapsed = max(time.monotonic() - started_at, 0.001)
-                speed = transferred_bytes / elapsed
+                speed = (transferred_bytes + current_file_bytes) / elapsed
                 remaining = max(total_bytes - done_bytes, 0)
                 eta = remaining / speed if speed > 0 else 0
                 self.progressChanged.emit(
