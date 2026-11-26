@@ -6,11 +6,13 @@ import time
 import ctypes
 import json
 import secrets
+import shutil
+import tempfile
 import urllib.request
 import urllib.error
 import http.client
 from urllib.parse import quote
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -1778,9 +1780,9 @@ class ADBEngine(QObject):
 
         self._thread.start()
 
-    @Slot(str, str, str)
-    def pull(self, device, remote_source, local_destination):
-        """Pull a game data directory from Android to the PC using ADB only."""
+    @Slot(str, str, str, str)
+    def pull(self, device, remote_source, local_destination, comparison_root=""):
+        """Pull only missing Android files, with byte-based progress reporting."""
         if self._thread and self._thread.is_alive():
             return
 
@@ -1788,106 +1790,488 @@ class ADBEngine(QObject):
         self._process_paused = False
         self._cancel_event.clear()
         self._cancelled_by_user = False
+        self.pull_stats = {
+            "copied_files": 0,
+            "skipped_files": 0,
+            "total_files": 0,
+            "total_bytes": 0,
+        }
         self._thread = threading.Thread(
             target=self._pull_thread,
-            args=(device, remote_source, local_destination),
+            args=(device, remote_source, local_destination, comparison_root),
             name=f"KafiaNet-ADB-Pull-{device}",
             daemon=True
         )
         self._thread.start()
 
-    def _pull_thread(self, device, remote_source, local_destination):
+    def _run_pull_process(
+        self,
+        device,
+        args,
+        timeout=6 * 60 * 60,
+        progress_callback=None,
+    ):
+        """Run one ADB pull/list command without blocking progress or cancellation."""
+        command = [self.adb, "-s", str(device), *[str(item) for item in args]]
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
         process = None
-        output_tail = []
-        progress = 0
-        try:
-            destination = Path(local_destination)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            command = [
-                self.adb, "-s", str(device), "pull", "-a",
-                str(remote_source), str(destination)
-            ]
-            self.statusChanged.emit("جاري نسخ ملفات الهاتف إلى الكمبيوتر...")
-            startupinfo = None
-            if os.name == "nt":
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
+        with tempfile.TemporaryFile(mode="w+b") as output_file:
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=output_file,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    startupinfo=startupinfo,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                with self._process_lock:
+                    self._current_process = process
 
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                startupinfo=startupinfo,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            )
-            with self._process_lock:
-                self._current_process = process
-
-            started_at = time.monotonic()
-            while True:
-                if self._cancel_event.is_set():
-                    if process.poll() is None:
+                started_at = time.monotonic()
+                while process.poll() is None:
+                    if self._cancel_event.is_set():
                         process.terminate()
-                    break
+                        break
 
-                self._pause_event.wait()
-                if self._cancel_event.is_set():
-                    if process.poll() is None:
+                    if not self._pause_event.wait(timeout=0.15):
+                        continue
+
+                    if progress_callback is not None:
+                        progress_callback()
+
+                    if time.monotonic() - started_at > timeout:
                         process.terminate()
-                    break
-
-                line = process.stdout.readline() if process.stdout else ""
-                if line:
-                    cleaned = line.strip()
-                    if cleaned:
-                        output_tail.append(cleaned)
-                        del output_tail[:-12]
-                        self.logChanged.emit(cleaned)
-                        self.statusChanged.emit(cleaned[:240])
-                        match = re.search(r"(\d{1,3})\s*%", cleaned)
-                        if match:
-                            progress = max(progress, min(99, int(match.group(1))))
-                            self.progressChanged.emit(progress, "--", "--")
-                elif process.poll() is not None:
-                    break
-                elif time.monotonic() - started_at > 6 * 60 * 60:
-                    process.terminate()
-                    raise TimeoutError("تجاوز نسخ الملفات من الهاتف الحد الزمني المسموح.")
-                else:
+                        try:
+                            process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=10)
+                        raise TimeoutError(
+                            "تجاوز أمر ADB الحد الزمني المسموح أثناء استرجاع الملفات."
+                        )
                     time.sleep(0.05)
 
-            return_code = process.wait(timeout=30)
+                try:
+                    return_code = process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    return_code = process.wait(timeout=10)
+
+                if progress_callback is not None and not self._cancel_event.is_set():
+                    progress_callback()
+
+                output_file.seek(0)
+                output = output_file.read().decode("utf-8", errors="replace")
+                return return_code, output
+            finally:
+                with self._process_lock:
+                    if self._current_process is process:
+                        self._current_process = None
+                self._process_paused = False
+
+    @classmethod
+    def _parse_pull_manifest(cls, output, remote_source):
+        """Parse a stat-sized, path-qualified manifest returned by Android find."""
+        remote_root = PurePosixPath(
+            cls._normalize_android_remote_path(remote_source)
+        )
+        entries = []
+        seen = set()
+
+        for raw_line in str(output or "").splitlines():
+            line = raw_line.strip().rstrip("\\r")
+            if not line:
+                continue
+            size_text, separator, remote_file = line.partition("|")
+            if not separator or not size_text.strip().isdigit():
+                raise RuntimeError(
+                    "تعذر قراءة قائمة ملفات الهاتف وأحجامها؛ "
+                    "أوقفنا الاسترجاع حتى لا نتخطى ملفات بالخطأ.\\n"
+                    + line[:300]
+                )
+
+            normalized_file = PurePosixPath(
+                cls._normalize_android_remote_path(remote_file.strip())
+            )
+            try:
+                relative = normalized_file.relative_to(remote_root)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "أعاد الهاتف مسار ملف خارج مجلد اللعبة المحدد: "
+                    + remote_file.strip()
+                ) from exc
+
+            if (
+                not relative.parts
+                or relative.is_absolute()
+                or any(part in ("", ".", "..") for part in relative.parts)
+            ):
+                raise RuntimeError(
+                    "مسار ملف غير آمن داخل قائمة الاسترجاع: "
+                    + remote_file.strip()
+                )
+
+            key = relative.as_posix().casefold()
+            if key in seen:
+                raise RuntimeError(
+                    "قائمة الهاتف تحتوي على مسار ملف مكرر: "
+                    + relative.as_posix()
+                )
+            seen.add(key)
+            entries.append({
+                "remote": remote_file.strip(),
+                "relative": relative,
+                "size": int(size_text.strip()),
+            })
+
+        entries.sort(key=lambda item: item["relative"].as_posix().casefold())
+        return entries
+
+    @staticmethod
+    def _safe_pull_local_path(root, relative):
+        """Resolve a relative Android file beneath a local root without path escape."""
+        root = Path(root)
+        candidate = root.joinpath(*relative.parts)
+        root_resolved = root.resolve()
+        parent_resolved = candidate.parent.resolve()
+        try:
+            parent_resolved.relative_to(root_resolved)
+        except ValueError as exc:
+            raise RuntimeError(
+                "رفض مسار استرجاع يؤدي إلى خارج مجلد الوجهة: "
+                + relative.as_posix()
+            ) from exc
+        return candidate
+
+    @staticmethod
+    def _publish_pull_temp_file(temporary_file, destination_file):
+        """Publish a completed pull without ever replacing an existing local file."""
+        try:
+            os.link(str(temporary_file), str(destination_file))
+            return True
+        except FileExistsError:
+            return False
+        except OSError:
+            # NTFS supports same-volume atomic rename with no replace semantics.
+            if os.name == "nt":
+                try:
+                    os.rename(str(temporary_file), str(destination_file))
+                    return True
+                except FileExistsError:
+                    return False
+
+            # Portable exclusive-create fallback for filesystems without hard links.
+            descriptor = None
+            try:
+                descriptor = os.open(
+                    str(destination_file),
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o666,
+                )
+            except FileExistsError:
+                return False
+
+            try:
+                with os.fdopen(descriptor, "wb") as target, open(
+                    temporary_file, "rb"
+                ) as source:
+                    descriptor = None
+                    shutil.copyfileobj(source, target, length=8 * 1024 * 1024)
+                return True
+            except Exception:
+                try:
+                    destination_file.unlink()
+                except OSError:
+                    pass
+                raise
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+
+    def _pull_thread(
+        self,
+        device,
+        remote_source,
+        local_destination,
+        comparison_root="",
+    ):
+        temporary_files = []
+        try:
+            destination = Path(local_destination)
+            destination.mkdir(parents=True, exist_ok=True)
+            if not destination.is_dir():
+                raise NotADirectoryError(
+                    "وجهة استرجاع الهاتف ليست مجلدًا: " + str(destination)
+                )
+
+            comparison = Path(comparison_root) if comparison_root else None
+            if comparison is not None and not comparison.is_dir():
+                raise FileNotFoundError(
+                    "مجلد المقارنة غير موجود؛ لم يبدأ النقل حتى لا يعاد نسخ "
+                    "مكتبة PUBG كاملة بالخطأ: " + str(comparison)
+                )
+
+            remote_root = str(remote_source).rstrip("/")
+            if not remote_root:
+                raise ValueError("مسار مجلد اللعبة على الهاتف فارغ.")
+
+            self.statusChanged.emit("يفحص ملفات الهاتف ويقارنها بملفات الكمبيوتر...")
+            find_command = (
+                "find " + self._shell_quote(remote_root)
+                + " -type f -exec stat -c '%s|%n' '{}' \\;"
+            )
+            list_code, list_output = self._run_pull_process(
+                device,
+                ["shell", find_command],
+                timeout=300,
+            )
             if self._cancel_event.is_set():
-                self.finished.emit(False, "تم إلغاء نسخ الملفات من الهاتف.")
-            elif return_code == 0:
-                self.progressChanged.emit(100, "--", "00:00")
+                self.finished.emit(False, "تم إلغاء فحص ملفات الهاتف.")
+                return
+            if list_code != 0:
+                details = str(list_output or "").strip()
+                raise RuntimeError(
+                    "تعذر فحص ملفات مجلد الهاتف عبر ADB؛ لم يتم نقل أي ملف."
+                    + (("\\n" + details[-1200:]) if details else "")
+                )
+
+            entries = self._parse_pull_manifest(list_output, remote_root)
+            total_files = len(entries)
+            total_bytes = sum(item["size"] for item in entries)
+            self.pull_stats = {
+                "copied_files": 0,
+                "skipped_files": 0,
+                "total_files": total_files,
+                "total_bytes": total_bytes,
+            }
+
+            if not entries:
+                self.progressChanged.emit(100, "0 B/s", "00:00")
+                self.statusChanged.emit("مجلد الهاتف فارغ؛ لا توجد ملفات للاسترجاع.")
                 self.finished.emit(
                     True,
-                    "اكتمل نسخ ملفات الهاتف إلى الكمبيوتر: " + str(destination)
+                    "اكتمل الفحص: مجلد الهاتف فارغ، ولم يتم تغيير أي ملف."
                 )
-            else:
-                details = "\n".join(output_tail[-8:])
-                self.finished.emit(
-                    False,
-                    details or f"فشل ADB pull برمز خروج {return_code}."
+                return
+
+            planned = []
+            completed_bytes = 0
+            completed_files = 0
+            for item in entries:
+                relative = item["relative"]
+                destination_file = self._safe_pull_local_path(destination, relative)
+                comparison_file = (
+                    self._safe_pull_local_path(comparison, relative)
+                    if comparison is not None else None
                 )
+
+                skip_reason = ""
+                if comparison_file is not None and comparison_file.exists():
+                    if not comparison_file.is_file():
+                        raise RuntimeError(
+                            "مسار المقارنة موجود لكنه ليس ملفًا: "
+                            + str(comparison_file)
+                        )
+                    skip_reason = "موجود في مجلد PUBG الأصلي"
+                elif destination_file.exists():
+                    if not destination_file.is_file():
+                        raise RuntimeError(
+                            "مسار الاسترجاع موجود لكنه ليس ملفًا: "
+                            + str(destination_file)
+                        )
+                    skip_reason = "موجود مسبقًا في مجلد من الهاتف"
+
+                if skip_reason:
+                    completed_bytes += item["size"]
+                    completed_files += 1
+                    self.pull_stats["skipped_files"] += 1
+                    self.logChanged.emit(
+                        "تم تخطي " + relative.as_posix() + " — " + skip_reason
+                    )
+                else:
+                    planned.append({
+                        **item,
+                        "destination": destination_file,
+                    })
+
+            required_bytes = sum(item["size"] for item in planned)
+            available_bytes = shutil.disk_usage(destination).free
+            if required_bytes > available_bytes:
+                raise OSError(
+                    "المساحة غير كافية في الكمبيوتر. المطلوب للملفات الناقصة: "
+                    + self._format_size(required_bytes)
+                    + "، والمتاح: "
+                    + self._format_size(available_bytes)
+                )
+
+            started_at = time.monotonic()
+            transferred_bytes = 0
+            last_percent = 0
+
+            def emit_pull_progress(current_file_bytes=0):
+                nonlocal last_percent
+                current_file_bytes = max(0, int(current_file_bytes or 0))
+                done_bytes = min(
+                    total_bytes,
+                    completed_bytes + current_file_bytes,
+                )
+                if total_bytes > 0:
+                    percent = min(int(done_bytes * 100 / total_bytes), 99)
+                else:
+                    percent = min(int(completed_files * 100 / total_files), 99)
+                if done_bytes > 0 and percent == 0:
+                    percent = 1
+                percent = max(last_percent, percent)
+                last_percent = percent
+
+                elapsed = max(time.monotonic() - started_at, 0.001)
+                speed = transferred_bytes / elapsed
+                remaining = max(total_bytes - done_bytes, 0)
+                eta = remaining / speed if speed > 0 else 0
+                self.progressChanged.emit(
+                    percent,
+                    self._format_size(speed) + "/s",
+                    self._format_time(eta),
+                )
+
+            emit_pull_progress()
+
+            for index, item in enumerate(planned, start=1):
+                if self._cancel_event.is_set():
+                    self.finished.emit(False, "تم إلغاء استرجاع ملفات الهاتف.")
+                    return
+
+                relative = item["relative"]
+                destination_file = item["destination"]
+                destination_file.parent.mkdir(parents=True, exist_ok=True)
+                # Re-check immediately before pulling: never overwrite a file
+                # created by another process after the initial comparison.
+                if destination_file.exists():
+                    if not destination_file.is_file():
+                        raise RuntimeError(
+                            "مسار الاسترجاع أصبح مجلدًا بدل ملف: "
+                            + str(destination_file)
+                        )
+                    completed_bytes += item["size"]
+                    completed_files += 1
+                    self.pull_stats["skipped_files"] += 1
+                    emit_pull_progress()
+                    continue
+
+                if comparison is not None:
+                    comparison_file = self._safe_pull_local_path(
+                        comparison, relative
+                    )
+                    if comparison_file.exists():
+                        if not comparison_file.is_file():
+                            raise RuntimeError(
+                                "مسار المقارنة أصبح مجلدًا بدل ملف: "
+                                + str(comparison_file)
+                            )
+                        completed_bytes += item["size"]
+                        completed_files += 1
+                        self.pull_stats["skipped_files"] += 1
+                        emit_pull_progress()
+                        continue
+
+                descriptor, temporary_name = tempfile.mkstemp(
+                    prefix=".kafianet-pull-",
+                    suffix=".part",
+                    dir=str(destination_file.parent),
+                )
+                os.close(descriptor)
+                temporary_file = Path(temporary_name)
+                temporary_files.append(temporary_file)
+                temporary_file.unlink()
+
+                file_size = int(item["size"])
+                self.statusChanged.emit(
+                    f"جاري نسخ الملف {index} من {len(planned)}: "
+                    + relative.as_posix()
+                )
+
+                def report_active_file(path=temporary_file, expected=file_size):
+                    try:
+                        current_size = min(int(path.stat().st_size), expected)
+                    except OSError:
+                        current_size = 0
+                    emit_pull_progress(current_size)
+
+                pull_code, pull_output = self._run_pull_process(
+                    device,
+                    [
+                        "pull",
+                        "-a",
+                        item["remote"],
+                        str(temporary_file),
+                    ],
+                    timeout=6 * 60 * 60,
+                    progress_callback=report_active_file,
+                )
+                if self._cancel_event.is_set():
+                    self.finished.emit(False, "تم إلغاء استرجاع ملفات الهاتف.")
+                    return
+                if pull_code != 0:
+                    details = str(pull_output or "").strip()
+                    raise RuntimeError(
+                        "فشل سحب الملف من الهاتف: " + relative.as_posix()
+                        + (("\\n" + details[-1000:]) if details else "")
+                    )
+                if not temporary_file.is_file():
+                    raise RuntimeError(
+                        "لم ينشئ ADB الملف المحلي المؤقت: "
+                        + relative.as_posix()
+                    )
+                actual_size = int(temporary_file.stat().st_size)
+                if actual_size != file_size:
+                    raise RuntimeError(
+                        "حجم الملف المنقول لا يطابق حجم الهاتف: "
+                        + relative.as_posix()
+                        + f" (الهاتف: {file_size}، الكمبيوتر: {actual_size})"
+                    )
+
+                created = self._publish_pull_temp_file(
+                    temporary_file, destination_file
+                )
+                if created:
+                    self.pull_stats["copied_files"] += 1
+                    transferred_bytes += file_size
+                else:
+                    self.pull_stats["skipped_files"] += 1
+
+                completed_bytes += file_size
+                completed_files += 1
+                emit_pull_progress()
+
+            copied_files = int(self.pull_stats["copied_files"])
+            skipped_files = int(self.pull_stats["skipped_files"])
+            self.progressChanged.emit(100, "0 B/s", "00:00")
+            message = (
+                f"اكتمل استرجاع ملفات الهاتف: {copied_files} ملف جديد، "
+                f"تم تخطي {skipped_files} ملف موجود مسبقًا. الوجهة: {destination}"
+            )
+            self.statusChanged.emit(message)
+            self.finished.emit(True, message)
+
         except Exception as exc:
-            self.finished.emit(False, f"تعذر نسخ الملفات من الهاتف: {exc}")
+            self.finished.emit(
+                False,
+                f"تعذر استرجاع ملفات الهاتف: {exc}"
+            )
         finally:
-            if process is not None and process.stdout is not None:
+            for temporary_file in temporary_files:
                 try:
-                    process.stdout.close()
-                except Exception:
+                    temporary_file.unlink(missing_ok=True)
+                except OSError:
                     pass
             with self._process_lock:
-                if self._current_process is process:
-                    self._current_process = None
+                self._current_process = None
             self._process_paused = False
 
     @Slot(str, list)
