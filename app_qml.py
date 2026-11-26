@@ -1960,7 +1960,12 @@ class AppController(QObject):
             # USB remains an ordinary local filesystem copy: no ADB or Shizuku.
             engine.start(operation["source"], operation["destination"])
         elif is_pull:
-            engine.pull(serial, operation["source"], operation["destination"])
+            engine.pull(
+                serial,
+                operation["source"],
+                operation["destination"],
+                operation.get("comparison_destination", ""),
+            )
         else:
             engine.push(serial, operation["source"], operation["destination"])
 
@@ -2631,9 +2636,10 @@ class AppController(QObject):
         if operation is None or operation.get("completed"):
             return
 
-        if operation.get("target_type") == "usb_storage":
+        if operation.get("target_type") == "usb_storage" or operation.get("kind") == "pull":
             engine = operation.get("engine")
-            stats = getattr(engine, "copy_stats", {}) if engine is not None else {}
+            stats_name = "copy_stats" if operation.get("target_type") == "usb_storage" else "pull_stats"
+            stats = getattr(engine, stats_name, {}) if engine is not None else {}
             operation["copied_files"] = max(0, int(stats.get("copied_files", 0)))
             operation["skipped_files"] = max(0, int(stats.get("skipped_files", 0)))
 
@@ -3429,6 +3435,30 @@ class AppController(QObject):
                 "كل الهواتف المحددة مشغولة بعمليات نقل حالية."
             )
 
+    def _pull_comparison_for_game(self, game_name):
+        """Return the original PC copy to compare against during a phone pull."""
+        if str(game_name) != "PUBG Mobile":
+            return None
+
+        # The original PUBG data stays on D:\\games; pulled files are saved
+        # separately under D:\\games\\من الهاتف and never written back here.
+        game_root = Path(self.destination_root) / "ببجي (PUBG)"
+        size_folder = str(self._pubg_source_size or "Saved")
+        selected_source = self._find_case_insensitive_child_directory(
+            game_root, size_folder
+        )
+        if selected_source is None:
+            return None
+
+        if size_folder.casefold() in ("medium", "low"):
+            nested_saved = self._find_case_insensitive_child_directory(
+                selected_source, "Saved"
+            )
+            if nested_saved is not None:
+                selected_source = nested_saved
+
+        return selected_source
+
     def _pull_destination_for_game(self, game_name):
         if str(game_name) == "eFootball":
             # Ziru_27 exposes this tree through SAF, not a normal ADB path.
@@ -3537,9 +3567,23 @@ class AppController(QObject):
 
         remote_source = self.getPhoneGameDestination(str(game_name))
         destination = self._pull_destination_for_game(str(game_name))
+        comparison_destination = self._pull_comparison_for_game(str(game_name))
         if not remote_source or destination is None:
             self._reject_operation(
                 "لا توجد وجهة هاتف أو مسار كمبيوتر آمن لهذه اللعبة: " + str(game_name)
+            )
+            return False
+        if str(game_name) == "PUBG Mobile" and (
+            comparison_destination is None or not comparison_destination.is_dir()
+        ):
+            expected_comparison = (
+                Path(self.destination_root) / "ببجي (PUBG)"
+                / str(self._pubg_source_size or "Saved")
+            )
+            self._reject_operation(
+                "لم يتم العثور على مجلد PUBG الأصلي للمقارنة: "
+                + str(expected_comparison)
+                + "\\nلم يبدأ النقل حتى لا يعيد نسخ ملفات اللعبة الموجودة."
             )
             return False
         started = 0
@@ -3568,7 +3612,10 @@ class AppController(QObject):
                 "destination": str(destination),
                 "source_label": "الهاتف",
                 "source_root": str(remote_source),
-                "status": "جاري نسخ الملفات من الهاتف",
+                "comparison_destination": (
+                    str(comparison_destination) if comparison_destination is not None else ""
+                ),
+                "status": "جاري مقارنة ملفات الهاتف وتخطي الموجود",
                 "percent": 0,
                 "operation": "ADB pull إلى الكمبيوتر",
                 "speed": "--",
