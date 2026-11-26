@@ -10,6 +10,9 @@ import struct
 import threading
 import secrets
 import zipfile
+import logging
+import tempfile
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from pathlib import Path
 
@@ -24,10 +27,292 @@ for _stream in (sys.stdout, sys.stderr):
 
 os.environ["QT_QUICK_CONTROLS_STYLE"] = "Fusion"
 
-from PySide6.QtCore import QObject, Signal, Slot, Property, QTimer, QUrl
+from PySide6.QtCore import (
+    QObject, Signal, Slot, Property, QTimer, QUrl,
+    QEvent, Qt, QPointF, QtMsgType, qInstallMessageHandler,
+)
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QFileDialog
 from PySide6.QtQml import QQmlApplicationEngine
+
+
+# ---------------------------------------------------------------------------
+# Persistent diagnostics for packaged GUI builds.
+# stdout/stderr are often unavailable for PyInstaller windowed applications,
+# so keep the existing print-based diagnostics and Qt/QML messages in a
+# rotating UTF-8 file under the user's LocalAppData directory.
+# ---------------------------------------------------------------------------
+
+_DIAGNOSTIC_LOGGER = logging.getLogger("cn_playhub")
+_DIAGNOSTIC_LOG_PATH = None
+_DIAGNOSTIC_HANDLER = None
+
+
+class _LineLoggingStream:
+    """Mirror a text stream while writing complete lines to the app log."""
+
+    def __init__(self, logger, level, prefix, original=None):
+        self._logger = logger
+        self._level = level
+        self._prefix = prefix
+        self._original = original
+        self._buffer = ""
+        self._lock = threading.RLock()
+        self.encoding = "utf-8"
+        self.errors = "replace"
+
+    def write(self, text):
+        if text is None:
+            return 0
+        text = str(text)
+        if not text:
+            return 0
+
+        with self._lock:
+            if self._original is not None:
+                try:
+                    self._original.write(text)
+                except (OSError, ValueError):
+                    pass
+
+            self._buffer += text
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                line = line.rstrip("\r")
+                if line:
+                    self._logger.log(self._level, "%s%s", self._prefix, line)
+        return len(text)
+
+    def flush(self):
+        with self._lock:
+            pending = self._buffer.rstrip("\r")
+            self._buffer = ""
+            if pending:
+                self._logger.log(
+                    self._level, "%s%s", self._prefix, pending
+                )
+            if self._original is not None:
+                try:
+                    self._original.flush()
+                except (OSError, ValueError):
+                    pass
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        if self._original is None:
+            raise OSError("No console file descriptor is available")
+        return self._original.fileno()
+
+    def writable(self):
+        return True
+
+
+def _qt_diagnostic_message_handler(mode, context, message):
+    """Persist Qt, Qt Quick, and QML console messages with source location."""
+    level = {
+        QtMsgType.QtDebugMsg: logging.DEBUG,
+        QtMsgType.QtInfoMsg: logging.INFO,
+        QtMsgType.QtWarningMsg: logging.WARNING,
+        QtMsgType.QtCriticalMsg: logging.ERROR,
+        QtMsgType.QtFatalMsg: logging.CRITICAL,
+    }.get(mode, logging.INFO)
+
+    category = "default"
+    source = ""
+    try:
+        if context is not None:
+            category = getattr(context, "category", None) or "default"
+            source_file = getattr(context, "file", None)
+            source_line = getattr(context, "line", 0)
+            source_function = getattr(context, "function", None)
+            if source_file:
+                source = f" [{source_file}:{source_line}"
+                if source_function:
+                    source += f" {source_function}"
+                source += "]"
+    except Exception:
+        source = ""
+
+    _DIAGNOSTIC_LOGGER.log(
+        level, "QT[%s]%s %s", category, source, str(message)
+    )
+
+
+def _configure_diagnostics():
+    """Enable persistent diagnostics without requiring a console window."""
+    global _DIAGNOSTIC_LOG_PATH, _DIAGNOSTIC_HANDLER
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        log_root = Path(local_app_data) / "CN PlayHub" / "logs"
+    else:
+        log_root = Path.home() / "AppData" / "Local" / "CN PlayHub" / "logs"
+
+    try:
+        log_root.mkdir(parents=True, exist_ok=True)
+        log_path = log_root / "cn-playhub-diagnostic.log"
+        handler = RotatingFileHandler(
+            log_path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=4,
+            encoding="utf-8",
+            delay=False,
+        )
+    except OSError:
+        log_root = Path(tempfile.gettempdir()) / "CN PlayHub" / "logs"
+        log_root.mkdir(parents=True, exist_ok=True)
+        log_path = log_root / "cn-playhub-diagnostic.log"
+        handler = RotatingFileHandler(
+            log_path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=4,
+            encoding="utf-8",
+            delay=False,
+        )
+
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(levelname)s "
+        "[%(threadName)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(handler)
+
+    _DIAGNOSTIC_LOGGER.setLevel(logging.DEBUG)
+    _DIAGNOSTIC_LOGGER.propagate = True
+    _DIAGNOSTIC_LOG_PATH = log_path
+    _DIAGNOSTIC_HANDLER = handler
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = _LineLoggingStream(
+        _DIAGNOSTIC_LOGGER, logging.INFO, "PYTHON | ", original_stdout
+    )
+    sys.stderr = _LineLoggingStream(
+        _DIAGNOSTIC_LOGGER, logging.ERROR, "PYTHON STDERR | ", original_stderr
+    )
+
+    qInstallMessageHandler(_qt_diagnostic_message_handler)
+
+    def _uncaught_exception(exc_type, exc_value, exc_traceback):
+        _DIAGNOSTIC_LOGGER.critical(
+            "UNCAUGHT PYTHON EXCEPTION",
+            exc_info=(exc_type, exc_value, exc_traceback),
+        )
+
+    sys.excepthook = _uncaught_exception
+
+    if hasattr(threading, "excepthook"):
+        def _uncaught_thread_exception(args):
+            _DIAGNOSTIC_LOGGER.critical(
+                "UNCAUGHT THREAD EXCEPTION in %s",
+                getattr(args.thread, "name", "unknown"),
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+        threading.excepthook = _uncaught_thread_exception
+
+    _DIAGNOSTIC_LOGGER.info(
+        "DIAGNOSTICS STARTED | log_path=%s | capture=Python stdout/stderr, "
+        "Qt/QML messages, uncaught exceptions, UI mouse clicks",
+        log_path,
+    )
+    return log_path
+
+
+class _UiInteractionLogger(QObject):
+    """Log clicked QML control identity without recording typed field values."""
+
+    _SENSITIVE_TEXT_TYPES = (
+        "TextField", "TextInput", "TextArea", "Password", "LineEdit"
+    )
+
+    def _deepest_item_at(self, root_item, x, y):
+        current = root_item
+        point = QPointF(float(x), float(y))
+        for _ in range(16):
+            try:
+                child = current.childAt(point.x(), point.y())
+            except (AttributeError, RuntimeError, TypeError):
+                break
+            if child is None or child is current:
+                break
+            try:
+                point = child.mapFromItem(current, point)
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+            current = child
+        return current
+
+    def _describe_target(self, item):
+        parts = []
+        current = item
+        for _ in range(8):
+            if current is None:
+                break
+            try:
+                class_name = current.metaObject().className()
+            except (AttributeError, RuntimeError):
+                class_name = type(current).__name__
+
+            details = [str(class_name)]
+            try:
+                object_name = current.objectName()
+                if object_name:
+                    details.append(f"name={object_name!r}")
+            except (AttributeError, RuntimeError):
+                pass
+
+            is_sensitive_control = any(
+                token.casefold() in str(class_name).casefold()
+                for token in self._SENSITIVE_TEXT_TYPES
+            )
+            if not is_sensitive_control:
+                for property_name in ("text", "title", "accessibleName"):
+                    try:
+                        value = current.property(property_name)
+                    except (AttributeError, RuntimeError):
+                        value = None
+                    if isinstance(value, str) and value.strip():
+                        safe_value = value.replace("\r", " ").replace("\n", " ")
+                        details.append(f"{property_name}={safe_value[:100]!r}")
+
+            parts.append(" ".join(details))
+            try:
+                current = current.parentItem()
+            except (AttributeError, RuntimeError):
+                current = None
+
+        return " <- ".join(parts) if parts else "target=unresolved"
+
+    def eventFilter(self, watched, event):
+        try:
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                button = event.button()
+                position = event.position()
+                target_description = "window target unavailable"
+
+                content_item_getter = getattr(watched, "contentItem", None)
+                if callable(content_item_getter):
+                    content_item = content_item_getter()
+                    if content_item is not None:
+                        target = self._deepest_item_at(
+                            content_item, position.x(), position.y()
+                        )
+                        target_description = self._describe_target(target)
+
+                _DIAGNOSTIC_LOGGER.info(
+                    "UI_CLICK | button=%s | x=%.1f y=%.1f | target=%s",
+                    button, position.x(), position.y(), target_description,
+                )
+        except Exception:
+            _DIAGNOSTIC_LOGGER.exception("UI interaction event logging failed")
+
+        return False
+
 
 # CI/runtime smoke test: importing QtWidgets alone is insufficient because
 # Qt's platform plugins are loaded when QApplication is constructed.
@@ -4411,6 +4696,8 @@ class AppController(QObject):
 
 
 def main():
+    diagnostic_log_path = _configure_diagnostics()
+    print("DIAGNOSTIC LOG PATH:", diagnostic_log_path)
     print("STARTING CN PLAYHUB")
 
     app = QApplication(sys.argv)
@@ -4453,6 +4740,16 @@ def main():
     if not root_count:
         print("QML FAILED TO LOAD")
         return 2
+
+    ui_interaction_logger = _UiInteractionLogger(app)
+    interaction_windows = 0
+    for root_object in engine.rootObjects():
+        try:
+            root_object.installEventFilter(ui_interaction_logger)
+            interaction_windows += 1
+        except (AttributeError, RuntimeError) as exc:
+            print("UI INTERACTION LOGGER INSTALL WARNING:", exc)
+    print("UI INTERACTION LOGGER INSTALLED:", interaction_windows)
 
     print("QML LOADED SUCCESSFULLY")
     if "--protected-build-smoke-test" in sys.argv:
