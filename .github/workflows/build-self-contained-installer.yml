@@ -628,18 +628,11 @@ jobs:
             }
           }
 
-          # Publish an explicit remote Git tag before creating the draft.
-          # gh release create may use an untagged placeholder URL for a draft
-          # when the tag does not yet exist; pre-creating the ref prevents that
-          # mismatch and makes both the tag lookup and gh release upload stable.
-          git tag $tag $env:GITHUB_SHA
-          if ($LASTEXITCODE -ne 0) { throw 'Could not create the unique Windows release tag.' }
-          git push origin "refs/tags/$tag"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the unique Windows release tag.' }
-
           # Create the draft through the REST API with an explicit tag_name.
-          # This avoids gh release create returning an untagged placeholder URL
-          # even though the remote Git tag already exists.
+          # GitHub creates the missing remote tag from target_commitish as part
+          # of this request. Avoid git push here: the build token does not carry
+          # the special workflow-file push permission required for a tag push
+          # when this commit also changes the workflow definition.
           $releaseNotes = 'CN PlayHub self-contained Windows installer and portable package. Android Shizuku helper APK is bundled in the Windows package. Built and smoke-tested by GitHub Actions.'
           $releaseApiRaw = gh api --method POST "repos/$env:GITHUB_REPOSITORY/releases" -f "tag_name=$tag" -f "target_commitish=$env:GITHUB_SHA" -f "name=$releaseTitle" -f "body=$releaseNotes" -F draft=true -F prerelease=false
           $createReleaseExitCode = $LASTEXITCODE
