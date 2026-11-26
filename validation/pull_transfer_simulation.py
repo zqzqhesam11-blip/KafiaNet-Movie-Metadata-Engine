@@ -2,6 +2,7 @@
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -133,10 +134,141 @@ def test_pull_manifest_rejects_paths_outside_the_remote_game_folder():
         raise AssertionError("An out-of-root phone path was accepted.")
 
 
+
+def test_pull_watchdog_allows_long_commands_when_output_or_file_progress_continues():
+    class FakeProcess:
+        def __init__(self, output_file=None, write_output=False):
+            self.output_file = output_file
+            self.write_output = write_output
+            self.poll_count = 0
+            self.returncode = None
+
+        def poll(self):
+            self.poll_count += 1
+            if self.write_output and self.poll_count <= 4:
+                self.output_file.write(b"x")
+                self.output_file.flush()
+            if self.poll_count > 4:
+                self.returncode = 0
+                return 0
+            return None
+
+        def wait(self, timeout=None):
+            return self.returncode if self.returncode is not None else 0
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    engine = ADBEngine()
+    process_holder = {}
+
+    def fake_popen(command, **kwargs):
+        process = FakeProcess(kwargs.get("stdout"), write_output=True)
+        process_holder["process"] = process
+        return process
+
+    # Total runtime intentionally exceeds the 50 ms inactivity limit.
+    # The steadily growing ADB output file must keep the command alive.
+    with patch("engine.adb_engine.subprocess.Popen", side_effect=fake_popen):
+        code, output = engine._run_pull_process(
+            "SERIAL_TEST",
+            ["shell", "find /sdcard/test"],
+            timeout=0.05,
+        )
+    assert code == 0, code
+    assert output == "xxxx", output
+    assert process_holder["process"].poll_count == 5
+
+
+def test_pull_watchdog_uses_local_file_progress_when_adb_output_is_quiet():
+    class FakeProcess:
+        def __init__(self):
+            self.poll_count = 0
+            self.returncode = None
+
+        def poll(self):
+            self.poll_count += 1
+            if self.poll_count > 4:
+                self.returncode = 0
+                return 0
+            return None
+
+        def wait(self, timeout=None):
+            return self.returncode if self.returncode is not None else 0
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    engine = ADBEngine()
+    markers = {"value": 0}
+
+    def fake_popen(command, **kwargs):
+        return FakeProcess()
+
+    def report_file_growth():
+        markers["value"] += 1024 * 1024
+        return markers["value"]
+
+    with patch("engine.adb_engine.subprocess.Popen", side_effect=fake_popen):
+        code, output = engine._run_pull_process(
+            "SERIAL_TEST",
+            ["pull", "/sdcard/large-file.bin", "temporary.part"],
+            timeout=0.05,
+            progress_callback=report_file_growth,
+        )
+    assert code == 0, code
+    assert output == ""
+    assert markers["value"] == 4 * 1024 * 1024
+
+
+def test_pull_watchdog_stops_only_after_real_inactivity():
+    class StalledProcess:
+        def __init__(self):
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    engine = ADBEngine()
+
+    with patch(
+        "engine.adb_engine.subprocess.Popen",
+        side_effect=lambda command, **kwargs: StalledProcess(),
+    ):
+        try:
+            engine._run_pull_process(
+                "SERIAL_TEST",
+                ["pull", "/sdcard/stalled.bin", "temporary.part"],
+                timeout=0.05,
+            )
+        except TimeoutError as exc:
+            assert "لم يسجل أمر ADB أي تقدم" in str(exc), str(exc)
+        else:
+            raise AssertionError("A fully stalled ADB command was not stopped.")
+
+
 def main():
     test_pull_skips_existing_files_and_reports_progress()
     test_pull_refuses_to_start_when_required_comparison_root_is_missing()
     test_pull_manifest_rejects_paths_outside_the_remote_game_folder()
+    test_pull_watchdog_allows_long_commands_when_output_or_file_progress_continues()
+    test_pull_watchdog_uses_local_file_progress_when_adb_output_is_quiet()
+    test_pull_watchdog_stops_only_after_real_inactivity()
     print("PHONE PULL SKIP-EXISTING / LIVE BYTE PROGRESS: PASS")
 
 
