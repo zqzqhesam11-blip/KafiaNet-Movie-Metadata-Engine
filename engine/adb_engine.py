@@ -1808,10 +1808,17 @@ class ADBEngine(QObject):
         self,
         device,
         args,
-        timeout=6 * 60 * 60,
+        timeout=30 * 60,
         progress_callback=None,
     ):
-        """Run one ADB pull/list command without blocking progress or cancellation."""
+        """Run one ADB pull/list command with a no-progress watchdog.
+
+        The timeout is an inactivity limit, not a total-runtime limit. Long
+        transfers may run as long as bytes or command output keep arriving.
+        For a pull, progress_callback may return a changing marker (normally
+        the temporary file size) so file growth resets the watchdog even when
+        ADB itself writes no console output.
+        """
         command = [self.adb, "-s", str(device), *[str(item) for item in args]]
         startupinfo = None
         if os.name == "nt":
@@ -1833,7 +1840,11 @@ class ADBEngine(QObject):
                 with self._process_lock:
                     self._current_process = process
 
-                started_at = time.monotonic()
+                last_activity = time.monotonic()
+                last_output_size = 0
+                last_progress_marker = None
+                progress_marker_initialized = False
+
                 while process.poll() is None:
                     if self._cancel_event.is_set():
                         process.terminate()
@@ -1842,19 +1853,50 @@ class ADBEngine(QObject):
                     if not self._pause_event.wait(timeout=0.15):
                         continue
 
-                    if progress_callback is not None:
-                        progress_callback()
+                    now = time.monotonic()
+                    try:
+                        output_size = os.fstat(output_file.fileno()).st_size
+                    except OSError:
+                        output_size = last_output_size
+                    if output_size > last_output_size:
+                        last_output_size = output_size
+                        last_activity = now
 
-                    if time.monotonic() - started_at > timeout:
-                        process.terminate()
+                    if progress_callback is not None:
+                        marker = progress_callback()
+                        if marker is not None and (
+                            not progress_marker_initialized
+                            or marker != last_progress_marker
+                        ):
+                            last_progress_marker = marker
+                            progress_marker_initialized = True
+                            last_activity = now
+
+                    if timeout is not None and now - last_activity >= float(timeout):
+                        try:
+                            process.terminate()
+                        except OSError:
+                            pass
                         try:
                             process.wait(timeout=10)
                         except subprocess.TimeoutExpired:
                             process.kill()
                             process.wait(timeout=10)
-                        raise TimeoutError(
-                            "تجاوز أمر ADB الحد الزمني المسموح أثناء استرجاع الملفات."
+
+                        operation = (
+                            "فحص قائمة ملفات الهاتف"
+                            if args and str(args[0]).lower() == "shell"
+                            else "سحب ملف من الهاتف"
                         )
+                        raise TimeoutError(
+                            "لم يسجل أمر ADB أي تقدم خلال آخر "
+                            + self._format_time(timeout)
+                            + " أثناء "
+                            + operation
+                            + ". أوقفنا الأمر لتجنب تعليقه؛ تحقق من اتصال الهاتف "
+                            "ومساحة التخزين ثم أعد المحاولة."
+                        )
+
                     time.sleep(0.05)
 
                 try:
@@ -2029,7 +2071,7 @@ class ADBEngine(QObject):
             list_code, list_output = self._run_pull_process(
                 device,
                 ["shell", find_command],
-                timeout=300,
+                timeout=30 * 60,
             )
             if self._cancel_event.is_set():
                 self.finished.emit(False, "تم إلغاء فحص ملفات الهاتف.")
@@ -2206,6 +2248,7 @@ class ADBEngine(QObject):
                     except OSError:
                         current_size = 0
                     emit_pull_progress(current_size)
+                    return current_size
 
                 pull_code, pull_output = self._run_pull_process(
                     device,
@@ -2215,7 +2258,7 @@ class ADBEngine(QObject):
                         item["remote"],
                         str(temporary_file),
                     ],
-                    timeout=6 * 60 * 60,
+                    timeout=30 * 60,
                     progress_callback=report_active_file,
                 )
                 if self._cancel_event.is_set():
