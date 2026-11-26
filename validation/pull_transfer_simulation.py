@@ -45,13 +45,13 @@ def test_pull_skips_existing_files_and_reports_progress():
         def fake_run_pull_process(
             device, args, timeout=6 * 60 * 60, progress_callback=None
         ):
-            assert device == "SERIAL_TEST"
+            assert device == "SERIAL_TEST", f"Unexpected device: {device!r}"
             if args[0] == "shell":
-                assert "find " in args[1] and "stat -c" in args[1]
+                assert "find " in args[1] and "stat -c" in args[1], f"Unexpected manifest command: {args!r}"
                 return 0, manifest
 
             assert args[0] == "pull", args
-            assert args[1] == f"{remote_root}/new-from-phone.bin"
+            assert args[1] == f"{remote_root}/new-from-phone.bin", f"Unexpected remote file: {args[1]!r}"
             temporary_file = Path(args[2])
             payload = b"phone!"
             with temporary_file.open("wb") as output:
