@@ -2194,7 +2194,8 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     assert generic_operation["status"] == "فشل"
     assert "لم يتم فتح النسخ إلى الجذر تلقائيًا" in generic_operation["error"]
 
-    # A Shizuku setup failure also unlocks the root fallback, without deleting the source.
+    # Shizuku authorization/setup can fail before any protected destination write.
+    # That is not proof of Android/data denial and must not open the root fallback.
     setup_controller = make_controller()
     setup_fallbacks = []
     setup_controller.androidDataFallbackRequested.connect(
@@ -2212,11 +2213,11 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     setup_engine.finish(False, reason)
     assert setup_operation["phase"] == "shizuku_prepare"
     setup_engine.finish(False, "لم يمنح الهاتف تطبيق KafiaNet إذن Shizuku.")
-    assert setup_operation["phase"] == "awaiting_root_fallback"
-    assert setup_operation["awaiting_root_fallback"] is True
+    assert setup_operation["phase"] == "final"
+    assert setup_operation["awaiting_root_fallback"] is False
     assert setup_operation["completed"] is True
-    assert len(setup_fallbacks) == 1
-    assert setup_fallbacks[0][0] == "SERIAL_B"
+    assert setup_fallbacks == []
+    assert "لم يتم تأكيد رفض الكتابة" in setup_operation["error"]
 
     # ADB success and failures outside Android/data do not invoke Shizuku or root.
     success_controller = make_controller()
