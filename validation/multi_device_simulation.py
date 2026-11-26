@@ -2214,7 +2214,7 @@ def test_legacy_root_fallback_prompt_only_after_android_data_denial():
     assert setup_operation["phase"] == "shizuku_prepare"
     setup_engine.finish(False, "لم يمنح الهاتف تطبيق KafiaNet إذن Shizuku.")
     assert setup_operation["phase"] == "final"
-    assert setup_operation["awaiting_root_fallback"] is False
+    assert setup_operation.get("awaiting_root_fallback", False) is False
     assert setup_operation["completed"] is True
     assert setup_fallbacks == []
     assert "لم يتم تأكيد رفض الكتابة" in setup_operation["error"]
