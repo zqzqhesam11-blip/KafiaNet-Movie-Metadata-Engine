@@ -128,8 +128,8 @@ ApplicationWindow {
             return
         }
 
-        // Fullscreen is the primary UI action. Native Windows protections
-        // are an additional layer and must not block the fullscreen transition.
+        // The native Windows desktop guard is required before the
+        // password-protected fullscreen lock can activate.
         var guardReady = Boolean(
             appController && appController.setFullscreenProtection(true)
         )
