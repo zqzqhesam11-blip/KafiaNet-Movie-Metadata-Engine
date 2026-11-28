@@ -39,7 +39,7 @@ public final class BridgeKeepAliveService extends Service {
     private final Set<String> activeTransfers = ConcurrentHashMap.newKeySet();
     private PowerManager.WakeLock cpuWakeLock;
     private PowerManager.WakeLock screenWakeLock;
-    private boolean foregroundStarted;
+    private volatile boolean foregroundStarted;
     private boolean stopWhenIdle;
 
     public static void startSession(Context context) {
@@ -59,11 +59,7 @@ public final class BridgeKeepAliveService extends Service {
     public static void transferFinished(Context context, String jobId) {
         if (jobId == null || jobId.trim().isEmpty()) return;
         BridgeKeepAliveService current = instance;
-        if (current != null) {
-            current.finishTransfer(jobId);
-        } else {
-            dispatch(context, ACTION_TRANSFER_FINISHED, jobId);
-        }
+        if (current != null) current.finishTransfer(jobId);
     }
 
     public static void stopSession(Context context) {
@@ -145,7 +141,7 @@ public final class BridgeKeepAliveService extends Service {
         }
     }
 
-    private void enterForeground() {
+    private synchronized void enterForeground() {
         if (foregroundStarted) return;
         startForeground(NOTIFICATION_ID, buildNotification());
         foregroundStarted = true;

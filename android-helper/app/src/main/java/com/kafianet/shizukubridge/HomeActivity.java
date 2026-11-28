@@ -185,9 +185,9 @@ public final class HomeActivity extends Activity {
         SharedPreferences prefs = getSharedPreferences(
                 PubgOfflineFinalizeService.PREFS, MODE_PRIVATE
         );
+        String state = prefs.getString(PubgOfflineFinalizeService.KEY_STATE, "idle");
         // Keep the visible progress screen awake only while local copy is active.
         setLocalTransferScreenOn("preparing".equals(state) || "running".equals(state));
-        String state = prefs.getString(PubgOfflineFinalizeService.KEY_STATE, "idle");
         int percent = prefs.getInt(PubgOfflineFinalizeService.KEY_PERCENT, 0);
         int copied = prefs.getInt(PubgOfflineFinalizeService.KEY_COPIED_FILES, 0);
         int total = prefs.getInt(PubgOfflineFinalizeService.KEY_TOTAL_FILES, 0);

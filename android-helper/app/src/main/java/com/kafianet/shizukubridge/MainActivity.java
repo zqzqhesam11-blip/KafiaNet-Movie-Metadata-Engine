@@ -731,10 +731,13 @@ public final class MainActivity extends Activity {
                 JSONObject payload = new JSONObject(new String(body, 0, read, StandardCharsets.UTF_8));
                 String jobId = payload.getString("jobId");
                 cancelledJobs.add(jobId);
-                if (userService != null) userService.cancelCopy(jobId);
-                directStreamDestinations.remove(jobId);
+                try {
+                    if (userService != null) userService.cancelCopy(jobId);
+                } finally {
+                    directStreamDestinations.remove(jobId);
+                    BridgeKeepAliveService.transferFinished(this, jobId);
+                }
                 result = new JSONObject().put("accepted", true);
-                BridgeKeepAliveService.transferFinished(this, jobId);
             } else if ("POST".equals(method) && "/destination/check".equals(path)) {
                 JSONObject payload = new JSONObject(new String(body, 0, read, StandardCharsets.UTF_8));
                 String destination = payload.getString("destination");
