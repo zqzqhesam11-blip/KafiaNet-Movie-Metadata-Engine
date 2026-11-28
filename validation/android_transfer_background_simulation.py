@@ -61,6 +61,7 @@ assert "releaseTransferWakeLock();" in local_service
 assert "FLAG_KEEP_SCREEN_ON" in home
 assert '"preparing".equals(state) || "running".equals(state)' in home
 assert home.index('String state = prefs.getString(PubgOfflineFinalizeService.KEY_STATE') < home.index('setLocalTransferScreenOn("preparing".equals(state)')
+assert home.index('private void setLocalTransferScreenOn(') < home.index('private String formatBytes(')
 assert "الضغط على زر Home" in home
 
 print("ANDROID TRANSFER BACKGROUND LIFECYCLE: PASS")

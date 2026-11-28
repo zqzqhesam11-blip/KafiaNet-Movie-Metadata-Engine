@@ -223,7 +223,6 @@ public final class HomeActivity extends Activity {
         }
     }
 
-    private String formatBytes(long value) {
     private void setLocalTransferScreenOn(boolean enabled) {
         if (localScreenLockApplied == enabled) return;
         localScreenLockApplied = enabled;
@@ -234,6 +233,7 @@ public final class HomeActivity extends Activity {
         }
     }
 
+    private String formatBytes(long value) {
         double amount = Math.max(0L, value);
         String[] units = {"B", "KB", "MB", "GB", "TB"};
         int index = 0;
