@@ -6,6 +6,7 @@ on:
       - feature/kafianet-control-pro-shizuku-final-20261123
       - feature/kafianet-control-pro-fullscreen-guard-20261124
       - feature/pubg-offline-unified-helper-20261125
+      - feature/wireless-qr-pairing-20261128
     paths:
       - '.github/workflows/build-self-contained-installer.yml'
       - 'app_qml.py'
@@ -52,7 +53,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           python -m pip install --upgrade pip
-          python -m pip install 'PySide6==6.11.2' 'psutil>=7,<8' pyinstaller
+          python -m pip install 'PySide6==6.11.2' 'psutil>=7,<8' 'qrcode>=8,<9' pyinstaller
           if ($LASTEXITCODE -ne 0) { throw 'Build dependency installation failed.' }
           python -m pip check
           if ($LASTEXITCODE -ne 0) { throw 'Build environment has broken dependencies.' }
@@ -174,6 +175,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Dashboard artwork discovery simulation failed.' }
           python validation\transfer_summary_today_simulation.py
           if ($LASTEXITCODE -ne 0) { throw "Today successful-copy summary simulation failed." }
+          python validation\wireless_pairing_simulation.py
+          if ($LASTEXITCODE -ne 0) { throw "Wireless QR pairing protocol and device de-duplication simulation failed." }
 
       - name: Validate app source imports
         shell: pwsh
@@ -192,6 +195,7 @@ jobs:
             'engine\transfer_engine.py',
             'engine\path_manager.py',
             'engine\game_config.py',
+            'engine\wireless_pairing.py',
             'android-helper\app\src\main\AndroidManifest.xml',
             'android-helper\app\build.gradle',
             'android-helper\app\src\main\java\com\kafianet\shizukubridge\MainActivity.java',
@@ -214,14 +218,16 @@ jobs:
           import os, sys
           from pathlib import Path
           sys.path.insert(0, str(Path.cwd()))
-          import PySide6, psutil
+          import PySide6, psutil, qrcode
           from engine.adb_engine import ADBEngine
+          from engine.wireless_pairing import build_adb_pairing_qr_payload, parse_adb_mdns_services
           from engine.transfer_engine import TransferEngine
           from engine.path_manager import PathManager
           from engine.game_config import get_game, find_game_folder
           print("Python:", sys.version)
           print("PySide6:", PySide6.__version__)
           print("psutil:", psutil.__version__)
+          print("qrcode:", getattr(qrcode, "__version__", "installed"))
           print("Application module imports: OK")
           '@ | Set-Content -LiteralPath "$env:RUNNER_TEMP\validate_app.py" -Encoding utf8
 

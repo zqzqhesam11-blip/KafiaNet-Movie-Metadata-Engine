@@ -46,6 +46,18 @@ ApplicationWindow {
     // =============================================================
 
     property bool adbDeviceConnected: false
+    property string wirelessPairingQrUrl: ""
+    property string wirelessPairingMessage: "جاهز لإضافة هاتف Android عبر QR."
+    property string wirelessPairingStatus: "idle"
+
+    function updateWirelessPairingState(state) {
+        var value = state || {}
+        window.wirelessPairingQrUrl = String(value.qr_url || "")
+        window.wirelessPairingMessage = String(
+            value.message || "بانتظار إجراء الاقتران."
+        )
+        window.wirelessPairingStatus = String(value.status || "idle")
+    }
     function deviceUnitsForSerials(serials) {
         var total = 0
         var selected = serials || []
@@ -1555,6 +1567,10 @@ ApplicationWindow {
             window.updateAdbDeviceStatus()
         }
 
+        function onWirelessPairingChanged(state) {
+            window.updateWirelessPairingState(state)
+        }
+
     }
 
     Component {
@@ -2121,6 +2137,97 @@ ApplicationWindow {
         }
     }
 
+    Dialog {
+        id: wirelessPairingDialog
+        objectName: "wirelessPairingDialog"
+        modal: true
+        focus: true
+        closePolicy: Popup.NoAutoClose
+        title: "إضافة هاتف Android لاسلكيًا"
+        width: Math.min(620, window.width - 40)
+        height: Math.min(570, window.height - 40)
+        x: Math.max(20, (window.width - width) / 2)
+        y: Math.max(20, (window.height - height) / 2)
+        standardButtons: Dialog.NoButton
+
+        onRejected: {
+            if (appController)
+                appController.cancelWirelessPairing()
+        }
+
+        background: Rectangle {
+            color: "#111722"
+            radius: 14
+            border.width: 1
+            border.color: "#26768A"
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 12
+
+            Text {
+                Layout.fillWidth: true
+                text: "على الهاتف افتح: خيارات المطوّر ← تصحيح الأخطاء اللاسلكي ← الاقتران باستخدام QR."
+                color: "#DCE4F0"
+                font.pixelSize: 13
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
+            }
+
+            Image {
+                id: wirelessPairingQrImage
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredWidth: 310
+                Layout.preferredHeight: 310
+                source: window.wirelessPairingQrUrl
+                visible: source.toString().length > 0
+                cache: false
+                asynchronous: false
+                fillMode: Image.PreserveAspectFit
+                smooth: false
+                mipmap: false
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: window.wirelessPairingMessage
+                color: window.wirelessPairingStatus === "connected"
+                       ? "#42D995"
+                       : window.wirelessPairingStatus === "error"
+                         ? "#FF8A8A" : "#B9C3D2"
+                font.pixelSize: 12
+                font.bold: true
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignHCenter
+                spacing: 10
+
+                Button {
+                    text: "إلغاء"
+                    enabled: window.wirelessPairingStatus !== "connected"
+                    onClicked: {
+                        if (appController)
+                            appController.cancelWirelessPairing()
+                        wirelessPairingDialog.close()
+                    }
+                }
+
+                Button {
+                    text: "إغلاق"
+                    onClicked: {
+                        if (appController)
+                            appController.cancelWirelessPairing()
+                        wirelessPairingDialog.close()
+                    }
+                }
+            }
+        }
+    }
+
     Popup {
         id: adbDevicePopup
 
@@ -2148,6 +2255,21 @@ ApplicationWindow {
                 color: "#00D9FF"
                 font.pixelSize: 16
                 font.bold: true
+            }
+
+            Button {
+                objectName: "wirelessPairingButton"
+                width: parent.width
+                height: 38
+                text: "إضافة هاتف لاسلكيًا عبر QR"
+                onClicked: {
+                    if (!appController)
+                        return
+                    window.updateWirelessPairingState(
+                        appController.startWirelessPairing()
+                    )
+                    wirelessPairingDialog.open()
+                }
             }
 
             ListView {

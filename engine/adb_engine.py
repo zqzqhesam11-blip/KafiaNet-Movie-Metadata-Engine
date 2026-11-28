@@ -270,8 +270,17 @@ class ADBEngine(QObject):
             if not device_name or device_name.lower() in {"null", "unknown"}:
                 device_name = f"{manufacturer} {model}".strip()
 
+            physical_id = read_device_property([
+                "-s", serial, "shell", "getprop", "ro.serialno"
+            ])
+            if not physical_id or physical_id.casefold() in {"unknown", "null", "none", "0"}:
+                physical_id = read_device_property([
+                    "-s", serial, "shell", "getprop", "ro.boot.serialno"
+                ])
+
             devices.append({
                 "serial": serial,
+                "physical_id": physical_id,
                 "model": model,
                 "manufacturer": manufacturer,
                 "name": device_name

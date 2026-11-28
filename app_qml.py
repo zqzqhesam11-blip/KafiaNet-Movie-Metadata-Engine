@@ -12,6 +12,7 @@ import secrets
 import zipfile
 import logging
 import tempfile
+import subprocess
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from pathlib import Path
@@ -345,6 +346,11 @@ from engine.game_config import (
 )
 from engine.windows_fullscreen import WindowsFullscreenProtection
 from engine.windows_storage import enumerate_removable_storage_devices
+from engine.wireless_pairing import (
+    deduplicate_adb_devices,
+    parse_adb_mdns_services,
+    save_adb_pairing_qr,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -651,6 +657,7 @@ class AppController(QObject):
     usbChanged = Signal(str)
     destinationChanged = Signal(str)
     adbDevicesChanged = Signal(list)
+    wirelessPairingChanged = Signal(dict)
     adbDiscoveryCompleted = Signal(list)
     transferHistoryChanged = Signal(list)
     transferSummaryChanged = Signal(dict)
@@ -725,6 +732,21 @@ class AppController(QObject):
         self._operation_busy = False
         self._transfer_paused = False
         self._device_info = {}
+
+        # Official Android Wireless Debugging QR-pairing lifecycle.
+        self._wireless_pairing_lock = threading.RLock()
+        self._wireless_pairing_state_lock = threading.RLock()
+        self._wireless_pairing_cancel_event = threading.Event()
+        self._wireless_pairing_thread = None
+        self._wireless_pairing_qr_path = ""
+        self._wireless_pairing_password = ""
+        self._wireless_pairing_state = {
+            "status": "idle",
+            "message": "جاهز لإضافة هاتف Android عبر QR.",
+            "qr_url": "",
+            "service_name": "",
+            "device_serial": "",
+        }
 
         self._last_adb_devices = []
         self._last_usb_devices = []
@@ -3053,6 +3075,313 @@ class AppController(QObject):
         if operation.get("engine") is not None:
             operation["engine"] = None
 
+    def _get_wireless_pairing_state(self):
+        with self._wireless_pairing_state_lock:
+            return dict(self._wireless_pairing_state)
+
+    def _set_wireless_pairing_state(self, status, message, **updates):
+        with self._wireless_pairing_state_lock:
+            state = dict(self._wireless_pairing_state)
+            state.update(updates)
+            state["status"] = str(status)
+            state["message"] = str(message)
+            self._wireless_pairing_state = state
+        self.wirelessPairingChanged.emit(dict(state))
+        return state
+
+    @Slot(result="QVariantMap")
+    def getWirelessPairingState(self):
+        return self._get_wireless_pairing_state()
+
+    @Slot(result="QVariantMap")
+    def startWirelessPairing(self):
+        """Show a short-lived AOSP-compatible QR and pair the scanning phone."""
+        with self._wireless_pairing_lock:
+            if (
+                self._wireless_pairing_thread is not None
+                and self._wireless_pairing_thread.is_alive()
+            ):
+                return self._get_wireless_pairing_state()
+
+            alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+            service_name = "studio-" + "".join(
+                secrets.choice(alphabet) for _ in range(10)
+            )
+            password = "".join(
+                secrets.choice(alphabet) for _ in range(16)
+            )
+            qr_path = Path(tempfile.gettempdir()) / (
+                "CNPlayHub-" + service_name + "-pairing.png"
+            )
+
+            try:
+                save_adb_pairing_qr(qr_path, service_name, password)
+            except Exception as exc:
+                return self._set_wireless_pairing_state(
+                    "error",
+                    "تعذر إنشاء رمز QR: " + str(exc),
+                    qr_url="",
+                    service_name="",
+                    device_serial="",
+                )
+
+            self._wireless_pairing_cancel_event.clear()
+            self._wireless_pairing_qr_path = str(qr_path)
+            self._wireless_pairing_password = password
+            qr_url = QUrl.fromLocalFile(str(qr_path)).toString()
+            state = self._set_wireless_pairing_state(
+                "waiting_scan",
+                "امسح رمز QR من الهاتف: تصحيح الأخطاء اللاسلكي ← الاقتران باستخدام QR.",
+                qr_url=qr_url,
+                service_name=service_name,
+                device_serial="",
+            )
+
+            worker = threading.Thread(
+                target=self._wireless_pairing_worker,
+                args=(service_name, password),
+                name="CN-PlayHub-Wireless-QR-Pairing",
+                daemon=True,
+            )
+            self._wireless_pairing_thread = worker
+            worker.start()
+            return state
+
+    def _wait_for_adb_mdns_service(
+        self,
+        service_type,
+        *,
+        instance_name="",
+        host="",
+        timeout_seconds=120,
+    ):
+        deadline = time.monotonic() + max(1, int(timeout_seconds))
+        while time.monotonic() < deadline:
+            if self._wireless_pairing_cancel_event.is_set():
+                return None
+            try:
+                result = self.adb_engine._run(
+                    ["mdns", "services"],
+                    timeout=8,
+                )
+                if result.returncode == 0:
+                    matches = parse_adb_mdns_services(
+                        result.stdout,
+                        service_type,
+                        instance_name=instance_name,
+                        host=host,
+                    )
+                    if matches:
+                        return matches[0]
+            except Exception as exc:
+                print("WIRELESS QR mDNS DISCOVERY WARNING:", type(exc).__name__, str(exc))
+            self._wireless_pairing_cancel_event.wait(1.0)
+        return None
+
+    def _read_adb_online_rows(self):
+        try:
+            result = self.adb_engine._run(["devices", "-l"], timeout=8)
+        except Exception as exc:
+            print("WIRELESS QR DEVICE LIST WARNING:", type(exc).__name__, str(exc))
+            return []
+
+        rows = []
+        for line in (result.stdout or "").splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[1] == "device":
+                rows.append({"serial": parts[0], "details": " ".join(parts[2:])})
+        return rows
+
+    def _connect_qr_paired_phone(self, connect_service):
+        instance = str(connect_service["instance"])
+        endpoint = str(connect_service["endpoint"])
+        expected_aliases = {
+            instance,
+            instance + "._adb-tls-connect._tcp",
+            instance + "_adb-tls-connect._tcp",
+        }
+
+        # Give ADB's own mDNS auto-connect a moment to claim the advertised
+        # transport. Only use an explicit endpoint fallback if it did not.
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            if self._wireless_pairing_cancel_event.is_set():
+                return ""
+            for row in self._read_adb_online_rows():
+                if row["serial"] in expected_aliases:
+                    return row["serial"]
+            self._wireless_pairing_cancel_event.wait(0.5)
+
+        if self._wireless_pairing_cancel_event.is_set():
+            return ""
+
+        connect_result = self.adb_engine._run(
+            ["connect", endpoint],
+            timeout=15,
+        )
+        connect_text = self.adb_engine._result_text(connect_result)
+        print("WIRELESS QR CONNECT RESULT:", connect_text or "no output")
+
+        state_result = self.adb_engine._run(
+            ["-s", endpoint, "get-state"],
+            timeout=8,
+        )
+        if (
+            state_result.returncode == 0
+            and str(state_result.stdout or "").strip().lower() == "device"
+        ):
+            return endpoint
+
+        # ADB may finish its mDNS auto-connect just after the direct fallback.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if self._wireless_pairing_cancel_event.is_set():
+                return ""
+            for row in self._read_adb_online_rows():
+                if row["serial"] in expected_aliases:
+                    return row["serial"]
+            self._wireless_pairing_cancel_event.wait(0.5)
+
+        raise RuntimeError(
+            "تم الاقتران، لكن تعذر إنشاء اتصال ADB. "
+            "تأكد أن الهاتف والكمبيوتر على الشبكة المحلية نفسها وأن خدمة "
+            "Wireless debugging ما زالت مفعّلة."
+        )
+
+    def _wireless_pairing_worker(self, service_name, password):
+        try:
+            self._set_wireless_pairing_state(
+                "waiting_scan",
+                "بانتظار مسح الرمز وظهور خدمة الاقتران على الشبكة المحلية...",
+            )
+            pairing_service = self._wait_for_adb_mdns_service(
+                "_adb-tls-pairing._tcp",
+                instance_name=service_name,
+                timeout_seconds=120,
+            )
+            if self._wireless_pairing_cancel_event.is_set():
+                self._set_wireless_pairing_state(
+                    "cancelled", "تم إلغاء إضافة الهاتف.", qr_url=""
+                )
+                return
+            if pairing_service is None:
+                raise TimeoutError(
+                    "لم نكتشف الهاتف بعد مسح QR. تأكد من تفعيل Wireless debugging "
+                    "وأن الهاتف والكمبيوتر على الشبكة المحلية نفسها."
+                )
+
+            self._set_wireless_pairing_state(
+                "pairing",
+                "تم اكتشاف الهاتف؛ يجري الآن تنفيذ الاقتران المشفّر...",
+            )
+            try:
+                pair_result = self.adb_engine._run(
+                    ["pair", pairing_service["endpoint"], password],
+                    timeout=35,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(
+                    "انتهت مهلة الاقتران؛ أعد فتح شاشة Pair device with QR وحاول مجددًا."
+                ) from None
+            pair_output = self.adb_engine._result_text(pair_result)
+            safe_output = pair_output.replace(password, "[hidden]")
+            if (
+                pair_result.returncode != 0
+                or "successfully paired" not in pair_output.casefold()
+            ):
+                raise RuntimeError(
+                    "فشل الاقتران الرسمي عبر QR. "
+                    + (safe_output or "لم يؤكد ADB نجاح الاقتران.")
+                )
+
+            self._wireless_pairing_password = ""
+            qr_path = self._wireless_pairing_qr_path
+            self._wireless_pairing_qr_path = ""
+            if qr_path:
+                try:
+                    Path(qr_path).unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    print("WIRELESS QR IMAGE CLEANUP WARNING:", str(cleanup_error))
+
+            if self._wireless_pairing_cancel_event.is_set():
+                self._set_wireless_pairing_state(
+                    "cancelled", "تم إلغاء إضافة الهاتف.", qr_url=""
+                )
+                return
+
+            self._set_wireless_pairing_state(
+                "connecting",
+                "نجح الاقتران؛ يجري اكتشاف منفذ الاتصال والاتصال بالهاتف تلقائيًا...",
+            )
+            connect_service = self._wait_for_adb_mdns_service(
+                "_adb-tls-connect._tcp",
+                host=pairing_service["host"],
+                timeout_seconds=35,
+            )
+            if connect_service is None:
+                raise TimeoutError(
+                    "نجح الاقتران، لكن لم تظهر خدمة الاتصال اللاسلكي. "
+                    "اترك Wireless debugging مفعّلًا وحاول تحديث اكتشاف الأجهزة."
+                )
+
+            connected_serial = self._connect_qr_paired_phone(connect_service)
+            if self._wireless_pairing_cancel_event.is_set():
+                self._set_wireless_pairing_state(
+                    "cancelled", "تم إلغاء إضافة الهاتف.", qr_url=""
+                )
+                return
+            if not connected_serial:
+                raise RuntimeError("لم يتم تأكيد اتصال ADB بالهاتف.")
+
+            self.refreshADBDevices()
+            self._set_wireless_pairing_state(
+                "connected",
+                "اكتمل الاقتران والاتصال تلقائيًا. الهاتف جاهز للاستخدام.",
+                device_serial=connected_serial,
+            )
+        except Exception as exc:
+            if self._wireless_pairing_cancel_event.is_set():
+                self._set_wireless_pairing_state(
+                    "cancelled", "تم إلغاء إضافة الهاتف.", qr_url=""
+                )
+            else:
+                print(
+                    "WIRELESS QR PAIRING FAILED:",
+                    type(exc).__name__,
+                    str(exc),
+                )
+                self._set_wireless_pairing_state(
+                    "error",
+                    "تعذرت إضافة الهاتف: " + str(exc),
+                )
+        finally:
+            self._wireless_pairing_password = ""
+            with self._wireless_pairing_lock:
+                if self._wireless_pairing_thread is threading.current_thread():
+                    self._wireless_pairing_thread = None
+
+    @Slot()
+    def cancelWirelessPairing(self):
+        self._wireless_pairing_cancel_event.set()
+        self._wireless_pairing_password = ""
+        path = self._wireless_pairing_qr_path
+        self._wireless_pairing_qr_path = ""
+        if path:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError as exc:
+                print("WIRELESS QR IMAGE CLEANUP WARNING:", str(exc))
+
+        current = self._get_wireless_pairing_state()
+        if current.get("status") in {
+            "waiting_scan", "pairing", "connecting"
+        }:
+            self._set_wireless_pairing_state(
+                "cancelled",
+                "تم إلغاء إضافة الهاتف.",
+                qr_url="",
+            )
+
     @Slot(result=list)
     def getADBDevices(self):
         # Synchronous compatibility entry point for tests/non-UI callers.
@@ -3118,11 +3447,23 @@ class AppController(QObject):
 
     @Slot(list)
     def _apply_adb_devices(self, devices):
-        self._last_adb_devices = [
+        android_devices = [
             dict(item)
             for item in (devices or [])
             if str(item.get("type") or "android") != "usb_storage"
         ]
+        preferred_serials = set(self.selected_devices)
+        if self.selected_device:
+            preferred_serials.add(self.selected_device)
+        preferred_serials.update(
+            serial
+            for serial, operation in self._active_operations.items()
+            if not operation.get("completed", False)
+        )
+        self._last_adb_devices = deduplicate_adb_devices(
+            android_devices,
+            preferred_serials=preferred_serials,
+        )
         return self._apply_all_devices()
 
     def _apply_all_devices(self):
@@ -4731,6 +5072,7 @@ def main():
     engine.warnings.connect(report_qml_warnings)
     controller = AppController()
     app.aboutToQuit.connect(controller.releaseFullscreenProtection)
+    app.aboutToQuit.connect(controller.cancelWirelessPairing)
     engine.rootContext().setContextProperty("appController", controller)
     engine.rootContext().setContextProperty("baseDirectory", str(BASE_DIR))
     engine.load(qml_entry)
@@ -4761,6 +5103,8 @@ def main():
             "fullscreenLockButton",
             "windowUnlockDialog",
             "transferCompletedCountToggle",
+            "wirelessPairingButton",
+            "wirelessPairingDialog",
         )
         found_objects = {
             name: root.findChild(QObject, name)
@@ -4849,6 +5193,18 @@ def main():
         print("DASHBOARD_UI_SMOKE_TEST: PASS")
         print("TRANSFER_PANEL_SIGNAL_SMOKE_TEST: PASS")
         print("HISTORY_SPLIT_UI_SMOKE_TEST: PASS")
+
+        with tempfile.TemporaryDirectory(prefix="cn-playhub-qr-smoke-") as qr_directory:
+            qr_test_path = Path(qr_directory) / "wireless-pairing-test.png"
+            save_adb_pairing_qr(
+                qr_test_path,
+                "studio-CNPlayHub1",
+                "CNPlayHubQR1234",
+            )
+            if not qr_test_path.is_file() or qr_test_path.stat().st_size < 256:
+                print("UI_SMOKE_TEST_FAILED: wireless pairing QR image was not created.", file=sys.stderr)
+                return 8
+        print("WIRELESS_QR_RENDER_SMOKE_TEST: PASS")
         root.setProperty("activePage", "الإعدادات")
         for _ in range(5):
             app.processEvents()

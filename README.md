@@ -26,3 +26,10 @@ The self-contained Windows build workflow replaces the checked-out `platform-too
 ## Versioned game libraries
 
 The eFootball and Grand Theft Auto cards discover version folders directly under each game's folder. Choosing a version is saved in the local settings and is reused by install, copy, launch, close and uninstall actions. Android copy treats `data` and `obb` as separate sources and routes them to `Android/data/<package>` and `Android/obb/<package>`. GTA package IDs are extracted from the selected APK manifest; the app will not guess a package path when it cannot verify one.
+
+
+## Wireless Android pairing
+
+The device picker includes **Add Android phone via QR**. CN PlayHub generates the official Android Studio/AOSP `WIFI:T:ADB` pairing QR, waits for the matching temporary `_adb-tls-pairing._tcp` mDNS service, runs the pairing command without asking the user to type the one-time secret, and then discovers/connects the phone's `_adb-tls-connect._tcp` endpoint. The QR secret is generated for one pairing attempt and is not written to settings or logs. Paired phones remain trusted by Android until the workstation is forgotten or debugging authorizations are revoked.
+
+When Android reports the same physical phone through multiple ADB transports, CN PlayHub uses the phone's hardware serial (`ro.serialno` / `ro.boot.serialno`) to show one device row. It preserves a transport already selected by the user or used by an active operation.
