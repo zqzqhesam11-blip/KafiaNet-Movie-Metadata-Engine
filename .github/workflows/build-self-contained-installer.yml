@@ -7,6 +7,7 @@ on:
       - feature/kafianet-control-pro-fullscreen-guard-20261124
       - feature/pubg-offline-unified-helper-20261125
       - feature/wireless-qr-pairing-20261128
+      - feature/android-transfer-background-protection-20261128
     paths:
       - '.github/workflows/build-self-contained-installer.yml'
       - 'app_qml.py'
@@ -177,6 +178,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Today successful-copy summary simulation failed." }
           python validation\wireless_pairing_simulation.py
           if ($LASTEXITCODE -ne 0) { throw "Wireless QR pairing protocol and device de-duplication simulation failed." }
+          python validation\android_transfer_background_simulation.py
+          if ($LASTEXITCODE -ne 0) { throw "Android transfer background lifecycle simulation failed." }
 
       - name: Validate app source imports
         shell: pwsh
@@ -200,6 +203,7 @@ jobs:
             'android-helper\app\build.gradle',
             'android-helper\app\src\main\java\com\kafianet\shizukubridge\MainActivity.java',
             'android-helper\app\src\main\java\com\kafianet\shizukubridge\HomeActivity.java',
+            'android-helper\app\src\main\java\com\kafianet\shizukubridge\BridgeKeepAliveService.java',
             'android-helper\app\src\main\java\com\kafianet\shizukubridge\EFootballActivity.java',
             'android-helper\app\src\main\java\com\kafianet\shizukubridge\PubgOfflineFinalizeService.java',
             'android-helper\app\src\main\java\com\kafianet\shizukubridge\TransferUserService.java',

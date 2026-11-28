@@ -254,6 +254,7 @@ public final class MainActivity extends Activity {
     }
 
     private void activateBridgeMode() {
+        BridgeKeepAliveService.startSession(this);
         if (!httpServerStarted) {
             httpServerStarted = true;
             startHttpServer();
@@ -733,6 +734,7 @@ public final class MainActivity extends Activity {
                 if (userService != null) userService.cancelCopy(jobId);
                 directStreamDestinations.remove(jobId);
                 result = new JSONObject().put("accepted", true);
+                BridgeKeepAliveService.transferFinished(this, jobId);
             } else if ("POST".equals(method) && "/destination/check".equals(path)) {
                 JSONObject payload = new JSONObject(new String(body, 0, read, StandardCharsets.UTF_8));
                 String destination = payload.getString("destination");
@@ -770,16 +772,21 @@ public final class MainActivity extends Activity {
                     );
                 }
                 directStreamDestinations.put(jobId, destination);
+                BridgeKeepAliveService.transferStarted(this, jobId);
                 result = new JSONObject()
                         .put("accepted", true)
                         .put("state", "running");
             } else if ("POST".equals(method) && "/stream/finish".equals(path)) {
                 JSONObject payload = new JSONObject(new String(body, 0, read, StandardCharsets.UTF_8));
                 String jobId = payload.getString("jobId");
-                if (userService == null) throw new IllegalStateException("Shizuku is not ready");
-                userService.finishDirectStreamJob(jobId);
-                result = new JSONObject(userService.getCopyStatus(jobId));
-                directStreamDestinations.remove(jobId);
+                try {
+                    if (userService == null) throw new IllegalStateException("Shizuku is not ready");
+                    userService.finishDirectStreamJob(jobId);
+                    result = new JSONObject(userService.getCopyStatus(jobId));
+                } finally {
+                    directStreamDestinations.remove(jobId);
+                    BridgeKeepAliveService.transferFinished(this, jobId);
+                }
             } else if ("POST".equals(method) && "/shutdown".equals(path)) {
                 result = new JSONObject().put("accepted", true);
                 shutdownRequested = true;
@@ -996,12 +1003,18 @@ public final class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
             main.post(this::finish);
+            BridgeKeepAliveService.stopSession(this);
         });
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        for (String jobId : directStreamDestinations.keySet()) {
+            BridgeKeepAliveService.transferFinished(this, jobId);
+        }
+        directStreamDestinations.clear();
+        BridgeKeepAliveService.stopSession(this);
         if (shizukuListenersRegistered) {
             Shizuku.removeBinderReceivedListener(binderReceived);
             Shizuku.removeBinderDeadListener(binderDead);

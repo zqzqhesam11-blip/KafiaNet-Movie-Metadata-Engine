@@ -8,6 +8,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -26,6 +27,7 @@ public final class HomeActivity extends Activity {
     private TextView progressLabel;
     private ProgressBar progress;
     private Button retryLocalButton;
+    private boolean localScreenLockApplied = false;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -43,12 +45,14 @@ public final class HomeActivity extends Activity {
     @Override
     protected void onPause() {
         ui.removeCallbacks(progressRefresh);
+        setLocalTransferScreenOn(false);
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
         ui.removeCallbacks(progressRefresh);
+        setLocalTransferScreenOn(false);
         super.onDestroy();
     }
 
@@ -148,9 +152,9 @@ public final class HomeActivity extends Activity {
 
         TextView note = new TextView(this);
         note.setText(
-                "بعد ظهور بدء النقل المحلي ونسبة التقدم، تتم القراءة والكتابة داخل الهاتف نفسه. "
-                + "لا يحتاج هذا الجزء إلى بقاء كابل USB متصلاً. اترك المساعد يعمل ولا تستخدم "
-                + "إيقاف إجباري للتطبيق أثناء النقل."
+                "يمكنك الضغط على زر Home أثناء النقل؛ سيواصل المساعد العمل في الخلفية وتبقى الشاشة "
+                + "مستيقظة حتى اكتمال النسخ. لا يحتاج النقل المحلي إلى بقاء كابل USB متصلاً بعد ظهور "
+                + "نسبة التقدم. لا تستخدم إيقاف إجباري للتطبيق أثناء النقل."
         );
         note.setTextSize(12);
         note.setPadding(0, 20, 0, 0);
@@ -181,6 +185,8 @@ public final class HomeActivity extends Activity {
         SharedPreferences prefs = getSharedPreferences(
                 PubgOfflineFinalizeService.PREFS, MODE_PRIVATE
         );
+        // Keep the visible progress screen awake only while local copy is active.
+        setLocalTransferScreenOn("preparing".equals(state) || "running".equals(state));
         String state = prefs.getString(PubgOfflineFinalizeService.KEY_STATE, "idle");
         int percent = prefs.getInt(PubgOfflineFinalizeService.KEY_PERCENT, 0);
         int copied = prefs.getInt(PubgOfflineFinalizeService.KEY_COPIED_FILES, 0);
@@ -218,6 +224,16 @@ public final class HomeActivity extends Activity {
     }
 
     private String formatBytes(long value) {
+    private void setLocalTransferScreenOn(boolean enabled) {
+        if (localScreenLockApplied == enabled) return;
+        localScreenLockApplied = enabled;
+        if (enabled) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    }
+
         double amount = Math.max(0L, value);
         String[] units = {"B", "KB", "MB", "GB", "TB"};
         int index = 0;

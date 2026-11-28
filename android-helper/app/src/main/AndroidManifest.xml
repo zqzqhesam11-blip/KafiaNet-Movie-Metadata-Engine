@@ -44,6 +44,12 @@
             android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />
 
+        <service
+            android:name=".BridgeKeepAliveService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="dataSync" />
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"

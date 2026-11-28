@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/pubg-offline-unified-helper-20261125
+      - feature/android-transfer-background-protection-20261128
     paths:
       - 'android-helper/**'
       - '.github/workflows/build-pubg-saf-helper-only.yml'
@@ -50,9 +51,13 @@ jobs:
           grep -F "targetSdk 29" android-helper/app/build.gradle
           grep -F 'Intent.ACTION_OPEN_DOCUMENT_TREE' android-helper/app/src/main/java/com/kafianet/shizukubridge/MainActivity.java
           grep -F 'takePersistableUriPermission' android-helper/app/src/main/java/com/kafianet/shizukubridge/MainActivity.java
+          test -s android-helper/app/src/main/java/com/kafianet/shizukubridge/BridgeKeepAliveService.java
           grep -F 'PubgOfflineFinalizeService' android-helper/app/src/main/java/com/kafianet/shizukubridge/PubgOfflineFinalizeService.java
           grep -F 'EFootballActivity' android-helper/app/src/main/AndroidManifest.xml
           grep -F 'HomeActivity' android-helper/app/src/main/AndroidManifest.xml
+          grep -F 'BridgeKeepAliveService' android-helper/app/src/main/AndroidManifest.xml
+          grep -F 'SCREEN_DIM_WAKE_LOCK' android-helper/app/src/main/java/com/kafianet/shizukubridge/PubgOfflineFinalizeService.java
+          grep -F 'START_STICKY' android-helper/app/src/main/java/com/kafianet/shizukubridge/BridgeKeepAliveService.java
 
       - name: Run helper unit tests and build release APK
         run: |

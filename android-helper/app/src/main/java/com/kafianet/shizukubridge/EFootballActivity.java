@@ -60,6 +60,7 @@ public final class EFootballActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        BridgeKeepAliveService.startSession(this);
         sessionToken = UUID.randomUUID().toString().replace("-", "");
         readSession(getIntent());
         buildUi();
@@ -419,6 +420,7 @@ public final class EFootballActivity extends Activity {
                     writeResponse(client, 400, new JSONObject().put("error", "invalid job metadata"));
                     return;
                 }
+                BridgeKeepAliveService.transferStarted(this, activeJob);
                 writeResponse(client, 200, new JSONObject().put("accepted", true).put("state", "running"));
                 return;
             }
@@ -456,6 +458,7 @@ public final class EFootballActivity extends Activity {
                         .put("error", finishError);
                 activeJob = "";
                 writeResponse(client, 200, result);
+                BridgeKeepAliveService.transferFinished(this, jobId);
                 return;
             }
 
@@ -689,6 +692,12 @@ public final class EFootballActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        String unfinishedJob = activeJob;
+        activeJob = "";
+        if (!unfinishedJob.isEmpty()) {
+            BridgeKeepAliveService.transferFinished(this, unfinishedJob);
+        }
+        BridgeKeepAliveService.stopSession(this);
         try { if (serverSocket != null) serverSocket.close(); } catch (Throwable ignored) { }
         workers.shutdownNow();
     }

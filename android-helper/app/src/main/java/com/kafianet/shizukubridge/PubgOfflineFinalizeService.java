@@ -68,6 +68,7 @@ public final class PubgOfflineFinalizeService extends Service {
     private volatile String currentFile = "";
     private volatile String gameName = "PUBG Mobile";
     private PowerManager.WakeLock transferWakeLock;
+    private PowerManager.WakeLock screenWakeLock;
 
     @Override
     public void onCreate() {
@@ -561,25 +562,52 @@ public final class PubgOfflineFinalizeService extends Service {
         if (worker != null) worker.shutdownNow();
     }
 
+    @SuppressWarnings("deprecation")
     private void acquireTransferWakeLock() {
         PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
         if (power == null) throw new IllegalStateException("خدمة إدارة الطاقة غير متاحة.");
-        PowerManager.WakeLock lock = power.newWakeLock(
+
+        PowerManager.WakeLock cpuLock = power.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
-                "KafiaNetAssistant:LocalGameTransfer"
+                "KafiaNetAssistant:LocalGameTransferCpu"
         );
-        lock.setReferenceCounted(false);
-        lock.acquire();
-        transferWakeLock = lock;
+        cpuLock.setReferenceCounted(false);
+        cpuLock.acquire(12L * 60L * 60L * 1000L);
+        transferWakeLock = cpuLock;
+
+        try {
+            PowerManager.WakeLock displayLock = power.newWakeLock(
+                    PowerManager.SCREEN_DIM_WAKE_LOCK,
+                    "KafiaNetAssistant:LocalGameTransferScreen"
+            );
+            displayLock.setReferenceCounted(false);
+            displayLock.acquire(12L * 60L * 60L * 1000L);
+            screenWakeLock = displayLock;
+        } catch (Throwable screenFailure) {
+            android.util.Log.e(
+                    "KafiaNetLocalCopy",
+                    "Could not keep the display awake during local copy",
+                    screenFailure
+            );
+        }
     }
 
     private void releaseTransferWakeLock() {
-        PowerManager.WakeLock lock = transferWakeLock;
-        transferWakeLock = null;
-        if (lock != null && lock.isHeld()) {
-            try { lock.release(); }
+        PowerManager.WakeLock displayLock = screenWakeLock;
+        screenWakeLock = null;
+        if (displayLock != null && displayLock.isHeld()) {
+            try { displayLock.release(); }
             catch (Throwable failure) {
-                android.util.Log.w("KafiaNetLocalCopy", "WakeLock release warning", failure);
+                android.util.Log.w("KafiaNetLocalCopy", "Screen wake lock release warning", failure);
+            }
+        }
+
+        PowerManager.WakeLock cpuLock = transferWakeLock;
+        transferWakeLock = null;
+        if (cpuLock != null && cpuLock.isHeld()) {
+            try { cpuLock.release(); }
+            catch (Throwable failure) {
+                android.util.Log.w("KafiaNetLocalCopy", "CPU wake lock release warning", failure);
             }
         }
     }
