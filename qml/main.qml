@@ -1450,6 +1450,20 @@ ApplicationWindow {
         onTriggered: window.refreshDailyTransferCount()
     }
 
+    // Re-discover already-authorized wireless phones after Wi-Fi/ADB reconnects.
+    // refreshADBDevices guards against overlapping workers and keeps the UI thread free.
+    Timer {
+        id: adbAutoDiscoveryTimer
+        objectName: "adbAutoDiscoveryTimer"
+        interval: 15000
+        running: true
+        repeat: true
+        onTriggered: {
+            if (appController)
+                appController.refreshADBDevices()
+        }
+    }
+
     Component.onCompleted: {
         window.refreshDashboardGameCount()
         window.refreshDailyTransferCount()

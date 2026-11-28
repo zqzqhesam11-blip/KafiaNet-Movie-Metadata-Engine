@@ -3333,7 +3333,9 @@ class AppController(QObject):
             if not connected_serial:
                 raise RuntimeError("لم يتم تأكيد اتصال ADB بالهاتف.")
 
-            self.refreshADBDevices()
+            # Complete a fresh discovery from this worker instead of relying on
+            # the periodic worker slot (which may already be occupied).
+            self._discover_adb_devices()
             self._set_wireless_pairing_state(
                 "connected",
                 "اكتمل الاقتران والاتصال تلقائيًا. الهاتف جاهز للاستخدام.",
@@ -5105,6 +5107,7 @@ def main():
             "transferCompletedCountToggle",
             "wirelessPairingButton",
             "wirelessPairingDialog",
+            "adbAutoDiscoveryTimer",
         )
         found_objects = {
             name: root.findChild(QObject, name)
